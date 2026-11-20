@@ -1,0 +1,295 @@
+import AudioToolbox
+import Foundation
+import Observation
+import UIKit
+
+/// One row of the dashboard stream table.
+struct StreamRowModel: Identifiable, Equatable {
+    enum Dot: Equatable { case level(HealthLevel), neutral }
+    let id: String
+    let name: String
+    let rate: String
+    let samples: String
+    let age: String
+    let dot: Dot
+    let detail: String?
+}
+
+struct DashboardSnapshot: Equatable {
+    var elapsed: TimeInterval = 0
+    var rows: [StreamRowModel] = []
+    var deviceLine = ""
+    var deviceLevel: HealthLevel = .ok
+    var vertical: [Double] = []
+    var lateral: [Double] = []
+    var roughness: Double = 0
+    var msdv: Double = 0
+    var lastSickness: Int?
+}
+
+/// Main-thread view model for the recording dashboard. Refreshes at 8 Hz (spec: 5–10 Hz, never
+/// per sample), evaluates the warning rules, alerts on new problems, drives the sickness prompt.
+@MainActor
+@Observable
+final class RecordingController {
+    let session: RecordingSession
+    private(set) var snapshot = DashboardSnapshot()
+    private(set) var issues: [HealthIssue] = []
+    private(set) var overall: HealthLevel = .ok
+    private(set) var toast: String?
+    private(set) var sicknessPromptActive = false
+    private(set) var sicknessManualOpen = false
+    private(set) var sicknessRemaining: Int = 0
+    private(set) var activeSurface: SurfaceKind?
+    private(set) var activeSegments: Set<SegmentKind> = []
+    private(set) var finished: SessionMetadata?
+    private(set) var trackPoints: [TrackBuffer.Point] = []
+
+    @ObservationIgnored private var timer: Timer?
+    @ObservationIgnored private var scheduler: SicknessScheduler
+    @ObservationIgnored private var knownIssues: [String: HealthLevel] = [:]
+    @ObservationIgnored private var toastExpiry: Date?
+    @ObservationIgnored private var trackVersion = -1
+    @ObservationIgnored private var tickCount = 0
+    @ObservationIgnored private let haptics = UINotificationFeedbackGenerator()
+    @ObservationIgnored private let impact = UIImpactFeedbackGenerator(style: .heavy)
+
+    static let refreshHz = 8.0
+
+    init(session: RecordingSession, sicknessInterval: TimeInterval = 120, sicknessTimeout: TimeInterval = 30) {
+        self.session = session
+        scheduler = SicknessScheduler(start: session.startUp, interval: sicknessInterval, timeout: sicknessTimeout)
+    }
+
+    // MARK: Lifecycle
+
+    func start() {
+        UIApplication.shared.isIdleTimerDisabled = true // screen never auto-locks while recording
+        session.start()
+        haptics.prepare()
+        impact.prepare()
+        let t = Timer(timeInterval: 1 / Self.refreshHz, repeats: true) { [weak self] _ in
+            MainActor.assumeIsolated { self?.refresh() }
+        }
+        RunLoop.main.add(t, forMode: .common) // keeps ticking while scrolling
+        timer = t
+        refresh()
+    }
+
+    func stop() {
+        guard finished == nil else { return }
+        timer?.invalidate()
+        timer = nil
+        if scheduler.isPromptActive {
+            session.addLabel(.sicknessMissed, note: "recording stopped")
+        }
+        sicknessPromptActive = false
+        sicknessManualOpen = false
+        finished = session.stop()
+        UIApplication.shared.isIdleTimerDisabled = false
+        haptics.notificationOccurred(.success)
+    }
+
+    var isFinished: Bool { finished != nil }
+
+    // MARK: Labels
+
+    func label(_ type: LabelType, value: String? = nil, note: String? = nil, toastText: String) {
+        let l = session.addLabel(type, value: value, note: note)
+        confirm(toastText, at: l.date)
+    }
+
+    func toggleSurface(_ s: SurfaceKind) {
+        let l = session.toggleSurface(s)
+        activeSurface = session.labels.activeSurface
+        confirm(l.type == .surfaceStart ? "Surface: \(s.shortName) START" : "Surface: \(s.shortName) END", at: l.date)
+    }
+
+    func toggleSegment(_ s: SegmentKind) {
+        let l = session.toggleSegment(s)
+        activeSegments = session.labels.activeSegments
+        confirm(l.type == .segmentStart ? "\(s.shortName) START" : "\(s.shortName) END", at: l.date)
+    }
+
+    func openManualSickness() {
+        sicknessManualOpen = true
+    }
+
+    func closeManualSickness() {
+        sicknessManualOpen = false
+    }
+
+    func rateSickness(_ value: Int) {
+        let prompted = sicknessPromptActive
+        session.addLabel(.sickness, value: String(value), note: prompted ? "prompt" : "manual")
+        scheduler.answered()
+        sicknessPromptActive = false
+        sicknessManualOpen = false
+        snapshot.lastSickness = value
+        confirm("Sickness \(value) logged", at: Date())
+    }
+
+    private func confirm(_ text: String, at date: Date) {
+        impact.impactOccurred()
+        let f = DateFormatter()
+        f.dateFormat = "HH:mm:ss"
+        toast = "\(text) · \(f.string(from: date))"
+        toastExpiry = Date().addingTimeInterval(2.5)
+    }
+
+    // MARK: Refresh (8 Hz)
+
+    private func refresh() {
+        tickCount += 1
+        let now = session.timeBase.uptimeNow()
+
+        // Health
+        let inputs = session.healthInputs(now: now)
+        let newIssues = HealthEvaluator.evaluate(inputs)
+        handleIssueTransitions(newIssues)
+        issues = newIssues
+        overall = HealthEvaluator.overall(newIssues)
+
+        // Sickness prompt
+        switch scheduler.tick(now: now) {
+        case .prompt:
+            session.addLabel(.sicknessPrompt)
+            sicknessPromptActive = true
+            sicknessManualOpen = false
+            haptics.notificationOccurred(.warning)
+            AudioServicesPlaySystemSound(1007)
+        case .missed:
+            session.addLabel(.sicknessMissed)
+            session.log(.info, "sickness prompt missed")
+            sicknessPromptActive = false
+        case nil:
+            break
+        }
+        sicknessRemaining = Int((scheduler.remaining(now: now) ?? 0).rounded(.up))
+
+        if let exp = toastExpiry, Date() > exp { toast = nil; toastExpiry = nil }
+
+        snapshot = buildSnapshot(now: now, inputs: inputs)
+
+        // Track for the mini map: at most 1 Hz
+        if tickCount % Int(Self.refreshHz) == 1 {
+            let cur = session.track.current
+            if cur.version != trackVersion {
+                trackVersion = cur.version
+                trackPoints = cur.points
+            }
+        }
+    }
+
+    private func handleIssueTransitions(_ new: [HealthIssue]) {
+        var current: [String: HealthLevel] = [:]
+        var newProblem = false
+        for i in new {
+            current[i.key] = i.level
+            if knownIssues[i.key] != i.level {
+                session.log(i.level == .problem ? .problem : .warn, i.message)
+                if i.level == .problem { newProblem = true }
+            }
+        }
+        for (key, _) in knownIssues where current[key] == nil {
+            session.log(.info, "resolved: \(key)")
+        }
+        knownIssues = current
+        if newProblem {
+            // spec: strong haptic + sound on PROBLEM
+            haptics.notificationOccurred(.error)
+            AudioServicesPlayAlertSound(1005)
+        }
+    }
+
+    private func buildSnapshot(now: TimeInterval, inputs: HealthInputs) -> DashboardSnapshot {
+        var s = DashboardSnapshot()
+        s.elapsed = now - session.startUp
+        s.lastSickness = session.labels.lastSickness?.value
+        let st = inputs.streams
+
+        func fmtRate(_ r: Double) -> String { r >= 10 ? String(format: "%.1f Hz", r) : String(format: "%.2f Hz", r) }
+        func fmtAge(_ a: TimeInterval?) -> String { a.map { String(format: "%.1fs", $0) } ?? "–" }
+        func fmtCount(_ n: Int64) -> String { n.formatted(.number.grouping(.automatic).locale(Locale(identifier: "en_US"))) }
+        func dot(_ id: StreamID) -> StreamRowModel.Dot {
+            guard let snap = st[id], snap.available else { return .neutral }
+            return .level(HealthEvaluator.level(for: id, in: issues))
+        }
+
+        var rows: [StreamRowModel] = []
+        for id in [StreamID.deviceMotion, .accel, .gyro, .mag] {
+            guard let snap = st[id] else { continue }
+            if !snap.available {
+                rows.append(.init(id: id.rawValue, name: id.displayName, rate: "n/a", samples: "", age: "", dot: .neutral, detail: nil))
+                continue
+            }
+            rows.append(.init(id: id.rawValue, name: id.displayName, rate: fmtRate(snap.rateHz), samples: fmtCount(snap.count),
+                              age: fmtAge(snap.age), dot: dot(id), detail: nil))
+        }
+        if let g = st[.gps] {
+            let latest = session.latest
+            var detail: String?
+            if let fix = latest.gps {
+                let kmh = fix.speed >= 0 ? String(format: "%.0f km/h", fix.speed * 3.6) : "– km/h"
+                detail = String(format: "hAcc %.1f m · ", fix.hAcc) + kmh
+            }
+            let age = latest.gpsFixUp.map { now - $0 }
+            rows.append(.init(id: "gps", name: "GPS", rate: g.available ? fmtRate(g.rateHz) : "n/a", samples: fmtCount(g.count),
+                              age: fmtAge(age), dot: g.available ? .level(HealthEvaluator.level(for: .gps, in: issues)) : .neutral,
+                              detail: detail))
+        }
+        if let b = st[.barometer] {
+            var detail: String?
+            if let a = session.latest.altimeter {
+                detail = String(format: "%.2f kPa · rel %.1f m", a.pressureKPa, a.relativeAltitudeM)
+            }
+            rows.append(.init(id: "baro", name: "Barometer", rate: b.available ? fmtRate(b.rateHz) : "n/a",
+                              samples: b.available ? fmtCount(b.count) : "", age: b.available ? fmtAge(b.age) : "",
+                              dot: b.available ? .level(HealthEvaluator.level(for: .barometer, in: issues)) : .neutral, detail: detail))
+        }
+        if let a = st[.activity] {
+            let act = session.latest.activity?.summary ?? (a.available ? "waiting…" : "n/a")
+            rows.append(.init(id: "activity", name: "Activity", rate: a.available ? "auto" : "n/a", samples: act, age: "",
+                              dot: .neutral, detail: nil))
+        }
+        // Audio
+        let audioOn = session.audioRecording
+        var audioDetail: String?
+        if let lvl = session.audioLevel, audioOn {
+            let bars = max(0, min(6, Int((lvl.avgDbfs + 60) / 10)))
+            audioDetail = String(format: "level %.0f dBFS ", lvl.avgDbfs) + String(repeating: "▮", count: bars) + String(repeating: "▯", count: 6 - bars)
+        }
+        rows.append(.init(id: "audio", name: "Audio rec", rate: audioOn ? "ON 48k" : "OFF",
+                          samples: ByteFormat.string(session.audioBytes), age: "",
+                          dot: inputs.audioExpected ? .level(audioOn ? .ok : .problem) : .neutral, detail: audioDetail))
+        // Disk
+        let written = session.writer.totalCSVBytes + session.audioBytes
+        let free = inputs.freeDiskBytes ?? -1
+        let diskLevel = max(issues.first { $0.key.hasPrefix("disk.") }?.level ?? .ok, .ok)
+        rows.append(.init(id: "disk", name: "Disk written", rate: ByteFormat.string(written),
+                          samples: free >= 0 ? "free \(ByteFormat.string(free))" : "", age: "", dot: .level(diskLevel), detail: nil))
+        // Upload
+        if let up = session.uploadStatus, up.enabled {
+            let last = up.lastSuccessUp.map { String(format: "last OK %.1fs", now - $0) } ?? "no upload yet"
+            let lvl = issues.first { $0.key.hasPrefix("upload") }?.level ?? .ok
+            rows.append(.init(id: "upload", name: "Upload", rate: "queue \(up.queueCount)", samples: last, age: "",
+                              dot: .level(lvl), detail: up.lastError))
+        } else {
+            rows.append(.init(id: "upload", name: "Upload", rate: "OFF", samples: "local only", age: "", dot: .neutral, detail: nil))
+        }
+        s.rows = rows
+
+        // Device line
+        let d = session.deviceStatus
+        let batt = d.batteryLevel >= 0 ? "\(Int(d.batteryLevel * 100))%" : "?%"
+        s.deviceLine = "Battery \(batt)\(d.isCharging ? " ⚡" : "") · Thermal \(d.thermal.rawValue) · LPM \(d.lowPowerMode ? "ON" : "off")"
+        s.deviceLevel = issues.filter { ["thermal", "lowpower", "battery"].contains($0.key) }.map(\.level).max() ?? .ok
+
+        let live = session.live.snapshot()
+        s.vertical = live.vertical
+        s.lateral = live.lateral
+        s.roughness = live.roughnessRms
+        s.msdv = live.msdv
+        return s
+    }
+}

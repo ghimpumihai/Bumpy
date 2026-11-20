@@ -156,6 +156,13 @@ final class BatchAccumulator: @unchecked Sendable {
 
     var batchesCreated: Int { seq.current }
 
+    /// Drops the current window without building a batch or consuming a sequence number (upload
+    /// OFF): batchSeq stays contiguous over the batches actually queued, so the §6.1 `batchCount`
+    /// tells the backend exactly which batches to expect.
+    func discard() {
+        pending.withLock { $0 = Pending() }
+    }
+
     /// Takes everything collected since the previous drain and builds batch `batchSeq` (0-based,
     /// strictly increasing). `t0Up` is the window start.
     func drain(t0Up: Double, t0UtcMs: Double, device: DeviceStatus) -> IngestBatch {

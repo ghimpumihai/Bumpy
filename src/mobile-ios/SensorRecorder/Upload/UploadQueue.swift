@@ -108,16 +108,66 @@ final class UploadQueue: @unchecked Sendable {
 
     // MARK: Enqueue
 
-    static func fileName(createdUtcMs: Int64, sessionId: String, seq: Int) -> String {
-        String(format: "%013lld", createdUtcMs) + "_" + sessionId + "_" + String(format: "%07d", seq) + ".json.gz"
+    /// What a queue file carries (spec §6 batches, §6.1 session metadata).
+    enum Item: Equatable {
+        case batch(seq: Int)
+        case sessionMeta(phase: MetaPhase)
     }
 
-    static func parse(fileName: String) -> (createdMs: Int64, sessionId: String, seq: Int)? {
+    enum MetaPhase: String, Equatable { case start, stop }
+
+    struct QueueFile: Equatable {
+        let createdMs: Int64
+        let sessionId: String
+        let item: Item
+        var idempotencyKey: String {
+            switch item {
+            case .batch(let seq): return "\(sessionId):\(seq)"
+            case .sessionMeta(let phase): return "\(sessionId):meta-\(phase.rawValue)"
+            }
+        }
+    }
+
+    /// `<createdMs:13>_<sessionId>_<seq:7>.json.gz` for batches, `<createdMs:13>_<sessionId>_meta-<phase>.json.gz`
+    /// for session metadata. Lexical order = send order: created time first; at an equal millisecond a
+    /// batch (digits) sorts before metadata ("m"), so the Stop copy follows the last batch.
+    static func fileName(createdUtcMs: Int64, sessionId: String, item: Item) -> String {
+        let suffix: String
+        switch item {
+        case .batch(let seq): suffix = String(format: "%07d", seq)
+        case .sessionMeta(let phase): suffix = "meta-" + phase.rawValue
+        }
+        return String(format: "%013lld", createdUtcMs) + "_" + sessionId + "_" + suffix + ".json.gz"
+    }
+
+    static func fileName(createdUtcMs: Int64, sessionId: String, seq: Int) -> String {
+        fileName(createdUtcMs: createdUtcMs, sessionId: sessionId, item: .batch(seq: seq))
+    }
+
+    static func parseItem(fileName: String) -> QueueFile? {
         guard fileName.hasSuffix(".json.gz") else { return nil }
         let stem = fileName.dropLast(".json.gz".count)
         let parts = stem.split(separator: "_")
-        guard parts.count == 3, let ms = Int64(parts[0]), let seq = Int(parts[2]) else { return nil }
-        return (ms, String(parts[1]), seq)
+        guard parts.count == 3, let ms = Int64(parts[0]) else { return nil }
+        let tail = String(parts[2])
+        if let seq = Int(tail) { return QueueFile(createdMs: ms, sessionId: String(parts[1]), item: .batch(seq: seq)) }
+        if tail.hasPrefix("meta-"), let phase = MetaPhase(rawValue: String(tail.dropFirst("meta-".count))) {
+            return QueueFile(createdMs: ms, sessionId: String(parts[1]), item: .sessionMeta(phase: phase))
+        }
+        return nil
+    }
+
+    /// Batch files only (nil for metadata files).
+    static func parse(fileName: String) -> (createdMs: Int64, sessionId: String, seq: Int)? {
+        guard let f = parseItem(fileName: fileName), case .batch(let seq) = f.item else { return nil }
+        return (f.createdMs, f.sessionId, seq)
+    }
+
+    /// Queues the session metadata (§6.1): `PUT /api/ingest/sessions/{id}` with the gzipped JSON body.
+    func enqueueSessionMetadata(json: Data, sessionId: String, phase: MetaPhase, createdUtcMs: Int64) throws {
+        let name = Self.fileName(createdUtcMs: createdUtcMs, sessionId: sessionId, item: .sessionMeta(phase: phase))
+        try Gzip.compress(json).write(to: directory.appendingPathComponent(name), options: .atomic)
+        statusBox.withLock { $0.queueCount += 1 }
     }
 
     /// Writes the gzipped batch atomically (temp + rename): a half-written file is never uploaded.
@@ -138,7 +188,7 @@ final class UploadQueue: @unchecked Sendable {
     }
 
     func pendingCount(sessionId: String) -> Int {
-        pendingFiles().filter { Self.parse(fileName: $0.lastPathComponent)?.sessionId == sessionId }.count
+        pendingFiles().filter { Self.parseItem(fileName: $0.lastPathComponent)?.sessionId == sessionId }.count
     }
 
     func failedFiles() -> [URL] {
@@ -155,7 +205,7 @@ final class UploadQueue: @unchecked Sendable {
     /// Deletes queued batches (operator action; session files are NOT affected). Optionally only
     /// one session's batches. Safe while the loop runs: a batch being sent is simply gone afterwards.
     func clearPending(sessionId: String? = nil) {
-        for f in pendingFiles() where sessionId == nil || Self.parse(fileName: f.lastPathComponent)?.sessionId == sessionId {
+        for f in pendingFiles() where sessionId == nil || Self.parseItem(fileName: f.lastPathComponent)?.sessionId == sessionId {
             do { try FileManager.default.removeItem(at: f) } catch {
                 onEvent?(.warn, "upload: could not delete \(f.lastPathComponent): \(error.localizedDescription)")
             }
@@ -175,15 +225,20 @@ final class UploadQueue: @unchecked Sendable {
     // MARK: Processing
 
     func makeRequest(for file: URL, config: UploadConfig) throws -> URLRequest {
-        guard let url = config.ingestURL else { throw URLError(.badURL) }
+        guard let q = Self.parseItem(fileName: file.lastPathComponent) else { throw URLError(.cannotDecodeContentData) }
+        let url: URL?
+        let method: String
+        switch q.item {
+        case .batch: url = config.ingestURL; method = "POST"
+        case .sessionMeta: url = config.sessionURL(q.sessionId); method = "PUT"
+        }
+        guard let url else { throw URLError(.badURL) }
         var r = URLRequest(url: url)
-        r.httpMethod = "POST"
+        r.httpMethod = method
         r.setValue("application/json", forHTTPHeaderField: "Content-Type")
         r.setValue("gzip", forHTTPHeaderField: "Content-Encoding")
         r.setValue(config.deviceKey, forHTTPHeaderField: "x-device-key")
-        if let p = Self.parse(fileName: file.lastPathComponent) {
-            r.setValue("\(p.sessionId):\(p.seq)", forHTTPHeaderField: "x-idempotency-key")
-        }
+        r.setValue(q.idempotencyKey, forHTTPHeaderField: "x-idempotency-key")
         r.httpBody = try Data(contentsOf: file)
         r.timeoutInterval = 15
         return r
@@ -271,9 +326,9 @@ final class UploadQueue: @unchecked Sendable {
             h = h.name == name ? (name, h.count + 1) : (name, 1)
             return h.count
         }
-        guard count >= Self.maxServerErrorsPerBatch, let p = Self.parse(fileName: name) else { return }
+        guard count >= Self.maxServerErrorsPerBatch, let p = Self.parseItem(fileName: name) else { return }
         let nowMs = Int64(Date().timeIntervalSince1970 * 1000)
-        let dest = directory.appendingPathComponent(Self.fileName(createdUtcMs: nowMs, sessionId: p.sessionId, seq: p.seq))
+        let dest = directory.appendingPathComponent(Self.fileName(createdUtcMs: nowMs, sessionId: p.sessionId, item: p.item))
         if (try? FileManager.default.moveItem(at: file, to: dest)) != nil {
             headFailures.withLock { $0 = ("", 0) }
             onEvent?(.warn, "upload: \(name) failed \(count)× on the server, moved to the back of the queue")
@@ -329,9 +384,9 @@ final class UploadQueue: @unchecked Sendable {
     // MARK: Preflight connectivity test (warning only)
 
     /// Probe `POST {API}/api/ingest` with a deliberately invalid body (`{"probe":true}`, gzipped,
-    /// with the device key). The ingest Lambda checks the key first and the schema second, so:
+    /// with the device key). The ingest function checks the key first and the schema second, so:
     /// 400/422 = reachable + key accepted (the probe is rejected, never stored); 401/403 = key
-    /// rejected; 404 = wrong base URL. There is no `/api/health` route in the AWS plan. Never blocks.
+    /// rejected; 404 = wrong base URL. There is no `/api/health` route (02 §6). Never blocks.
     static func testConnection(config: UploadConfig, transport: HTTPTransport = URLSessionTransport()) async -> (ok: Bool, detail: String) {
         guard let url = config.ingestURL else { return (false, "upload off (no URL)") }
         var r = URLRequest(url: url)

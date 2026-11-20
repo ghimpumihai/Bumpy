@@ -263,3 +263,104 @@ final class AllFilesRowShapeTests: XCTestCase {
         return n
     }
 }
+
+// MARK: - Spec §6.1 session metadata through the upload queue
+
+final class SessionMetadataUploadTests: XCTestCase {
+    func testFileNamesSortIntoSendOrder() {
+        let id = "S"
+        let start = UploadQueue.fileName(createdUtcMs: 1_000, sessionId: id, item: .sessionMeta(phase: .start))
+        let b0 = UploadQueue.fileName(createdUtcMs: 3_000, sessionId: id, item: .batch(seq: 0))
+        let bLast = UploadQueue.fileName(createdUtcMs: 9_000, sessionId: id, item: .batch(seq: 3))
+        let stop = UploadQueue.fileName(createdUtcMs: 9_000, sessionId: id, item: .sessionMeta(phase: .stop)) // same ms
+        XCTAssertEqual([stop, bLast, b0, start].sorted(), [start, b0, bLast, stop])
+        XCTAssertEqual(UploadQueue.parseItem(fileName: stop)?.item, .sessionMeta(phase: .stop))
+        XCTAssertNil(UploadQueue.parse(fileName: stop), "batch-only parser ignores metadata files")
+        XCTAssertEqual(UploadQueue.parseItem(fileName: b0)?.idempotencyKey, "S:0")
+        XCTAssertEqual(UploadQueue.parseItem(fileName: start)?.idempotencyKey, "S:meta-start")
+        XCTAssertNil(UploadQueue.parseItem(fileName: "1_S_meta-pause.json.gz"))
+    }
+
+    func testMetadataIsSentAsPUTToTheSessionURL() async throws {
+        let t = MockTransport()
+        let q = UploadQueue(directory: try makeTempDir().appendingPathComponent("q"), transport: t,
+                            config: { UploadConfig(baseURL: URL(string: "https://fn.test/base"), deviceKey: "k") })
+        try q.enqueueSessionMetadata(json: Data(#"{"sessionId":"S"}"#.utf8), sessionId: "S", phase: .start, createdUtcMs: 1)
+        try q.enqueue(gzippedBody: Gzip.compress(Data("{}".utf8)), sessionId: "S", seq: 0, createdUtcMs: 2)
+        _ = await q.processOnce()
+        _ = await q.processOnce()
+        XCTAssertEqual(t.requests.map(\.httpMethod), ["PUT", "POST"])
+        let put = t.requests[0]
+        XCTAssertEqual(put.url?.absoluteString, "https://fn.test/base/api/ingest/sessions/S")
+        XCTAssertEqual(put.value(forHTTPHeaderField: "Content-Encoding"), "gzip")
+        XCTAssertEqual(put.value(forHTTPHeaderField: "x-device-key"), "k")
+        XCTAssertEqual(put.value(forHTTPHeaderField: "x-idempotency-key"), "S:meta-start")
+        XCTAssertEqual(String(decoding: try Gzip.decompress(try XCTUnwrap(put.httpBody)), as: UTF8.self), #"{"sessionId":"S"}"#)
+        XCTAssertEqual(t.requests[1].url?.absoluteString, "https://fn.test/base/api/ingest")
+        XCTAssertTrue(q.pendingFiles().isEmpty)
+    }
+
+    func testPoisonRotationKeepsTheItemKind() async throws {
+        let t = MockTransport()
+        let q = UploadQueue(directory: try makeTempDir().appendingPathComponent("q"), transport: t,
+                            config: { UploadConfig(baseURL: URL(string: "https://fn.test"), deviceKey: "k") })
+        try q.enqueueSessionMetadata(json: Data("{}".utf8), sessionId: "S", phase: .stop, createdUtcMs: 1)
+        t.enqueue(500, 500, 500, 500, 500)
+        for _ in 0..<5 { _ = await q.processOnce() }
+        XCTAssertEqual(q.pendingFiles().compactMap { UploadQueue.parseItem(fileName: $0.lastPathComponent)?.item },
+                       [.sessionMeta(phase: .stop)])
+    }
+
+    private func runSession(uploadOn: Locked<Bool>, seconds: TimeInterval, toggleOnAfter: TimeInterval? = nil) throws
+        -> (RecordingSession, UploadQueue) {
+        let q = UploadQueue(directory: try makeTempDir().appendingPathComponent("q"), transport: MockTransport(),
+                            config: { uploadOn.current ? UploadConfig(baseURL: URL(string: "https://fn.test"), deviceKey: "k") : .disabled })
+        let deps = RecordingSession.Dependencies(
+            motion: SyntheticMotionSource(), location: nil, altimeter: nil, activity: nil, audio: nil,
+            deviceStatus: FakeDeviceStatus(), uploadQueue: q, deviceId: "D", appVersion: "t",
+            deviceInfo: .init(model: "x", name: "x", iosVersion: "x"))
+        let session = try RecordingSession(store: SessionStore(root: try makeTempDir()), setup: SessionSetup(),
+                                           preflight: nil, deps: deps)
+        let e = expectation(description: "run")
+        DispatchQueue.main.async {
+            session.start()
+            if let after = toggleOnAfter {
+                DispatchQueue.main.asyncAfter(deadline: .now() + after) { uploadOn.withLock { $0 = true } }
+            }
+            DispatchQueue.main.asyncAfter(deadline: .now() + seconds) { session.stop(); e.fulfill() }
+        }
+        wait(for: [e], timeout: ciTimeout)
+        return (session, q)
+    }
+
+    func testUploadOffQueuesNothing() throws {
+        let (session, q) = try runSession(uploadOn: Locked(false), seconds: 2.5)
+        XCTAssertTrue(q.pendingFiles().isEmpty, "upload OFF: no metadata, no batches")
+        XCTAssertEqual(session.metadata.stats?.uploadBatchesCreated, 0)
+    }
+
+    func testBatchSeqIsContiguousWhenUploadIsTurnedOnMidSession() throws {
+        let (session, q) = try runSession(uploadOn: Locked(false), seconds: 5.0, toggleOnAfter: 2.5)
+        let seqs = q.pendingFiles().compactMap { UploadQueue.parse(fileName: $0.lastPathComponent)?.seq }
+        XCTAssertFalse(seqs.isEmpty)
+        XCTAssertEqual(seqs, Array(0..<seqs.count), "no gaps: windows while upload was OFF don't consume a seq")
+        XCTAssertEqual(session.metadata.stats?.uploadBatchesCreated, seqs.count)
+    }
+
+    func testRealistic2SecondBatchIsFarBelowTheBackendLimit() throws {
+        var rng = SeededGenerator(seed: 42)
+        func r() -> Double { Double.random(in: -2...2, using: &rng) }
+        let acc = BatchAccumulator(sessionId: UUID().uuidString, deviceId: UUID().uuidString)
+        for i in 0..<220 { // 2.2 s at 100 Hz with full-precision noisy values
+            let t = 100 + Double(i) * 0.01
+            acc.add(DeviceMotionSample(t: t, userAccel: Vec3(x: r(), y: r(), z: r()), gravity: Vec3(x: r(), y: r(), z: r()),
+                                       rotationRate: Vec3(x: r(), y: r(), z: r()), quaternion: Quaternion(w: r(), x: r(), y: r(), z: r()),
+                                       roll: r(), pitch: r(), yaw: r()))
+            acc.addAccel(Vec3Sample(t: t, v: Vec3(x: r(), y: r(), z: r())))
+            acc.addGyro(Vec3Sample(t: t, v: Vec3(x: r(), y: r(), z: r())))
+        }
+        for i in 0..<22 { acc.add(AudioLevelSample(t: 100 + Double(i) * 0.1, avgDbfs: -40 + r(), peakDbfs: -20 + r())) }
+        let json = try acc.drain(t0Up: 100, t0UtcMs: 1_763_716_532_000, device: FakeDeviceStatus().status).jsonData()
+        XCTAssertLessThan(json.count, RecordingSession.maxBatchJSONBytes / 2, "\(json.count) bytes")
+    }
+}

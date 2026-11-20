@@ -499,6 +499,22 @@ final class ContractFixtureTests: XCTestCase {
         try checkFixture("ingest_batch_v1.json.gz", gz)
     }
 
+    /// §6.1 Stop-copy body exactly as the app builds it; tools/test_tools.py PUTs it to the mock backend.
+    func testSessionMetadataStopFixture() throws {
+        var m = SessionMetadataTests.sample()
+        m.sessionId = "00000000-0000-4000-8000-000000000001"
+        m.endedAtUtc = "2026-11-21T10:00:00.000Z"
+        m.audioEnabled = false
+        m.vehicle.type = "bus"; m.vehicle.line = "24B"
+        m.stats = .init(durationSec: 2808.488, streams: [:], labelsCount: 3, sicknessRatings: 1, sicknessMissed: 0,
+                        audioFiles: [], fileSizes: [:], totalBytes: 1, writeErrors: 0, uploadBatchesCreated: 3)
+        let body = try RecordingSession.sessionMetadataBody(m, batchCount: 3)
+        let obj = try XCTUnwrap(JSONSerialization.jsonObject(with: body) as? [String: Any])
+        XCTAssertEqual(obj["batchCount"] as? Int, 3)
+        XCTAssertEqual(obj["sessionId"] as? String, m.sessionId)
+        try checkFixture("session_meta_stop_v1.json.gz", Gzip.compress(body))
+    }
+
     /// Header line per CSV file: the single source of truth that tools/quick_check.py is tested against.
     func testCSVHeadersFixture() throws {
         var map: [String: String] = [:]

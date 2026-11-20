@@ -108,11 +108,13 @@ final class RecordingSession: @unchecked Sendable {
     private let stateBox = Locked((started: false, stopped: false))
     /// Set after the final close; later labels are refused instead of silently vanishing.
     private let writersClosed = Locked(false)
-    private let batchesQueued = Locked(0)
+
 
     static let anchorInterval: TimeInterval = 10
     /// Cached GPS fixes older than this before the session start are not recorded.
     static let staleFixMargin: TimeInterval = 5
+    /// The ingest function rejects bodies over 200 KB (02 §6); warn a little before that.
+    static let maxBatchJSONBytes = 180 * 1024
     static let deviceInterval: TimeInterval = 5
     static let batchInterval: TimeInterval = 2
 
@@ -176,6 +178,7 @@ final class RecordingSession: @unchecked Sendable {
             throw error
         }
         writeClockRow(anchor, source: "start")
+        queueSessionMetadata(meta, phase: .start)
         writer.log(.info, "session \(id.uuidString) created: \(folder.lastPathComponent), app \(deps.appVersion), synthetic=\(deps.motion.isSynthetic)")
         writer.onWriteError = { [weak self] msg in
             self?.writer.log(.problem, msg)
@@ -240,6 +243,7 @@ final class RecordingSession: @unchecked Sendable {
         } catch {
             writer.log(.error, "writing final session.json failed: \(error.localizedDescription)")
         }
+        queueSessionMetadata(meta, phase: .stop, batchCount: accumulator.batchesCreated)
         writer.close()
         writersClosed.withLock { $0 = true }
         return meta
@@ -477,15 +481,47 @@ final class RecordingSession: @unchecked Sendable {
             v = end
             return s
         }
-        // Always drain (keeps memory bounded); queue to disk only when upload is ON. With upload OFF
-        // nothing is written to upload_queue/ (the session files are the dataset; spec §6).
+        // Upload OFF: drop the window (memory stays bounded; the session files are the dataset) without
+        // consuming a batchSeq. Upload ON: build, check size, queue.
+        guard let q = deps.uploadQueue, q.isEnabled else {
+            accumulator.discard()
+            return
+        }
         let batch = accumulator.drain(t0Up: start, t0UtcMs: timeBase.utcMs(fromUptime: start), device: latestBox.current.device)
-        guard let q = deps.uploadQueue, q.isEnabled else { return }
         do {
-            try q.enqueue(batch: batch, createdUtcMs: Int64(timeBase.utcMs(fromUptime: end)))
-            batchesQueued.withLock { $0 += 1 }
+            let json = try batch.jsonData()
+            if json.count > Self.maxBatchJSONBytes {
+                // The ingest function rejects bodies > 200 KB (02 §6): the data is safe on disk; say so.
+                writer.log(.warn, "upload batch \(batch.batchSeq) is \(json.count / 1024) KB (> \(Self.maxBatchJSONBytes / 1024) KB): the backend may reject it")
+            }
+            try q.enqueue(gzippedBody: Gzip.compress(json), sessionId: batch.sessionId, seq: batch.batchSeq,
+                          createdUtcMs: Int64(timeBase.utcMs(fromUptime: end)))
         } catch {
             writer.log(.warn, "could not queue upload batch \(batch.batchSeq): \(error.localizedDescription)")
+        }
+    }
+
+    /// §6.1 body: session.json, plus `batchCount` in the Stop copy.
+    static func sessionMetadataBody(_ meta: SessionMetadata, batchCount: Int?) throws -> Data {
+        let json = try meta.jsonData()
+        guard let batchCount else { return json }
+        guard var obj = try JSONSerialization.jsonObject(with: json) as? [String: Any] else {
+            throw CocoaError(.coderInvalidValue)
+        }
+        obj["batchCount"] = batchCount
+        return try JSONSerialization.data(withJSONObject: obj, options: [.sortedKeys, .withoutEscapingSlashes])
+    }
+
+    /// Spec §6.1: the current session.json goes through the same queue as the batches (Start copy
+    /// before batch 0, Stop copy — with `batchCount` — after the last batch). Only while upload is ON.
+    private func queueSessionMetadata(_ meta: SessionMetadata, phase: UploadQueue.MetaPhase, batchCount: Int? = nil) {
+        guard let q = deps.uploadQueue, q.isEnabled else { return }
+        do {
+            let json = try Self.sessionMetadataBody(meta, batchCount: batchCount)
+            try q.enqueueSessionMetadata(json: json, sessionId: id.uuidString, phase: phase,
+                                         createdUtcMs: Int64(timeBase.utcMs(fromUptime: timeBase.uptimeNow())))
+        } catch {
+            writer.log(.warn, "could not queue session metadata (\(phase.rawValue)): \(error.localizedDescription)")
         }
     }
 
@@ -646,6 +682,6 @@ final class RecordingSession: @unchecked Sendable {
         return .init(durationSec: endUp - startUp, streams: streams, labelsCount: l.count,
                      sicknessRatings: l.sicknessRatings, sicknessMissed: l.sicknessMissed,
                      audioFiles: audioFiles.sorted(), fileSizes: sizes, totalBytes: total,
-                     writeErrors: writer.writeErrors.count, uploadBatchesCreated: batchesQueued.current)
+                     writeErrors: writer.writeErrors.count, uploadBatchesCreated: accumulator.batchesCreated)
     }
 }

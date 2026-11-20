@@ -15,7 +15,7 @@ struct SettingsView: View {
     var body: some View {
         Form {
             Section {
-                TextField("https://<api-id>.execute-api.<region>.amazonaws.com", text: $baseURL)
+                TextField("https://<function-app>.azurewebsites.net", text: $baseURL)
                     .keyboardType(.URL)
                     .textInputAutocapitalization(.never)
                     .autocorrectionDisabled()
@@ -47,7 +47,7 @@ struct SettingsView: View {
                 .disabled(parsedURL == nil || testing)
                 if let testResult { Text(testResult).font(.footnote) }
             } header: {
-                Text("AWS upload (optional)")
+                Text("Azure upload (live, when an API URL is set)")
             } footer: {
                 Text("Empty URL = upload disabled. Recording always works fully offline; batches are queued on disk and uploaded when possible. The key is stored in the Keychain.")
             }

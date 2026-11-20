@@ -11,6 +11,10 @@ struct UploadConfig: Equatable, Sendable {
     var isEnabled: Bool { baseURL != nil }
 
     var ingestURL: URL? { baseURL?.appendingPathComponent("api/ingest") }
+    /// Spec §6.1: `PUT {API}/api/ingest/sessions/{sessionId}`.
+    func sessionURL(_ sessionId: String) -> URL? {
+        baseURL?.appendingPathComponent("api/ingest/sessions").appendingPathComponent(sessionId)
+    }
 
     static let disabled = UploadConfig(baseURL: nil, deviceKey: "")
 

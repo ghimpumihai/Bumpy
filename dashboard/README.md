@@ -2,7 +2,7 @@
 
 Web dashboard of the Codelap 2026 project (plan: [02-infrastructure-plan.md](../decisions/02-infrastructure-plan.md)
 §5 "Dashboard", §15). React + Vite + MapLibre (OpenFreeMap tiles) + uPlot, hosted as static files on
-S3 + CloudFront, reading the **read API** ([API.md](API.md)).
+Azure Static Web Apps, reading the **read API** ([API.md](API.md)).
 
 The backend pipeline is not deployed yet, so the dashboard ships with an in-browser **mock backend**
 that implements the same API with generated sessions on real Cluj-Napoca streets (cars, bus 35, tram 101,

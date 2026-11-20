@@ -3,13 +3,13 @@
 > **Audience:** a Claude Code instance (and the teammate driving it) building the iPhone data-collection app on macOS.
 > This file is the complete context. Read it fully before writing code.
 >
-> **Status (2026-11-20):** updated for **AWS** (this plan was first written for Azure). The backend architecture and the reasons behind each choice are in [02-infrastructure-plan.md](02-infrastructure-plan.md). Changes for the app: the upload target in §6 is now the AWS API, and §3.5 and §3.8 gained public-transport fields (audio switch, posture, handheld, line).
+> **Status (2026-11-20):** the backend is on **Azure** (it moved to AWS and back the same day; the app contract only gains the session metadata call in §6.1). The backend architecture and the reasons behind each choice are in [02-infrastructure-plan.md](02-infrastructure-plan.md). Changes for the app: the upload target in §6 is the Azure ingest function, and §3.5 and §3.8 gained public-transport fields (audio switch, posture, handheld, line).
 
 ---
 
 ## 0. TL;DR for the builder
 
-Build a **native iOS app (Swift + SwiftUI)** that records **every useful sensor on an iPhone 14 Pro at the highest practical rate**, **writes everything to local files first**, optionally **streams batches to the AWS backend**, and shows a **live dashboard proving every stream is healthy**.
+Build a **native iOS app (Swift + SwiftUI)** that records **every useful sensor on an iPhone 14 Pro at the highest practical rate**, **writes everything to local files first**, **streams batches to the Azure backend while recording** (the main way data reaches the cloud and the web dashboard), and shows a **live dashboard proving every stream is healthy**.
 
 We get **ONE test drive** to collect the data. There is no second chance:
 
@@ -24,7 +24,7 @@ We get **ONE test drive** to collect the data. There is no second chance:
 
 ### Hackathon
 - **Codelap Hackathon 2026**, "Data-Driven Infrastructure Engineering" challenge (Porsche Engineering, Cluj-Napoca).
-- **Challenge:** build an end-to-end system: **Capture** (phone) → **Transmit** (securely to the cloud; we use **AWS**, which the organizers accept) → **Process** → **Store** (database) → **Visualize** (web dashboard).
+- **Challenge:** build an end-to-end system: **Capture** (phone) → **Transmit** (securely to the cloud; we use **Azure**) → **Process** → **Store** (database) → **Visualize** (web dashboard).
 - **Also required:** Infrastructure as Code plus CI/CD pipelines, and a public Git repo with regular, meaningful commits.
 - **Judging:** presentation and demo, relevance and impact, technical execution, innovation and creativity.
 - The guidance says *"A small, reliable stream of real data is more valuable than a complex integration that cannot be demonstrated."*
@@ -259,11 +259,11 @@ Use the same numeric precision everywhere: 6 decimals for sensor values, 8 decim
 
 ---
 
-## 6. Live upload to AWS (secondary; must never block recording)
+## 6. Live upload to Azure (the main path to the cloud; must never block recording)
 
-The API base URL points at the AWS API Gateway endpoint (see [02-infrastructure-plan.md](02-infrastructure-plan.md)). The backend answers `200` for both new and repeated batches; the app should still treat `409` as success, as below. After a drive, the session folder is uploaded to S3 from a laptop, so live upload is optional for most sessions.
+The API base URL points at the Azure ingest function app (see [02-infrastructure-plan.md](02-infrastructure-plan.md)); the function serves `/api/ingest`. The backend answers `200` for both new and repeated batches; the app should still treat `409` as success, as below. Live upload is how data reaches the cloud and the web dashboard; uploading the session folder from a laptop is only a fallback for trips that never got a connection.
 
-The backend may not be ready during the drive. The app must work **fully offline**; upload is a bonus.
+The app must still work **fully offline**: recording never depends on the network. Without a connection, batches wait in the disk queue and are sent, oldest first, when the network returns, so a dead zone delays data but doesn't lose it.
 
 - **Settings screen:** `API base URL` and `Device key` (stored in UserDefaults/Keychain; **never hard-coded in the repo**). Empty URL = upload disabled. Show "UPLOAD OFF (local only)" in neutral grey, not red.
 - **Batching:** every **2 s**, build one batch from the samples of that window (in-memory copy; disk files stay the source of truth).
@@ -305,6 +305,23 @@ x-device-key: <device key>
 - **Queue on disk** (`Documents/upload_queue/`): write each batch as a `.json.gz` file, upload oldest first, **1 request at a time**, exponential backoff (1 s → 30 s max). Delete on HTTP 2xx. **Treat 409 (duplicate) as success.** Other 4xx: log, move to `upload_failed/`, continue.
 - Idempotency key = `sessionId + batchSeq`.
 - After the drive, a **"Upload full session"** button can send the queued remainder. The raw audio is **not** uploaded.
+
+### 6.1 Session metadata (new: the backend needs it for the live path)
+
+The backend learns a trip's context (vehicle, mount, seat, posture) and when it ended from `session.json`. Without it, a live trip shows on the dashboard but can't be compared with other trips.
+
+```
+PUT {API_BASE}/api/ingest/sessions/{sessionId}
+Content-Type: application/json
+Content-Encoding: gzip
+x-device-key: <device key>
+```
+
+- Body: the current `session.json` (§3.8). In the Stop copy, add `"batchCount"`: the number of batches created for the session, so the backend knows when every batch has arrived.
+- Send it **at Start** (right after `session.json` is first written) and **at Stop** (after it is rewritten with `endedAtUtc` and `stats`).
+- Put it in the **same disk queue** as the batches, so it is sent in order: the Start copy before batch 0, the Stop copy after the last batch. The queue file name needs a marker that tells it apart from a batch.
+- Same rules as batches: 2xx and 409 = done, same backoff. The backend answers `200` for a repeat.
+- Until this exists, the backend creates the trip from its first batch with unknown context and closes it after 15 minutes without batches.
 
 ---
 
@@ -475,7 +492,7 @@ Pass criteria: motion streams ~100 Hz with max gap < 0.1 s; GPS ~1 Hz with sane 
 4. Preflight checklist + session setup + summary + export.
 5. Audio recording + level meter, barometer, activity, device health.
 6. Live plots + mini map.
-7. Live upload queue to AWS.
+7. Live upload queue to Azure.
 8. P2 extras (magnetometer, heading, absolute altitude, on-device roughness/MSDV estimates).
 
 ---

@@ -1,8 +1,8 @@
 # Sensor Recorder: iOS data-collection app
 
 Native Swift/SwiftUI app (iOS 17+, built for an iPhone 14 Pro) that records every useful
-sensor at the highest practical rate. It writes everything to local CSV files first, optionally
-uploads gzipped batches to the AWS backend, and shows a live health dashboard. The requirements
+sensor at the highest practical rate. It writes everything to local CSV files first, uploads
+gzipped batches live to the Azure backend (when an API URL is set), and shows a live health dashboard. The requirements
 are in [`decisions/01-initial-plan.md`](../../decisions/01-initial-plan.md) (backend:
 [`02-infrastructure-plan.md`](../../decisions/02-infrastructure-plan.md)). No third-party dependencies.
 
@@ -83,13 +83,14 @@ Label `type` values: `pothole`, `speed_bump`, `phone_moved`, `surface_start/surf
 - **One poison batch can't block the queue:** after 5 server errors (5xx/408/429) for the same
   batch, it moves to the back of the queue. Network errors don't count, and nothing is deleted.
   Upload batches are queued only while an API URL is set; the session folder is the dataset
-  (02 §2: "session files are the main path").
+  (the session folder stays the local source of truth; 02 §2: live upload is the main
+  path to the cloud, laptop upload the fallback).
 - **401/403 are retried with backoff** instead of moved to `upload_failed/`; otherwise a mistyped
   key would dump the whole queue. 408/429/5xx/network errors are retried; other 4xx go to
   `upload_failed/` (Settings → *Move failed batches back to queue*).
-- **The upload test is a probe POST**, because the AWS plan has no `/api/health` route.
+- **The upload test is a probe POST**, because the backend has no `/api/health` route.
   - The app sends `{"probe":true}` (gzipped, with the device key and `x-probe: 1`) to `/api/ingest`.
-  - The ingest Lambda checks the key first, then the schema. 400/422 therefore means
+  - The ingest function checks the key first, then the schema. 400/422 therefore means
     "reachable and key accepted", and the probe is rejected, never stored. 401/403 means the key
     was rejected; 404 means a wrong URL.
   - Plain `http://` is accepted only for local test servers, so the device key is never sent in cleartext.
@@ -164,7 +165,7 @@ xcodebuild -project SensorRecorder.xcodeproj -scheme SensorRecorder \
 ### Tools (`tools/`)
 
 - `quick_check.py <session_folder>`: dry-run verifier (spec §10). Stdlib only.
-- `mock_ingest_server.py`: local stand-in for the AWS ingest Lambda (same check order, strict schema,
+- `mock_ingest_server.py`: local stand-in for the Azure ingest function (same check order, strict schema,
   200 for duplicates by default). Point the app's Settings at `http://<mac-ip>:8765`; the phone asks
   for Local Network permission the first time.
 - `test_tools.py`: tests for both tools, including a cross-language contract test. A batch written by

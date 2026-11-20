@@ -20,6 +20,18 @@ struct IngestBatch: Encodable, Equatable {
         var tUtcMs: Int64
         var lat: Double, lon: Double, alt: Double
         var hAcc: Double, speed: Double, speedAcc: Double, course: Double
+        /// iOS `sourceInformation.isSimulatedBySoftware`; null when iOS doesn't say.
+        var isSimulated: Bool?
+
+        enum CodingKeys: String, CodingKey { case tUtcMs, lat, lon, alt, hAcc, speed, speedAcc, course, isSimulated }
+        func encode(to encoder: Encoder) throws {
+            var c = encoder.container(keyedBy: CodingKeys.self)
+            try c.encode(tUtcMs, forKey: .tUtcMs)
+            try c.encode(lat, forKey: .lat); try c.encode(lon, forKey: .lon); try c.encode(alt, forKey: .alt)
+            try c.encode(hAcc, forKey: .hAcc); try c.encode(speed, forKey: .speed)
+            try c.encode(speedAcc, forKey: .speedAcc); try c.encode(course, forKey: .course)
+            try c.encode(isSimulated, forKey: .isSimulated) // explicit null
+        }
     }
 
     struct Altimeter: Encodable, Equatable {
@@ -57,12 +69,32 @@ struct IngestBatch: Encodable, Equatable {
     }
 
     var schemaVersion = 1
+    /// Hackathon rule: "JSON payload with device ID, event type, value, unit, and UTC timestamp".
+    /// Additive fields (schemaVersion stays 1; the §6 keys are unchanged).
+    var eventType = "sensor_batch"
+    var source = "live"
     var sessionId: String
     var deviceId: String
     var batchSeq: Int
     var t0Utc: String
     var t0Up: Double
+    /// UTC of `t0Up` in ms: sample UTC = t0UtcMs + t[i] × 1000.
+    var t0UtcMs: Int64
     var units: [String: String] = ["accel": "g", "gyro": "rad/s", "speed": "m/s", "pressure": "kPa"]
+    /// Unit of every field (the §6 `units` map above is kept as-is for compatibility).
+    var fieldUnits: [String: String] = IngestBatch.allFieldUnits
+
+    static let allFieldUnits: [String: String] = [
+        "t": "s (relative to t0Up)", "t0Up": "s since boot", "t0UtcMs": "ms since Unix epoch (UTC)",
+        "deviceMotion.ua": "g", "deviceMotion.g": "g", "deviceMotion.rr": "rad/s", "deviceMotion.q": "unitless quaternion",
+        "accelRaw": "g", "gyroRaw": "rad/s",
+        "location.tUtcMs": "ms since Unix epoch (UTC)", "location.lat": "deg", "location.lon": "deg",
+        "location.alt": "m", "location.hAcc": "m", "location.speed": "m/s (-1 = invalid)",
+        "location.speedAcc": "m/s", "location.course": "deg (-1 = invalid)",
+        "altimeter.relAltM": "m", "altimeter.pressureKpa": "kPa",
+        "audioLevel.avgDbfs": "dBFS", "audioLevel.peakDbfs": "dBFS",
+        "device.battery": "fraction 0-1 (-1 = unknown)",
+    ]
     var deviceMotion = DeviceMotion()
     var accelRaw = XYZ()
     var gyroRaw = XYZ()
@@ -141,7 +173,7 @@ final class BatchAccumulator: @unchecked Sendable {
 
         var b = IngestBatch(sessionId: sessionId, deviceId: deviceId, batchSeq: n,
                             t0Utc: ISO8601.string(Date(timeIntervalSince1970: t0UtcMs / 1000)),
-                            t0Up: round6(t0Up),
+                            t0Up: round6(t0Up), t0UtcMs: t0UtcMs.isFinite ? Int64(t0UtcMs.rounded()) : 0,
                             device: .init(battery: Double(device.batteryLevel),
                                           thermal: device.thermal.rawValue, lowPower: device.lowPowerMode))
         var dm = IngestBatch.DeviceMotion()
@@ -159,7 +191,8 @@ final class BatchAccumulator: @unchecked Sendable {
         b.gyroRaw = Self.xyz(p.gyro, rel)
         b.location = p.location.map {
             .init(tUtcMs: Int64($0.utcMs.rounded()), lat: round8($0.lat), lon: round8($0.lon), alt: round6($0.alt),
-                  hAcc: round6($0.hAcc), speed: round6($0.speed), speedAcc: round6($0.speedAcc), course: round6($0.course))
+                  hAcc: round6($0.hAcc), speed: round6($0.speed), speedAcc: round6($0.speedAcc), course: round6($0.course),
+                  isSimulated: $0.isSimulated)
         }
         var alt = IngestBatch.Altimeter()
         for s in p.alt {

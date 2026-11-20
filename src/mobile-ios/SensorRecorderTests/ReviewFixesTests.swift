@@ -200,6 +200,7 @@ final class AudioHealthTests: XCTestCase {
         var i = HealthInputs(now: 1060, recordingStartUp: 1000)
         i.gpsLastFixUp = 1059.5
         i.audioMeterExpected = meter
+        i.audioLastSoundUp = i.now - 0.5 // the cabin is not silent (silence has its own test)
         i.audioExpected = recorder
         i.audioRecording = recording
         i.streams[.audioLevel] = StreamSnapshot(id: .audioLevel, count: 10, rateHz: 10, age: levelAge, meanRateHz: 10,
@@ -494,12 +495,30 @@ final class ContractFixtureTests: XCTestCase {
                                   freeDiskBytes: 1, networkStatus: "satisfied", networkType: "wifi")
         let batch = acc.drain(t0Up: 100, t0UtcMs: 1_763_716_532_000, device: device)
         let gz = try Gzip.compress(try batch.jsonData())
+        XCTAssertEqual(try Gzip.decompress(gz), try batch.jsonData(), "deterministic encoding (sortedKeys)")
+        try checkFixture("ingest_batch_v1.json.gz", gz)
+    }
+
+    /// Header line per CSV file: the single source of truth that tools/quick_check.py is tested against.
+    func testCSVHeadersFixture() throws {
+        var map: [String: String] = [:]
+        for f in StreamFile.allCases { map[f.rawValue] = f.header }
+        let enc = JSONEncoder()
+        enc.outputFormatting = [.prettyPrinted, .sortedKeys, .withoutEscapingSlashes]
+        try checkFixture("csv_headers.json", enc.encode(map) + Data("\n".utf8))
+    }
+
+    /// Compares with the committed fixture (a change in the app's output must be deliberate).
+    /// Regenerate with: TEST_RUNNER_REGENERATE_FIXTURES=1 xcodebuild … -only-testing:SensorRecorderTests/ContractFixtureTests test
+    private func checkFixture(_ name: String, _ data: Data) throws {
         let dir = URL(fileURLWithPath: #filePath).deletingLastPathComponent().deletingLastPathComponent()
             .appendingPathComponent("tools/fixtures", isDirectory: true)
-        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
-        try gz.write(to: dir.appendingPathComponent("ingest_batch_v1.json.gz"), options: .atomic)
-        XCTAssertEqual(try Gzip.decompress(gz), try batch.jsonData(), "deterministic encoding (sortedKeys)")
-        let obj = try XCTUnwrap(JSONSerialization.jsonObject(with: Gzip.decompress(gz)) as? [String: Any])
-        XCTAssertEqual(obj["schemaVersion"] as? Int, 1)
-    }
+        let url = dir.appendingPathComponent(name)
+        if ProcessInfo.processInfo.environment["REGENERATE_FIXTURES"] == "1" {
+            try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+            try data.write(to: url, options: .atomic)
+            return
+        }
+        let committed = try Data(contentsOf: url)
+        XCTAssertEqual(committed, data, "\(name) differs from the app's output: if intended, regenerate the fixture")    }
 }

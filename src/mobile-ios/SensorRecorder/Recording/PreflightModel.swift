@@ -79,7 +79,9 @@ final class PreflightModel {
         checks = [
             Check(id: "perm.motion", title: "Motion permission", required: true),
             Check(id: "perm.location", title: "Location: authorized + precise", required: true),
-            Check(id: "perm.mic", title: "Microphone permission", required: app.setup.audioEnabled),
+            // Always required: even with audio recording OFF (bus/tram) the level meter needs the mic;
+            // a denied mic would silently produce −140 dBFS.
+            Check(id: "perm.mic", title: "Microphone permission", required: true),
             Check(id: "avail.motion", title: "Device motion / accel / gyro", required: true),
             Check(id: "avail.baro", title: "Barometer available", required: true),
             Check(id: "gps.fix", title: "GPS fix ≤ 10 m", required: true),
@@ -124,6 +126,7 @@ final class PreflightModel {
     func onDisappear() {
         gpsTimer?.invalidate()
         gpsTimer = nil
+        if app.recording == nil { app.location.stopPreview() } // battery/heat between sessions
         runTask?.cancel() // stops permission waits and an in-flight motion test (sleeps throw on cancel)
         motionTask?.cancel()
     }

@@ -72,6 +72,7 @@ final class RecordingSession: @unchecked Sendable {
         var device: DeviceStatus = .unknown
         var inBackground = false
         var returnedFromBackgroundUp: TimeInterval?
+        var audioLastSoundUp: TimeInterval?
     }
 
     struct LabelState {
@@ -80,7 +81,6 @@ final class RecordingSession: @unchecked Sendable {
         var sicknessMissed = 0
         var activeSurface: SurfaceKind?
         var activeSegments: Set<SegmentKind> = []
-        var last: LoggedLabel?
         var lastSickness: (value: Int, date: Date)?
     }
 
@@ -102,14 +102,17 @@ final class RecordingSession: @unchecked Sendable {
     private let labelBox = Locked(LabelState())
     private let timerQueue = DispatchQueue(label: "sensorrecorder.session-timers", qos: .utility)
     private var timers: [DispatchSourceTimer] = []
-    private var lastBatchEndUp: TimeInterval
+    /// Window start of the next upload batch. Touched by the batch timer and by stop() (final
+    /// batch), so it is locked rather than relying on stop()'s timer-cancel ordering.
+    private let lastBatchEndUp: Locked<TimeInterval>
     private let stateBox = Locked((started: false, stopped: false))
     /// Set after the final close; later labels are refused instead of silently vanishing.
     private let writersClosed = Locked(false)
     private let batchesQueued = Locked(0)
-    private var motionAvailability = MotionAvailability(deviceMotion: false, accel: false, gyro: false, mag: false)
 
     static let anchorInterval: TimeInterval = 10
+    /// Cached GPS fixes older than this before the session start are not recorded.
+    static let staleFixMargin: TimeInterval = 5
     static let deviceInterval: TimeInterval = 5
     static let batchInterval: TimeInterval = 2
 
@@ -126,7 +129,7 @@ final class RecordingSession: @unchecked Sendable {
         timeBase = TimeBase(clock: deps.clock)
         let anchor = timeBase.refreshAnchor()
         startUp = anchor.up
-        lastBatchEndUp = anchor.up
+        lastBatchEndUp = Locked(anchor.up)
         startDate = Date(timeIntervalSince1970: anchor.utcMs / 1000)
         let folder = try store.makeSessionFolder(start: startDate, id: id)
         self.folder = folder
@@ -150,6 +153,7 @@ final class RecordingSession: @unchecked Sendable {
                 mount.photoFile = SessionFileName.mountPhoto
             } catch {
                 mount.photoFile = nil
+                appLogger.error("mount photo not saved: \(error.localizedDescription, privacy: .public)")
             }
         } else {
             mount.photoFile = nil
@@ -247,7 +251,6 @@ final class RecordingSession: @unchecked Sendable {
 
     private func startMotion() {
         let avail = deps.motion.availability
-        motionAvailability = avail
         monitors[.deviceMotion]?.setAvailable(avail.deviceMotion)
         monitors[.accel]?.setAvailable(avail.accel)
         monitors[.gyro]?.setAvailable(avail.gyro)
@@ -304,19 +307,32 @@ final class RecordingSession: @unchecked Sendable {
         }
         let tb = timeBase, w = writer, mon = monitors, acc = accumulator, latest = latestBox, track = track
         var cb = LocationCallbacks()
+        let sessionStartUp = startUp
         cb.location = { s in
             let arrival = tb.uptimeNow()
-            let tUp = tb.uptime(fromUtcMs: s.utcMs) // spec: for location, t_up is derived from the UTC timestamp
+            // Spec: location t_up is derived from the fix's UTC timestamp. Use the fix's *age* at
+            // arrival (wall-clock difference measured now) rather than the possibly 10 s old clock
+            // anchor, so a wall-clock step between anchors can't shift fixes by the step size.
+            let ageSec = max(0, (tb.nowUtcMs() - s.utcMs) / 1000)
+            let tUp = arrival - ageSec
+            // CoreLocation first delivers its cached last fix, which can be minutes old and from
+            // another place. Keep fixes up to `staleFixMargin` before start (real, just slightly
+            // early); log and drop older ones.
+            if tUp < sessionStartUp - Self.staleFixMargin {
+                w.log(.info, String(format: "ignored cached GPS fix %.1f s older than session start", sessionStartUp - tUp))
+                return
+            }
             w.append(.location, CSV.row([
                 CSV.f6(tUp), CSV.ms(s.utcMs),
                 CSV.f8(s.lat), CSV.f8(s.lon), CSV.f6(s.alt), CSV.f6(s.ellAlt),
                 CSV.f6(s.hAcc), CSV.f6(s.vAcc), CSV.f6(s.speed), CSV.f6(s.speedAcc),
                 CSV.f6(s.course), CSV.f6(s.courseAcc), CSV.bool(s.isSimulated),
             ]))
-            mon[.gps]?.record(t: tUp, arrival: arrival)
-            // GPS health uses the fix time (cached old fixes must not look fresh); invalid fixes don't count.
-            if s.hAcc >= 0 {
-                latest.withLock { $0.gps = s; $0.gpsFixUp = min(arrival, tUp) }
+            // Fixes from before the start (cached first delivery) are written but don't count for
+            // GPS rate/gap stats or freshness; invalid fixes (hAcc < 0) never count as a fix.
+            if tUp >= sessionStartUp {
+                mon[.gps]?.record(t: tUp, arrival: arrival)
+                if s.hAcc >= 0 { latest.withLock { $0.gps = s; $0.gpsFixUp = min(arrival, tUp) } }
             }
             track.add(s)
             acc.add(s)
@@ -388,7 +404,9 @@ final class RecordingSession: @unchecked Sendable {
         }
         let tb = timeBase, w = writer, mon = monitors, acc = accumulator
         var cb = AudioCallbacks()
+        let latestAudio = latestBox
         cb.level = { s in
+            if s.avgDbfs > HealthEvaluator.audioSilenceDbfs { latestAudio.withLock { $0.audioLastSoundUp = s.t } }
             w.append(.audioLevel, CSV.row([CSV.f6(s.t), CSV.ms(tb.utcMs(fromUptime: s.t)),
                                            CSV.f6(s.avgDbfs), CSV.f6(s.peakDbfs)]))
             mon[.audioLevel]?.record(t: s.t, arrival: s.t)
@@ -454,8 +472,11 @@ final class RecordingSession: @unchecked Sendable {
 
     private func makeBatch() {
         let end = timeBase.uptimeNow()
-        let start = lastBatchEndUp
-        lastBatchEndUp = end
+        let start = lastBatchEndUp.withLock { v -> TimeInterval in
+            let s = v
+            v = end
+            return s
+        }
         // Always drain (keeps memory bounded); queue to disk only when upload is ON. With upload OFF
         // nothing is written to upload_queue/ (the session files are the dataset; spec §6).
         let batch = accumulator.drain(t0Up: start, t0UtcMs: timeBase.utcMs(fromUptime: start), device: latestBox.current.device)
@@ -495,7 +516,6 @@ final class RecordingSession: @unchecked Sendable {
             s.count += 1
             if type == .sickness { s.sicknessRatings += 1; if let v = value.flatMap(Int.init) { s.lastSickness = (v, label.date) } }
             if type == .sicknessMissed { s.sicknessMissed += 1 }
-            if type != .sicknessPrompt { s.last = label }
         }
         return label
     }
@@ -560,6 +580,8 @@ final class RecordingSession: @unchecked Sendable {
         // "Audio recorder not recording" is a PROBLEM only when this session records audio;
         // with recording OFF (public transport) only the optional level meter runs.
         i.audioMeterExpected = deps.audio != nil
+        i.audioLastSoundUp = l.audioLastSoundUp
+        i.locationDegraded = deps.location?.degradedReason
         if let audio = deps.audio, audio.recordsAudio {
             i.audioExpected = true
             i.audioRecording = audio.isRecording
@@ -589,10 +611,10 @@ final class RecordingSession: @unchecked Sendable {
     }
 
     var audioBytes: Int64 { deps.audio?.bytesWritten ?? 0 }
-    var audioFormat: String { deps.audio?.formatDescription ?? "" }
     var audioLevel: AudioLevelSample? { deps.audio?.latestLevel }
     var audioRecording: Bool { deps.audio?.isRecording ?? false }
     var recordsAudio: Bool { deps.audio?.recordsAudio ?? false }
+    var hasAudioSource: Bool { deps.audio != nil }
     var uploadStatus: UploadStatus? { deps.uploadQueue?.status }
     var deviceStatus: DeviceStatus { deps.deviceStatus.currentStatus() }
 

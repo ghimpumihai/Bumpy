@@ -20,19 +20,31 @@ struct UploadConfig: Equatable, Sendable {
         while s.hasSuffix("/") { s.removeLast() }
         guard !s.isEmpty, let url = URL(string: s),
               let scheme = url.scheme?.lowercased(), scheme == "https" || scheme == "http",
-              let host = url.host, !host.isEmpty else { return nil }
+              let host = url.host, !host.isEmpty,
+              url.user == nil, url.password == nil,          // no credentials in the URL
+              url.query == nil, url.fragment == nil else { return nil }
         // Plain http would send x-device-key in cleartext: allow it only for local test servers.
         if scheme == "http" && !isLocalHost(host) { return nil }
         return url
     }
 
     /// localhost, loopback, RFC 1918 private IPv4, link-local, or mDNS `.local` names.
+    /// IPv4 must be an exact dotted quad: `192.168.1.1.attacker.com` or `+10.0.0.1` are NOT local.
     static func isLocalHost(_ host: String) -> Bool {
         let h = host.lowercased()
-        if h == "localhost" || h.hasSuffix(".local") || h == "::1" { return true }
-        let parts = h.split(separator: ".").compactMap { Int($0) }
-        guard parts.count == 4, parts.allSatisfy({ (0...255).contains($0) }) else { return false }
-        switch (parts[0], parts[1]) {
+        if h == "localhost" || h == "::1" || h == "[::1]" { return true }
+        if h.hasSuffix(".local"), h.count > ".local".count,
+           h.allSatisfy({ $0.isLetter || $0.isNumber || $0 == "-" || $0 == "." }) { return true }
+        let labels = h.split(separator: ".", omittingEmptySubsequences: false)
+        guard labels.count == 4 else { return false }
+        var octets: [Int] = []
+        for l in labels {
+            // digits only, no sign/whitespace/leading zeros (octal ambiguity), 0...255
+            guard !l.isEmpty, l.count <= 3, l.allSatisfy({ $0.isASCII && $0.isNumber }),
+                  l == "0" || !l.hasPrefix("0"), let v = Int(l), v <= 255 else { return false }
+            octets.append(v)
+        }
+        switch (octets[0], octets[1]) {
         case (127, _), (10, _), (192, 168), (169, 254): return true
         case (172, let b) where (16...31).contains(b): return true
         default: return false
@@ -65,10 +77,15 @@ enum AppSettings {
     }
 
     /// Stable per-install id (identifierForVendor, persisted so it never changes mid-session).
+    /// Stable per-install, per-device id. Kept in the Keychain as *ThisDeviceOnly*, so restoring a
+    /// backup onto another phone can't give two phones the same id (UserDefaults would be copied).
     static var deviceId: String {
-        if let s = UserDefaults.standard.string(forKey: deviceIdKey) { return s }
-        let id = (UIDevice.current.identifierForVendor ?? UUID()).uuidString
-        UserDefaults.standard.set(id, forKey: deviceIdKey)
+        if let s = Keychain.read(service: keychainService, account: deviceIdKey) { return s }
+        // Migrate an id written by an older version, otherwise create one.
+        let id = UserDefaults.standard.string(forKey: deviceIdKey)
+            ?? (UIDevice.current.identifierForVendor ?? UUID()).uuidString
+        Keychain.write(id, service: keychainService, account: deviceIdKey)
+        UserDefaults.standard.removeObject(forKey: deviceIdKey)
         return id
     }
 }

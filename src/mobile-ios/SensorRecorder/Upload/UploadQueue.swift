@@ -14,7 +14,18 @@ struct URLSessionTransport: HTTPTransport {
         cfg.timeoutIntervalForResource = 30
         cfg.waitsForConnectivity = false
         cfg.requestCachePolicy = .reloadIgnoringLocalCacheData
-        session = URLSession(configuration: cfg)
+        cfg.httpShouldSetCookies = false
+        session = URLSession(configuration: cfg, delegate: NoRedirects.shared, delegateQueue: nil)
+    }
+
+    /// Never follow redirects: a 307/308 would re-send the body *and the x-device-key header*
+    /// to another host. The redirect response is returned as-is (3xx → retried, logged).
+    final class NoRedirects: NSObject, URLSessionTaskDelegate {
+        static let shared = NoRedirects()
+        func urlSession(_ session: URLSession, task: URLSessionTask, willPerformHTTPRedirection response: HTTPURLResponse,
+                        newRequest request: URLRequest, completionHandler: @escaping (URLRequest?) -> Void) {
+            completionHandler(nil)
+        }
     }
 
     func send(_ request: URLRequest) async throws -> Int {
@@ -141,6 +152,17 @@ final class UploadQueue: @unchecked Sendable {
         statusBox.withLock { $0.queueCount = q; $0.failedCount = f }
     }
 
+    /// Deletes queued batches (operator action; session files are NOT affected). Optionally only
+    /// one session's batches. Safe while the loop runs: a batch being sent is simply gone afterwards.
+    func clearPending(sessionId: String? = nil) {
+        for f in pendingFiles() where sessionId == nil || Self.parse(fileName: f.lastPathComponent)?.sessionId == sessionId {
+            do { try FileManager.default.removeItem(at: f) } catch {
+                onEvent?(.warn, "upload: could not delete \(f.lastPathComponent): \(error.localizedDescription)")
+            }
+        }
+        refreshCounts()
+    }
+
     /// Moves everything in `upload_failed/` back into the queue (operator action).
     func requeueFailed() {
         for f in failedFiles() {
@@ -192,6 +214,8 @@ final class UploadQueue: @unchecked Sendable {
             case 409: outcome = .duplicate
             case 408, 429: outcome = .retry(reason: "HTTP \(code)"); serverSide = true
             case 401, 403: outcome = .retry(reason: "HTTP \(code) (check device key)")
+            // A wrong base path must not dump the whole queue into upload_failed/ within seconds.
+            case 404: outcome = .retry(reason: "HTTP 404 (check the API URL)")
             case 400..<500: outcome = .permanentFailure(status: code)
             default: outcome = .retry(reason: "HTTP \(code)"); serverSide = true
             }
@@ -202,7 +226,10 @@ final class UploadQueue: @unchecked Sendable {
         let fm = FileManager.default
         switch outcome {
         case .uploaded, .duplicate:
-            try? fm.removeItem(at: file)
+            do { try fm.removeItem(at: file) } catch {
+                // Would be re-sent (harmless: idempotent), but the counters must not drift silently.
+                onEvent?(.warn, "upload: sent \(file.lastPathComponent) but could not delete it: \(error.localizedDescription)")
+            }
             headFailures.withLock { $0 = ("", 0) }
             statusBox.withLock {
                 $0.uploadedCount += 1
@@ -213,8 +240,10 @@ final class UploadQueue: @unchecked Sendable {
             }
         case .permanentFailure(let code):
             let dest = failedDirectory.appendingPathComponent(file.lastPathComponent)
-            try? fm.removeItem(at: dest)
-            try? fm.moveItem(at: file, to: dest)
+            try? fm.removeItem(at: dest) // an older copy with the same name, if any
+            do { try fm.moveItem(at: file, to: dest) } catch {
+                onEvent?(.warn, "upload: could not move \(file.lastPathComponent) to upload_failed/: \(error.localizedDescription)")
+            }
             statusBox.withLock {
                 $0.lastError = "HTTP \(code)"
                 $0.failedCount += 1

@@ -70,13 +70,29 @@ final class DeviceStatusMonitor: DeviceStatusSource {
                             networkStatus: n.status, networkType: n.type)
     }
 
-    /// Free-space queries hit the filesystem; cache for 2 s (dashboard refreshes at 8 Hz).
+    /// Free-space queries hit the filesystem (ms to tens of ms). currentStatus() is called from the
+    /// main thread at 8 Hz, so it only reads a cache that a utility queue refreshes every 2 s.
     private func freeDisk() -> Int64 {
         let now = ProcessInfo.processInfo.systemUptime
         let cached = disk.current
-        if cached.bytes >= 0, now - cached.at < 2 { return cached.bytes }
-        let v = FileManager.default.freeDiskBytes()
-        disk.withLock { $0 = (v, now) }
-        return v
+        if cached.bytes < 0 && cached.at == 0 {
+            // First call: measure once synchronously so the very first status is real.
+            let v = FileManager.default.freeDiskBytes()
+            disk.withLock { $0 = (v, now) }
+            return v
+        }
+        if now - cached.at >= Self.diskRefreshInterval, refreshing.withLock({ r -> Bool in let was = r; r = true; return !was }) {
+            diskQueue.async { [weak self] in
+                guard let self else { return }
+                let v = FileManager.default.freeDiskBytes()
+                self.disk.withLock { $0 = (v, ProcessInfo.processInfo.systemUptime) }
+                self.refreshing.withLock { $0 = false }
+            }
+        }
+        return cached.bytes
     }
+
+    static let diskRefreshInterval: TimeInterval = 2
+    private let diskQueue = DispatchQueue(label: "sensorrecorder.disk", qos: .utility)
+    private let refreshing = Locked(false)
 }

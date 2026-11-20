@@ -54,6 +54,10 @@ final class RecordingController {
     @ObservationIgnored private let alerter: Alerter
 
     static let refreshHz = 8.0
+    // Audio level bar: 6 bars from −60 dBFS up, 10 dB each.
+    static let levelBars = 6
+    static let levelFloorDbfs = -60.0
+    static let dbPerBar = 10.0
 
     init(session: RecordingSession, sicknessInterval: TimeInterval = 120, sicknessTimeout: TimeInterval = 30,
          alerter: Alerter? = nil) {
@@ -260,16 +264,24 @@ final class RecordingController {
             rows.append(.init(id: "activity", name: "Activity", rate: a.available ? "auto" : "n/a", samples: act, age: "",
                               dot: .neutral, detail: nil))
         }
-        // Audio
-        let audioOn = session.audioRecording
+        // Audio: "recording" (S2 to file) vs "meter only" (audio OFF, e.g. bus/tram) must never be
+        // confused — in GDPR mode the operator must not be told the microphone is recording.
+        let sourceRunning = session.audioRecording // recorder recording, or meter running
         var audioDetail: String?
-        if let lvl = session.audioLevel, audioOn, lvl.avgDbfs.isFinite { // Int(NaN) would trap
-            let bars = max(0, min(6, Int((lvl.avgDbfs + 60) / 10)))
-            audioDetail = String(format: "level %.0f dBFS ", lvl.avgDbfs) + String(repeating: "▮", count: bars) + String(repeating: "▯", count: 6 - bars)
+        if let lvl = session.audioLevel, sourceRunning, lvl.avgDbfs.isFinite { // Int(NaN) would trap
+            let bars = max(0, min(Self.levelBars, Int((lvl.avgDbfs - Self.levelFloorDbfs) / Self.dbPerBar)))
+            audioDetail = String(format: "level %.0f dBFS ", lvl.avgDbfs) + String(repeating: "▮", count: bars)
+                + String(repeating: "▯", count: Self.levelBars - bars)
         }
-        rows.append(.init(id: "audio", name: "Audio rec", rate: audioOn ? "ON 48k" : "OFF",
-                          samples: ByteFormat.string(session.audioBytes), age: "",
-                          dot: inputs.audioExpected ? .level(audioOn ? .ok : .problem) : .neutral, detail: audioDetail))
+        if session.recordsAudio {
+            rows.append(.init(id: "audio", name: "Audio rec", rate: sourceRunning ? "ON 48k" : "OFF",
+                              samples: ByteFormat.string(session.audioBytes), age: "",
+                              dot: .level(sourceRunning ? .ok : .problem), detail: audioDetail))
+        } else {
+            let meterLevel = issues.first { $0.key == "audio.meter" }?.level ?? .ok
+            rows.append(.init(id: "audio", name: "Audio", rate: "rec OFF", samples: "meter only (privacy)", age: "",
+                              dot: session.hasAudioSource ? .level(meterLevel) : .neutral, detail: audioDetail))
+        }
         // Disk
         let written = session.writer.totalCSVBytes + session.audioBytes
         let free = inputs.freeDiskBytes ?? -1

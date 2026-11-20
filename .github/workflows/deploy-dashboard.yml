@@ -1,0 +1,83 @@
+name: deploy-dashboard
+
+# Builds the dashboard and uploads it to the Static Web App (plan §13). config.json is written here
+# from the read API's address, so the deployed site uses the real API; the committed public/config.json
+# stays empty for the mock backend.
+# Manual for now: run it after deploy-services has put the real read API in place, or the site would
+# call the placeholder app and stop with a contract error.
+
+on:
+  workflow_dispatch:
+
+permissions:
+  id-token: write
+  contents: read
+
+concurrency:
+  group: deploy-dashboard
+  cancel-in-progress: false
+
+env:
+  READ_API_APP: ca-roadride-read-api
+  STATIC_WEB_APP: stapp-roadride-dashboard
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    environment: prod
+    defaults:
+      run:
+        working-directory: dashboard
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: dashboard/package-lock.json
+
+      - uses: azure/login@v2
+        with:
+          client-id: ${{ vars.AZURE_CLIENT_ID_DEPLOY }}
+          tenant-id: ${{ vars.AZURE_TENANT_ID }}
+          subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Find the read API and check it answers
+        id: api
+        env:
+          RG: ${{ vars.RESOURCE_GROUP }}
+        run: |
+          az config set extension.use_dynamic_install=yes_without_prompt >/dev/null
+          fqdn=$(az containerapp show -n "$READ_API_APP" -g "$RG" --query properties.configuration.ingress.fqdn -o tsv)
+          base="https://$fqdn"
+          ctype=$(curl -s -o /dev/null -w '%{content_type}' "$base/api/overview")
+          case "$ctype" in
+            application/json*) echo "read API OK at $base" ;;
+            *) echo "::error::$base/api/overview did not return JSON ($ctype). Deploy the read API first (deploy-services)."; exit 1 ;;
+          esac
+          echo "base=$base" >> "$GITHUB_OUTPUT"
+
+      - name: Build
+        run: |
+          npm ci
+          npm run build
+          printf '{ "apiBase": "%s" }\n' "${{ steps.api.outputs.base }}" > dist/config.json
+          cat dist/config.json
+
+      - name: Get the deployment token (never stored in GitHub)
+        id: token
+        env:
+          RG: ${{ vars.RESOURCE_GROUP }}
+        run: |
+          token=$(az staticwebapp secrets list -n "$STATIC_WEB_APP" -g "$RG" --query properties.apiKey -o tsv)
+          echo "::add-mask::$token"
+          echo "value=$token" >> "$GITHUB_OUTPUT"
+
+      - uses: Azure/static-web-apps-deploy@v1
+        with:
+          azure_static_web_apps_api_token: ${{ steps.token.outputs.value }}
+          action: upload
+          app_location: dashboard/dist
+          skip_app_build: true
+          skip_api_build: true

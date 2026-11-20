@@ -178,7 +178,7 @@ resource "azurerm_container_app" "read_api" {
 
   ingress {
     external_enabled = true
-    target_port      = 80 # the read-api image must listen on 80
+    target_port      = 8000 # the read-api image runs as non-root, which can't bind ports below 1024
     transport        = "auto"
 
     traffic_weight {

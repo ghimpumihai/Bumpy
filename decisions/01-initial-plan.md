@@ -9,7 +9,7 @@
 
 ## 0. TL;DR for the builder
 
-Build a **native iOS app (Swift + SwiftUI)** that records **every useful sensor on an iPhone 14 Pro at the highest practical rate**, **writes everything to local files first**, optionally **streams batches to the Azure backend**, and shows a **live dashboard proving every stream is healthy**.
+Build a **native iOS app (Swift + SwiftUI)** that records **every useful sensor on an iPhone 14 Pro at the highest practical rate**, **writes everything to local files first**, **streams batches to the Azure backend while recording** (the main way data reaches the cloud and the web dashboard), and shows a **live dashboard proving every stream is healthy**.
 
 We get **ONE test drive** to collect the data. There is no second chance:
 
@@ -259,11 +259,11 @@ Use the same numeric precision everywhere: 6 decimals for sensor values, 8 decim
 
 ---
 
-## 6. Live upload to Azure (secondary; must never block recording)
+## 6. Live upload to Azure (the main path to the cloud; must never block recording)
 
-The API base URL points at the Azure ingest function app (see [02-infrastructure-plan.md](02-infrastructure-plan.md)); the function serves `/api/ingest`. The backend answers `200` for both new and repeated batches; the app should still treat `409` as success, as below. After a drive, the session folder is uploaded to Blob Storage from a laptop, so live upload is optional for most sessions.
+The API base URL points at the Azure ingest function app (see [02-infrastructure-plan.md](02-infrastructure-plan.md)); the function serves `/api/ingest`. The backend answers `200` for both new and repeated batches; the app should still treat `409` as success, as below. Live upload is how data reaches the cloud and the web dashboard; uploading the session folder from a laptop is only a fallback for trips that never got a connection.
 
-The backend may not be ready during the drive. The app must work **fully offline**; upload is a bonus.
+The app must still work **fully offline**: recording never depends on the network. Without a connection, batches wait in the disk queue and are sent, oldest first, when the network returns, so a dead zone delays data but doesn't lose it.
 
 - **Settings screen:** `API base URL` and `Device key` (stored in UserDefaults/Keychain; **never hard-coded in the repo**). Empty URL = upload disabled. Show "UPLOAD OFF (local only)" in neutral grey, not red.
 - **Batching:** every **2 s**, build one batch from the samples of that window (in-memory copy; disk files stay the source of truth).
@@ -305,6 +305,23 @@ x-device-key: <device key>
 - **Queue on disk** (`Documents/upload_queue/`): write each batch as a `.json.gz` file, upload oldest first, **1 request at a time**, exponential backoff (1 s → 30 s max). Delete on HTTP 2xx. **Treat 409 (duplicate) as success.** Other 4xx: log, move to `upload_failed/`, continue.
 - Idempotency key = `sessionId + batchSeq`.
 - After the drive, a **"Upload full session"** button can send the queued remainder. The raw audio is **not** uploaded.
+
+### 6.1 Session metadata (new: the backend needs it for the live path)
+
+The backend learns a trip's context (vehicle, mount, seat, posture) and when it ended from `session.json`. Without it, a live trip shows on the dashboard but can't be compared with other trips.
+
+```
+PUT {API_BASE}/api/sessions/{sessionId}
+Content-Type: application/json
+Content-Encoding: gzip
+x-device-key: <device key>
+```
+
+- Body: the current `session.json` (§3.8). In the Stop copy, add `"batchCount"`: the number of batches created for the session, so the backend knows when every batch has arrived.
+- Send it **at Start** (right after `session.json` is first written) and **at Stop** (after it is rewritten with `endedAtUtc` and `stats`).
+- Put it in the **same disk queue** as the batches, so it is sent in order: the Start copy before batch 0, the Stop copy after the last batch. The queue file name needs a marker that tells it apart from a batch.
+- Same rules as batches: 2xx and 409 = done, same backoff. The backend answers `200` for a repeat.
+- Until this exists, the backend creates the trip from its first batch with unknown context and closes it after 15 minutes without batches.
 
 ---
 

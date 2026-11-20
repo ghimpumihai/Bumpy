@@ -1,6 +1,6 @@
 # Infrastructure plan: Azure backend
 
-> **Status:** proposed, 2026-11-20. Moved from AWS to Azure the same day (D21 to D31 in the [decision log](README.md)). The AWS version, which was researched and reviewed by an independent advisor model, is in git history (commit `83e1dec`); everything that does not depend on the cloud (data model, processing, aggregation, data-quality rules) carries over unchanged. The app side is in [01-initial-plan.md](01-initial-plan.md); research sources are in [03-research-notes.md](03-research-notes.md).
+> **Status:** proposed, 2026-11-20. Moved from AWS to Azure the same day (D21 to D31 in the [decision log](README.md)). The AWS version, which was researched and reviewed by an independent advisor model, is in git history (commit `83e1dec`); everything that does not depend on the cloud (data model, processing, aggregation, data-quality rules) carries over unchanged. Later the same day, the **live path (phone → cloud → dashboard) became the main path**, with laptop upload only as a fallback (D32, D33). The app side is in [01-initial-plan.md](01-initial-plan.md); research sources are in [03-research-notes.md](03-research-notes.md).
 >
 > **Who this is for:** anyone on the team, including people who have not used these Azure tools before. Every tool is explained in plain words in §5, together with why we picked it and what we rejected.
 
@@ -8,7 +8,7 @@
 
 ## 1. The plan in one paragraph
 
-Phones record trips in cars, buses and trams. Each finished trip (a "session") is copied from the phone to a laptop and uploaded to **Blob Storage** (Azure file storage). A **processing job** turns the raw sensor files into road-quality and motion-sickness numbers per small piece of road and stores them in a **PostgreSQL database with PostGIS** (maps support). An **aggregation step** combines all sessions, so every trip makes the map better. A **web dashboard** shows the map and charts. The same processing code also runs **live**: the phone can send data every 2 seconds to an **ingest function** that puts it into **Event Hubs** (a stream), and the dashboard updates while driving. A **replay tool** sends a recorded trip through that live path, so we can show "live" in the presentation room without a car. Everything is created by **Terraform** (infrastructure as code) and deployed by **GitHub Actions** (CI/CD).
+Phones record trips (a "session") in cars, buses and trams and **send them to the cloud while driving**: every 2 seconds the app posts a batch of sensor data to an **ingest function**, which puts it into **Event Hubs** (a stream). A **stream processor** turns the batches into road-quality and motion-sickness numbers per small piece of road and stores them in a **PostgreSQL database with PostGIS** (maps support). The **web dashboard** shows the vehicle moving on the map, the road colouring in and the sickness score rising, a few seconds behind the phone. When a trip ends, a **finalize job** reprocesses the whole trip from the archived batches, and an **aggregation step** combines all trips, so every trip makes the shared map better. If the phone has no network, the app keeps the batches on disk and sends them later; only if a trip never reaches the cloud is its folder uploaded from a laptop, through the same finalize job. A **replay tool** sends a recorded trip through the live path, so we can show "live" in the presentation room without a car. Everything is created by **Terraform** (infrastructure as code) and deployed by **GitHub Actions** (CI/CD).
 
 ---
 
@@ -20,22 +20,22 @@ Phones record trips in cars, buses and trams. Each finished trip (a "session") i
 |---|---|---|---|
 | Cloud | Azure | **Azure**, region **North Europe** (Ireland) | We moved to AWS and back (see below). North Europe is a large, mature region with every service we need. |
 | Where the data comes from | One test drive | **Many real trips** in cars, buses, trams, aggregated | More real data makes a better map and an honest story. No simulated cars. |
-| How data reaches the cloud | Mainly live upload | **Session files are the main path**, live upload is a capability | The full files are complete and high-resolution; live upload can drop data on a bad network. |
-| Demo | Live drive | **Recorded results in the room**, a **video** of the live pipeline, and a **replay** of a real trip through the live path | A presentation room has no moving car and unreliable Wi-Fi. |
+| How data reaches the cloud | Live upload | **Live upload is the main path**; laptop upload of session files is only a fallback | The product is phone → cloud → dashboard. Each batch carries every sensor at full rate, and the app's disk queue resends until the backend accepts it, so a bad network delays data but doesn't lose it. |
+| Demo | Live drive | The **live dashboard** fed by a **replay** of a real trip through the live path, a **video** of a real drive, and if possible a car streaming live during the presentation | A presentation room has no moving car and unreliable Wi-Fi, so the replay is the safe version of the same path. |
 | Streaming | Kafka considered | **Event Hubs (Basic)** | Same idea as Kafka, much less setup and cost at our volume. See §6. |
 
 ### From the AWS version (2026-11-20)
 
 Why we went back to Azure:
 - **The whole stack fits the free account.** On AWS, the new Free plan does not allow Kinesis or Firehose, so streaming would have forced the Paid plan, where anything above the credits goes on a card. On Azure everything here runs on the free account's $200 credit, and the account has a spending limit: when the credit runs out, resources stop instead of billing.
-- **Some parts get simpler.** The PostgreSQL server is free for 12 months, Container Apps Jobs start the backfill job straight from the queue (on AWS this needed extra glue), and Static Web Apps hosts the dashboard for free.
+- **Some parts get simpler.** The PostgreSQL server is free for 12 months, Container Apps Jobs start the finalize job straight from the queue (on AWS this needed extra glue), and Static Web Apps hosts the dashboard for free.
 - **No passwords at all.** Every service logs in to the database with its own Azure identity.
 
 | AWS version | Azure now |
 |---|---|
 | S3 | Blob Storage |
 | S3 event → SQS | Event Grid → Service Bus queue |
-| ECS Fargate (processor, backfill) | Container Apps (processor) + Container Apps Jobs (backfill, aggregate, migrate) |
+| ECS Fargate (processor, backfill) | Container Apps (processor) + Container Apps Jobs (finalize, aggregate, migrate) |
 | ECR | Azure Container Registry |
 | API Gateway + Lambda (ingest) | Azure Function with an HTTP trigger (no separate gateway) |
 | Kinesis Data Streams | Event Hubs (Basic) |
@@ -56,7 +56,7 @@ Why we went back to Azure:
 
 Yes, in five places. The overall shape (capture, transmit, process, store, visualize) stays the same.
 
-1. **The batch path becomes the main path.** Uploaded session folders are the real dataset. The live path stays, but it is no longer the only way in.
+1. **The live stream is the dataset, not just a preview.** Each batch holds every sensor at full rate (only raw audio stays on the phone), and the app resends until the backend accepts it. So once a trip has ended and all its batches have arrived, a finalize job reprocesses it as a whole and it joins the dataset. Uploaded files are only needed when a phone never got a connection.
 2. **A new aggregation layer.** We need to line up many trips on the same roads. That means fixed road segments (§8), a table of "one observation per session per segment", and a step that combines them. This is now core, not a stretch goal.
 3. **Raw samples stay out of the database.** One hour of driving is about a million sensor rows. Fifty hours would be about fifty million rows, too much for a small database. So raw samples stay in Blob Storage as files (converted to Parquet, a compact column format), and the database only stores results: segments, events, a light track, and downsampled chart data. This keeps the database small and cheap no matter how much we drive.
 4. **Every session carries its context.** Vehicle type, bus line, how the phone was mounted, seated or standing. Without that, a bumpy bus would look like a bumpy road. Normalization between vehicles is in §9.
@@ -72,42 +72,43 @@ How much data is "a lot"? Expect about **5 to 15 sessions** in the time we have.
 flowchart TB
   subgraph CAP["Capture"]
     phone["iPhone recorder<br/>car, bus, tram"]
-    laptop["Laptop<br/>uploads session folder"]
     replay["Replay tool<br/>re-sends a recorded trip"]
+    laptop["Laptop (fallback)<br/>uploads a session folder"]
   end
 
   subgraph AZ["Azure North Europe"]
-    subgraph BATCH["Batch path (main dataset)"]
-      blobS["Blob container: sessions<br/>CSV files + session.json"]
-      eg["Event Grid<br/>_complete.json created"]
-      sb["Service Bus queue<br/>new session uploaded"]
-      backfill["Backfill job<br/>Container Apps Job"]
-    end
-    subgraph LIVE["Live path"]
-      ingest["Ingest Function<br/>HTTPS, checks key + format"]
+    subgraph LIVE["Live path (main)"]
+      ingest["Ingest Function<br/>batches + session metadata"]
       eh["Event Hubs<br/>ordered per device"]
       proc["Stream processor<br/>Container App"]
     end
+    subgraph FIN["After each trip"]
+      sb["Service Bus queue<br/>session ready"]
+      fin["Finalize job<br/>Container Apps Job<br/>reprocess + aggregate"]
+      blobS["Blob container: sessions<br/>fallback uploads"]
+      eg["Event Grid<br/>_complete.json created"]
+    end
     lake["Blob container: lake<br/>raw batches + Parquet samples"]
     pg[("PostgreSQL Flexible Server + PostGIS<br/>sessions, segments, results")]
-    agg["Aggregation<br/>runs after each backfill"]
     read["Read API Function"]
-    web["Dashboard<br/>React + MapLibre<br/>Static Web Apps"]
+    web["Dashboard<br/>live view + aggregated map<br/>Static Web Apps"]
     ops["Azure Monitor workbook<br/>+ budget alerts"]
   end
 
   gh["GitHub Actions<br/>Terraform + deploys (OIDC)"]
 
-  phone -.->|"AirDrop after the trip"| laptop
-  laptop -->|"tools/upload"| blobS --> eg --> sb --> backfill
   phone -->|"HTTPS, gzip batch every 2 s"| ingest
   replay -->|"same API, real speed"| ingest
-  ingest --> eh --> proc
+  ingest --> eh --> proc --> pg
   ingest -->|"raw archive"| lake
-  backfill --> lake
-  backfill --> pg
-  backfill --> agg --> pg
-  proc --> pg
+  proc -->|"trip ended, all batches in"| sb
+  phone -.->|"only if the trip never reached the cloud"| laptop
+  laptop -->|"tools/upload"| blobS --> eg --> sb
+  sb --> fin
+  lake --> fin
+  blobS --> fin
+  fin --> lake
+  fin --> pg
   pg --> read --> web
   gh -.-> AZ
 ```
@@ -120,21 +121,29 @@ Read this section if a tool name is unfamiliar. Each entry says what the tool is
 
 ### Capture side
 
-**iPhone recorder app** (built by our teammate, see [01-initial-plan.md](01-initial-plan.md)). Writes every sensor to CSV files on the phone first, so nothing is lost if the network fails. It can also send small batches live.
+**iPhone recorder app** (built by our teammate, see [01-initial-plan.md](01-initial-plan.md)). Writes every sensor to CSV files on the phone first, so nothing is lost if the network fails. Every 2 seconds it builds a batch with all sensors at full rate (everything except raw audio), saves it in a **queue on disk**, and sends the queue oldest first, retrying with backoff until the backend accepts each batch. A dead zone therefore delays data, it doesn't lose it. It also sends the session's metadata (`session.json`: vehicle, mount, seat, posture) at Start and again at Stop, through the same queue, so the backend knows the context and when the trip ended. This metadata call is a **small addition to the app** (spec §6.1).
 
-**Laptop upload** (`tools/upload`, a few lines wrapping `azcopy copy --recursive` after `azcopy login`). After a trip, the session folder is AirDropped to a laptop and uploaded with one command. The script uploads all files first and writes a small `_complete.json` marker **last**. Processing starts only when that marker appears, so it never starts on a half-uploaded folder (the app writes `session.json` at the start of a trip, so it can't be the trigger). Team members log in with their own Azure account; they need the "Storage Blob Data Contributor" role on the `sessions` container. *Why not upload straight from the phone?* It would mean building signed-upload logic in the app. A laptop command takes minutes to set up and is just as reliable.
+**Laptop upload (fallback)** (`tools/upload`, a few lines wrapping `azcopy copy --recursive` after `azcopy login`). Only for a trip that never reached the cloud (no network at all, upload switched off, or the app's queue was cleared). The session folder is AirDropped to a laptop and uploaded with one command. The script uploads all files first and writes a small `_complete.json` marker **last**, so processing never starts on a half-uploaded folder. Team members log in with their own Azure account; they need the "Storage Blob Data Contributor" role on the `sessions` container.
 
 **Replay tool** (`tools/replay`, a small Python script). Reads a recorded session folder, builds the same 2-second batches the phone would send, and posts them to the real API at real speed (or faster). It is our end-to-end test before every drive, and our backup demo: in the room we can show the map updating live from a real trip. Replays are tagged `source=replay` with a new session ID, and are never counted in the aggregated map, so nothing is counted twice.
 
 ### Getting data into Azure
 
-**Azure Functions (ingest function, Flex Consumption plan).** Azure Functions runs a small piece of code only when a request arrives; you pay per run, and it costs nothing when idle. An HTTP-triggered function already has a public HTTPS address with a certificate, so we don't need a separate API gateway. The ingest function:
+**Azure Functions (ingest function, Flex Consumption plan).** Azure Functions runs a small piece of code only when a request arrives; you pay per run, and it costs nothing when idle. An HTTP-triggered function already has a public HTTPS address with a certificate, so we don't need a separate API gateway. It serves three routes:
+
+| Route | What it does |
+|---|---|
+| `POST /api/ingest` | one 2-second batch (spec §6) |
+| `PUT /api/sessions/{sessionId}` | the session's metadata, sent at Start and at Stop (spec §6.1) |
+| `GET /api/health` | the app's connection test before a drive |
+
+For each batch or metadata message the function:
 - checks the `x-device-key` header against hashed device keys (stored in Key Vault, loaded once at start-up, compared in constant time so timing can't leak them);
 - decompresses the gzip body and checks its format (with pydantic, a Python validation library), and rejects bodies over 200 KB;
-- sends the batch to Event Hubs as **decompressed JSON**, with the **device ID as the partition key**;
-- writes the same batch to the raw archive at `lake/raw/dt=<arrival date>/session=<sessionId>/<batchSeq>.json.gz`, then answers `200`.
+- sends it to Event Hubs as **decompressed JSON**, marked `kind=batch` or `kind=session`, with the **device ID as the partition key**, so a phone's metadata and batches stay in the order the phone sent them;
+- writes it to the raw archive under `lake/raw/session=<sessionId>/` (`<batchSeq>.json.gz` or `session.json.gz`), then answers `200`.
 
-The archive file name comes from the batch itself, so if the phone retries, the same file is simply overwritten: no duplicates in the archive. Duplicates in the stream are removed later in the database (§8).
+The archive file name comes from the message itself, so if the phone retries, the same file is simply overwritten: no duplicates in the archive. Duplicates in the stream are removed later in the database (§8). The archive is the long-term copy of every trip: the finalize job rebuilds a whole trip from it.
 
 It runs **outside** our private network (VNet) on purpose: it then needs no network setup and reaches Event Hubs, Blob Storage and Key Vault directly over their public, login-protected endpoints. Abuse is limited by the device keys and by a cap on how many copies of the function may run at once (`maximum_instance_count`), so a flood of bad requests can't run up the bill.
 
@@ -146,33 +155,45 @@ It runs **outside** our private network (VNet) on purpose: it then needs no netw
 
 *Why have a stream at all, with only a few phones?* Honestly, not for volume. We keep it because it:
 - **decouples** receiving data from processing it, so the phone always gets a fast answer even if processing is slow or down;
-- keeps **order per device**, which matters because the filters carry state from one batch to the next;
+- keeps **order per device**, which matters because the filters carry state from one batch to the next, and because the Stop metadata must arrive after the trip's last batch;
+- **buffers** a day of data, so a processor crash or redeploy during a drive loses nothing;
 - costs about **$0.36 per day**.
 
 Basic tier limits that matter: one reader group (fine, only the processor reads; the archive is written by the ingest function), 256 KB per message (a batch is about 30 KB), 1 day of retention. *Rejected:* Event Hubs Standard with **Capture**, which writes the stream to storage by itself, like Firehose. Capture costs extra per hour on Standard and writes Avro files instead of plain JSON; a few lines in the ingest function do the same job for free. See §6 for Kafka and others.
 
-### Batch path
+### Processing: live, then once more per trip
+
+**Stream processor.** Reads Event Hubs continuously and handles each message within a second or two:
+- a `session` message creates or updates the trip and its context (vehicle, mount, seat);
+- a `batch` message runs the same calculations as the full pipeline (§9), incrementally: it updates the vehicle's live position and scores, writes segment observations as each 25 m hexagon is passed, adds detected potholes and the downsampled chart data;
+- it records how far it has read in the same database transaction, so a restart continues exactly where it left off.
+
+Gaps and late data. If a batch number is skipped (still queued on the phone, or rejected), the processor resets its filters at the gap and flags it; when a dead zone ends, the phone sends a burst of older batches, which the dashboard shows as "catching up" rather than live. These live results are good enough to watch, and the finalize job replaces them with exact ones.
+
+**Trip end.** A trip is ready when its Stop metadata has arrived (it carries the number of batches) and every batch up to that number is in. The processor then puts a "session ready" message in the Service Bus queue. If no Stop arrives (app crashed, phone died), a trip with no new batch for 15 minutes is closed as incomplete and finalized anyway, with its gaps marked.
+
+**Finalize job.** Runs once per finished trip, a few seconds after it ends. It reads the whole trip, either from the raw archive (live trips) or from the uploaded folder (fallback), recomputes everything over the complete trip in one pass (no gaps, filters run over the whole signal), writes Parquet samples to `lake`, replaces the trip's live results in the database, then runs the aggregation step (§9). If a trip arrives both ways, the uploaded folder wins, since it also has the samples a failed batch may have lost.
 
 **Blob Storage.** Azure's file storage ("containers" of files in a storage account). Very cheap, very durable, and the place where all raw data lives. We use two containers:
-- `sessions`: uploaded session folders, exactly as recorded;
-- `lake`: the raw live archive and processed Parquet files.
+- `lake`: the raw live archive and processed Parquet files;
+- `sessions`: fallback uploads of session folders, exactly as recorded.
 
 Public access and storage keys are switched off; everything logs in with an Azure identity.
 
 **Parquet.** A compressed, column-based file format used for analytics. A 100 Hz sensor file shrinks a lot, and pandas reads it fast.
 
-**Event Grid.** Azure's event router. When a file whose name ends in `_complete.json` is created in `sessions`, Event Grid puts a message in the Service Bus queue. The filter is set in Terraform, so other files don't trigger anything.
+**Event Grid.** Azure's event router, used only by the fallback upload. When a file whose name ends in `_complete.json` is created in `sessions`, Event Grid puts a message in the Service Bus queue. The filter is set in Terraform, so other files don't trigger anything.
 
-**Service Bus (Basic tier) queue.** A queue of small "to-do" messages. The backfill job takes a message, processes the session, and completes the message. If processing fails, the message comes back and is retried; after 5 failed tries it moves to a **dead-letter queue**, so one broken session can't loop forever. Costs a few cents per million messages. *Rejected:* Storage Queues (no dead-letter queue built in), RabbitMQ (something to run and secure).
+**Service Bus (Basic tier) queue.** A queue of small "to-do" messages: "session X is ready", sent by the processor (live trips) or by Event Grid (uploads). The finalize job takes a message, processes the session, and completes the message. If processing fails, the message comes back and is retried; after 5 failed tries it moves to a **dead-letter queue**, so one broken session can't loop forever. Costs a few cents per million messages. *Rejected:* Storage Queues (no dead-letter queue built in), RabbitMQ (something to run and secure).
 
 **Azure Container Apps.** Runs Docker containers without us managing servers. We use it for two things:
 - the **stream processor**: a long-running container app (always 1 copy) that reads Event Hubs continuously;
-- **Container Apps Jobs**: containers that run to completion and stop. The **backfill job** is started automatically by the Service Bus queue: when a message arrives, Azure starts one copy, which processes that session and exits. Two more jobs, **aggregate** and **migrate**, are started by hand or by CI (see below).
+- **Container Apps Jobs**: containers that run to completion and stop. The **finalize job** is started automatically by the Service Bus queue: when a message arrives, Azure starts one copy, which processes that session and exits. Two more jobs, **aggregate** and **migrate**, are started by hand or by CI (see below).
 
 All of them run the **same Python code** (numpy and scipy for signal processing). *Why not Functions for processing?* The filters keep state for minutes (motion-sickness dose accumulates over a whole trip), and functions are short-lived and stateless. A container can keep that state in memory and checkpoint it to the database.
 
 Setup details:
-- The backfill job uses a KEDA rule (Azure's built-in autoscaler) on the Service Bus queue: 0 copies when the queue is empty, at most 3 at once, a 30-minute time limit per run.
+- The finalize job uses a KEDA rule (Azure's built-in autoscaler) on the Service Bus queue: 0 copies when the queue is empty, at most 3 at once, a 30-minute time limit per run.
 - A long session can take longer than the 5-minute message lock, so the job renews the lock while it works (`AutoLockRenewer` in the Service Bus SDK).
 - The processor needs no incoming traffic, so the environment is **internal**: nothing in it is reachable from the internet.
 
@@ -191,7 +212,7 @@ Setup details:
 | Database user | Used by | Rights |
 |---|---|---|
 | `migrator` (the server's Entra admin) | migrate job | creates PostGIS, tables and the other users |
-| `writer` | stream processor, backfill and aggregate jobs | read and write on our tables |
+| `writer` | stream processor, finalize and aggregate jobs | read and write on our tables |
 | `reader` | read API function | `SELECT` only |
 
 Setup details:
@@ -204,7 +225,17 @@ Setup details:
 
 ### Dashboard
 
-**Read API function.** A second, separate function app. It only reads from the database and returns JSON and GeoJSON (map data) to the dashboard. It is connected to the VNet because the database is private, and it logs in as `reader` with its managed identity.
+**What the dashboard shows.** The web app is where the whole system becomes visible, so it is built around the live path:
+
+| View | What you see | Fed by |
+|---|---|---|
+| **Live** (the main screen) | The map follows each vehicle that is sending. The road behind it colours in hexagon by hexagon (roughness), pothole and speed-bump markers pop up as they are detected. A side panel shows speed, current roughness, motion-sickness dose so far and the predicted share of sick passengers, the passenger's latest MISC rating, and how fresh the data is (seconds behind the phone, "catching up" after a dead zone). | stream processor, updated every 2 s |
+| **Map** | All finished trips combined: hexagons coloured by normalized roughness or sickness score, filtered by vehicle type; confirmed potholes. | finalize job + aggregation |
+| **Trip** | One trip: vertical and sideways acceleration, speed and sickness dose over time, with the MISC ratings on top; its track on the map; the data-quality panel (§10). | finalize job (live results while the trip is running) |
+
+End-to-end delay target: under 10 seconds from the phone to the screen (2 s batch, upload, stream, processing, 2 s polling). The processor stores when each batch arrived, so the dashboard can show the real delay instead of claiming "live".
+
+**Read API function.** A second, separate function app. It only reads from the database and returns JSON and GeoJSON (map data) to the dashboard: `/api/live`, `/api/trips`, `/api/trips/{id}`, `/api/segments`. It is connected to the VNet because the database is private, and it logs in as `reader` with its managed identity.
 
 **React + Vite + MapLibre + uPlot, hosted on Static Web Apps.**
 - *React + Vite*: a common way to build a web app; Vite is the build tool.
@@ -228,7 +259,7 @@ A private DNS zone lets our services find the database by name. Network security
 | Identity | Roles |
 |---|---|
 | ingest function | send to the event hub; write to `lake`; read the device-key secret |
-| processor and jobs | read from the event hub; receive from the queue; read `sessions`; write `lake`; pull images; database `writer` |
+| processor and jobs | read from the event hub; send to and receive from the queue; read `sessions`; read and write `lake`; pull images; database `writer` |
 | migrate job | database Entra admin; pull images |
 | read API function | database `reader` |
 | Event Grid | send to the Service Bus queue |
@@ -279,21 +310,23 @@ If the project ever grows to thousands of vehicles, the design moves to Kafka cl
 
 ## 7. How the data flows
 
-**After a trip (main path).**
+**During a trip (main path).**
+1. At Start, the app sends the session metadata (`PUT /api/sessions/{id}`). The trip appears on the dashboard with its vehicle and context.
+2. Every 2 seconds the phone (or the replay tool) posts a gzip batch to the ingest function. Without network, batches wait in the app's disk queue and are sent oldest first when the network returns.
+3. The ingest function checks each message, sends it to Event Hubs keyed by device, and writes it to the raw archive.
+4. The stream processor reads the messages in order, runs the calculations incrementally, and writes live state, segment observations, events and chart data. It records how far it has read (the partition's sequence number, in `stream_checkpoints`) in the same database transaction.
+5. The dashboard polls the read API every 2 seconds: the vehicle moves, the road colours in, the sickness dose rises.
+
+**When the trip ends.**
+1. At Stop, the app sends the metadata again, now with the end time and the number of batches. It goes through the same queue, so it arrives after the last batch.
+2. Once every batch is in, the processor puts "session ready" in the Service Bus queue (or after 15 minutes of silence, as incomplete).
+3. Container Apps starts the finalize job: it rebuilds the trip from the raw archive, recomputes it in one pass (§9), writes Parquet to `lake`, replaces the trip's live results, and runs the aggregation step.
+4. The trip now counts in the aggregated map.
+
+**Fallback: a trip that never reached the cloud.**
 1. `tools/upload` copies the session folder to the `sessions` container under `<sessionId>/` and writes `_complete.json` last.
-2. When the marker arrives, Event Grid puts a message in the Service Bus queue, and Container Apps starts the backfill job.
-3. The backfill job reads the CSVs and processes them (§9). It writes Parquet samples to `lake` and results to the database.
-   - If the same trip was also streamed live, the uploaded files win: the job deletes that session's live results and writes them again from the complete files, so nothing is counted twice. This works because the app uses the same `sessionId` for live batches and for the session folder.
-4. The backfill job then runs the aggregation step (§9) and completes the queue message.
-5. The dashboard shows the new session and the updated map.
-
-**Live (capability, shown on video and with replay).**
-1. The phone (or the replay tool) posts a gzip batch every 2 seconds to the ingest function.
-2. The ingest function checks it, sends it to Event Hubs keyed by device, and writes it to the raw archive.
-3. The stream processor reads the batches in order, runs the same calculations incrementally, and writes live state and per-session segment observations to the database. It records how far it has read (the partition's sequence number, in `stream_checkpoints`) in the same database transaction, so a restart continues exactly where it left off.
-4. The dashboard polls the read API and moves the live marker along the map.
-
-Live sessions show on the map as their own trip, but they are **not** added to the aggregated map until their files are uploaded.
+2. Event Grid puts "session ready" in the same queue; the same finalize job reads the CSVs instead of the archive.
+3. If part of the trip had arrived live, the uploaded files win: the job replaces that trip's results, so nothing is counted twice (the app uses the same `sessionId` for both).
 
 ---
 
@@ -303,8 +336,8 @@ Live sessions show on the map as their own trip, but they are **not** added to t
 |---|---|---|
 | `vehicles` | vehicle | type (car/bus/tram), make/model, line |
 | `devices` | phone | device ID, hashed key |
-| `sessions` | trip | vehicle, device, mount (rigid, handheld, location), rater seat and posture, `source` (`upload`/`live`/`replay`), quality status, `include_in_agg` |
-| `ingest_batches` | live batch received | (session_id, batch_seq) **unique**: a repeated batch is ignored with `ON CONFLICT DO NOTHING` |
+| `sessions` | trip | vehicle, device, mount (rigid, handheld, location), rater seat and posture (from `session.json`), `source` (`live`/`upload`/`replay`), `status` (`recording`/`ended`/`finalized`, plus `incomplete`), expected batch count, quality status, `include_in_agg` |
+| `ingest_batches` | live batch received | (session_id, batch_seq) **unique**: a repeated batch is ignored with `ON CONFLICT DO NOTHING`; arrival time, for the delay shown on the dashboard |
 | `stream_checkpoints` | Event Hubs partition | last sequence number processed |
 | `segments` | road piece | H3 cell ID, geometry |
 | `segment_observations` | session × segment × pass | speed, raw roughness, MSDV contribution, sample count, quality flags |
@@ -314,7 +347,7 @@ Live sessions show on the map as their own trip, but they are **not** added to t
 | `live_state` | device | last position, speed, current scores (for the live view) |
 | `segment_agg` | segment × vehicle type | normalized roughness, pothole confirmation ratio, sickness score, number of sessions; rebuilt by the aggregation step |
 
-`include_in_agg` is true only for `source = upload` sessions that pass the quality rules (§10).
+`include_in_agg` is true only for **finalized** trips (live or uploaded, never replays) whose context is known and that pass the quality rules (§10).
 
 Raw values are always stored as measured; normalization happens only in the aggregation step, so we can change the method later without reprocessing.
 
@@ -324,7 +357,7 @@ Raw values are always stored as measured; normalization happens only in the aggr
 
 ## 9. Processing and aggregation
 
-**Per session** (the same code runs in batch and live):
+**Per session** (the same code runs live, batch by batch, and in the finalize job over the whole trip):
 1. **Clock alignment.** Convert all timestamps to UTC using the clock anchors (`clock.csv`).
 2. **Phone-to-vehicle axes.** Use gravity at rest for "down" and GPS course or the main direction of acceleration for "forward". Everything else depends on this step.
 3. **Quality checks.** Measure sample rates and gaps. Mark windows invalid when `phone_moved` was tapped, when gravity drifts in the phone's frame, or when the gyro's turn rate disagrees with GPS. Report what fraction of the session is valid.
@@ -339,7 +372,7 @@ Raw values are always stored as measured; normalization happens only in the aggr
    - The filter has a unit test checking its frequency response against reference values.
    - Known limit, to state openly: the ISO metric only covers up-and-down motion, while in cars sideways sway is likely a strong cause of sickness. A sideways metric was considered and dropped (§19).
 
-**Across sessions** (the aggregation step). It runs at the end of every backfill job, and can be re-run by hand with the **aggregate** job (for example after changing the method). It takes a PostgreSQL advisory lock, so two runs never overlap, and rebuilds `segment_agg` in one transaction.
+**Across sessions** (the aggregation step). It runs at the end of every finalize job, and can be re-run by hand with the **aggregate** job (for example after changing the method). It takes a PostgreSQL advisory lock, so two runs never overlap, and rebuilds `segment_agg` in one transaction.
 - **Roughness is normalized per vehicle.** A bus and a car feel the same road differently. We fit one model across all observations: `log(roughness) = road segment effect + vehicle effect + β·log(speed)`. Segments driven by several vehicles tie the vehicle effects together. If there is too little overlap, the fallback is per-session percentiles.
 - **Potholes are crowd-confirmed.** A pothole counts as confirmed when it was detected in at least *k* of *n* passes over that segment, with thresholds set per vehicle type.
 - **Sickness is not normalized.** It measures what passengers actually feel, so "the bus is worse than the car on this route" is a finding, not an error. Results are split by seat and by seated or standing.
@@ -354,7 +387,7 @@ Raw values are always stored as measured; normalization happens only in the aggr
 - **Buses.** Frequent stops, door cycles, kneeling and idling engines are separated using speed near zero and the activity data.
 - **Trams.** Rail joints cause regular, repeating impacts. They are labelled as rail joints so they don't count as potholes.
 - **Audio is off on public transport** (other passengers, GDPR).
-- **Replays and live-only sessions are never included in aggregates**; only uploaded session files are.
+- **Only finalized trips count in aggregates.** A trip still recording, or one whose context (vehicle, mount) never arrived, shows on the live view but not in the aggregated map. Replays never count.
 - A **data-quality panel** on the dashboard shows per session: sample rates, gaps, GPS accuracy, valid fraction and rejected batches.
 
 ---
@@ -386,7 +419,7 @@ infra/
     storage/          # storage account, containers (sessions, lake), Event Grid subscription to Service Bus
     messaging/        # Service Bus (Basic) queue + dead-letter, Event Hubs (Basic) namespace + hub
     database/         # PostgreSQL Flexible Server, server parameters (azure.extensions, TLS), Entra admin
-    compute/          # ACR, Container Apps environment, processor app, backfill/aggregate/migrate jobs, both function apps, Key Vault, identities + role assignments
+    compute/          # ACR, Container Apps environment, processor app, finalize/aggregate/migrate jobs, both function apps, Key Vault, identities + role assignments
     web/              # Static Web App for the dashboard
     observability/    # Log Analytics, Application Insights, workbook, alerts, budget
 ```
@@ -421,7 +454,7 @@ Approximate, North Europe prices; verify in the Azure Pricing Calculator.
 | Event Hubs Basic, 1 throughput unit (exists 24/7) | ~$0.36 |
 | PostgreSQL Flexible Server `B1ms` + 32 GB | $0 for 12 months on the free account (~$0.55 after) |
 | Container Apps processor (0.25 vCPU, 0.5 GB, always on) | $0 for the first ~8 days each month (monthly free grant), then ~$0.45 |
-| Container Apps Jobs (backfill, aggregate, migrate) | ~$0 (minutes per session) |
+| Container Apps Jobs (finalize, aggregate, migrate) | ~$0 (minutes per session) |
 | Functions (Flex Consumption) | ~$0 at our volume |
 | Container Registry | $0 to ~$0.17 (Basic) |
 | Storage, Event Grid, Service Bus, Key Vault, Log Analytics (capped), Static Web Apps (Free) | < $0.20 |
@@ -439,9 +472,9 @@ src/mobile-ios/       # iPhone app (teammate, built on a Mac)
 services/
   ingest/             # Function app: validate, send to Event Hubs, archive
   read-api/           # Function app: dashboard queries
-  processor/          # shared Python package + entry points: stream, backfill, aggregate, migrate
+  processor/          # shared Python package + entry points: stream, finalize, aggregate, migrate
 tools/
-  upload/             # upload a session folder to Blob Storage, marker file last
+  upload/             # fallback: upload a session folder to Blob Storage, marker file last
   replay/             # re-send a recorded session through the live API
   quick_check/        # sanity check of a session folder (from the initial plan §10)
 dashboard/            # React + MapLibre + uPlot
@@ -461,21 +494,21 @@ docker-compose.yml    # local PostGIS
 - Check that `B1ms` PostgreSQL and Flex Consumption are available in North Europe for this subscription.
 - Create the budget, run `infra/bootstrap`, and set up OIDC.
 
-**Day 1.**
-- Processing on the first real session folders, locally. This is where the value is.
-- In parallel: Terraform main stack; upload → Event Grid → Service Bus → backfill → PostgreSQL; the first map on the dashboard; CI workflows.
-- Early check: the read API function can get an Entra token and connect to the private database (this exercises the VNet's outbound access).
+**Day 1: the thin live slice first.**
+- Morning: phone (or replay tool) → ingest function → Event Hubs → processor → PostgreSQL → read API → a dot moving on the dashboard map. No signal processing yet, just position and speed. Once this works end to end, every later step only adds detail to a path that already runs.
+- Early check in that slice: the read API function can get an Entra token and connect to the private database (this exercises the VNet's outbound access).
+- In parallel: processing on the first real session folders, locally (this is where the value is); Terraform; CI workflows; the app's session metadata call (spec §6.1).
 
 **Day 2.**
-- Segments, observations and aggregation.
-- Ingest function → Event Hubs → processor, plus the replay tool.
-- Dashboard layers, monitoring workbook, data-quality panel.
+- Plug the processing into the processor: roughness colouring, potholes, sickness dose on the live view.
+- Trip end detection, finalize job, segments, aggregation, the Map view.
+- Real drives on the loop, watched live.
 
-**Day 3.** Tests, README and architecture slide, rehearsal, recording the live video.
+**Day 3.** Fallback upload path, monitoring workbook, data-quality panel, tests, README and architecture slide, rehearsal, recording the live video.
 
-**Cut in this order if time runs out:** monitoring workbook (keep the budget alerts) → live upload during drives (keep upload plus replay).
+**Cut in this order if time runs out:** monitoring workbook (keep the budget alerts) → laptop upload fallback (the app's queue covers most network gaps) → aggregated Map view (keep Live and Trip).
 
-**Never cut:** real data on the map, Terraform, CI/CD.
+**Never cut:** the live path from phone to dashboard, real data on the map, Terraform, CI/CD.
 
 ---
 
@@ -483,16 +516,20 @@ docker-compose.yml    # local PostGIS
 
 1. **Account limits.** The free account's credit lasts 30 days and some sizes may be unavailable in the region. Fix on day 0; fall back to West Europe if needed.
 2. **Network surprises.** New VNets no longer have outbound internet by default; if Terraform doesn't keep it on, the read function can't get a database token. Test on day 1, not day 3.
-3. **Bad recordings:** loose mount, clock problems, wrong axes. Do a 10-minute dry run and check it with `quick_check` before the first real drive.
-4. **Not enough overlapping trips** for aggregation. Plan a fixed loop and repeat it.
-5. **Live parts fail in the room** (Wi-Fi, function cold start). The recorded results are the main demo; replay and video are the backup.
-6. **Expert questions on the method** (few raters, timing noise). Be open about it, and tune on some sessions and test on others.
+3. **The app's metadata call isn't ready.** Without it the backend doesn't know the vehicle or when a trip ended. Fallback: the processor creates the trip from its first batch with unknown context and closes it after 15 minutes of silence; such trips stay out of the aggregated map until their folder is uploaded.
+4. **Bad recordings:** loose mount, clock problems, wrong axes. Do a 10-minute dry run, watch it live on the dashboard, and check the folder with `quick_check` before the first real drive.
+5. **Mobile network on the route.** Dead zones delay data (the queue catches up) but don't lose it. Pick a loop with decent coverage so the live view looks live.
+6. **Not enough overlapping trips** for aggregation. Plan a fixed loop and repeat it.
+7. **Live parts fail in the room** (Wi-Fi, function cold start). The replay through the real live path is the main demo; the video of a real drive is the backup.
+8. **Expert questions on the method** (few raters, timing noise). Be open about it, and tune on some sessions and test on others.
 
 ---
 
 ## 18. Open questions
 
 - Free account or Azure for Students, and whose card or student account?
+- Can the app's session metadata call (spec §6.1) be added on day 1?
+- Can a car stream live during the presentation (organizers, parking, mobile coverage), or do we show the replay only?
 - Which loop will we drive repeatedly, and which bus or tram line overlaps it?
 - Who owns which part (processing, infra, dashboard, app)?
 - When is the dry run?
@@ -506,7 +543,7 @@ These were in earlier versions of the plan. We removed them because they mainly 
 
 | Dropped | What it would have given | Why it's dropped | If we ever want it back |
 |---|---|---|---|
-| SQL on raw files (Athena + Glue on AWS) | SQL queries directly on raw files in storage | Nobody would use it in 3 days; pandas on the Parquet files does the same job | DuckDB on the `lake` container, or Synapse serverless SQL; the `dt=` folders already fit |
+| SQL on raw files (Athena + Glue on AWS) | SQL queries directly on raw files in storage | Nobody would use it in 3 days; pandas on the Parquet files does the same job | DuckDB on the `lake` container, or Synapse serverless SQL; the `session=` folders already fit |
 | OpenStreetMap road snapping | Segments that follow real roads, no blurring at junctions or parallel roads | H3 hexagons are good enough for aggregation and need no map import | Import an OSM extract, cut roads into 25 m pieces, add a road ID to `segments` |
 | Lateral (sideways) sickness metric | A second, non-standard sickness score based on Donohew & Griffin (2004) | Scientifically interesting, not required. The ISO vertical metric covers the requirement | The lateral acceleration is still stored in `session_series`, so the metric can be computed later from existing data |
 | checkov in CI | Automatic checks for Terraform misconfigurations | Extra checks that judges rarely open; gitleaks stays for secrets | Add one step to `security.yml` |

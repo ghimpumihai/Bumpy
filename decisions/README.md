@@ -10,13 +10,13 @@ Plans and the decision log for the Codelap 2026 project: road quality and motion
 
 ## Decision log
 
-Decisions D1–D17 were researched and then reviewed by an independent advisor model before being accepted. D18 and D19 are scope cuts made by the team. D20 is a correctness fix found while rechecking the plan. D21–D31 move the backend from AWS to Azure (same day); D30 also fixes gaps found in a review of the AWS version (what starts the backfill, where aggregation runs, concurrent migrations).
+Decisions D1–D17 were researched and then reviewed by an independent advisor model before being accepted. D18 and D19 are scope cuts made by the team. D20 is a correctness fix found while rechecking the plan. D21–D31 move the backend from AWS to Azure (same day); D30 also fixes gaps found in a review of the AWS version (what starts the backfill, where aggregation runs, concurrent migrations). D32–D33 make the live path (phone → cloud → dashboard) the main path.
 
 | # | Decision | Status | Main alternative rejected | Details |
 |---|---|---|---|---|
 | D1 | Cloud is AWS, region `eu-west-1` (Ireland) | Superseded by D21 | Azure; `eu-central-1` | 02 §2 |
 | D2 | Collect many real sessions (car, bus, tram) and aggregate; no simulated fleet | Accepted | Fleet simulator | 02 §3 |
-| D3 | Session files uploaded to S3 are the main dataset; live upload is a capability | Accepted | Live-only ingest | 02 §3, §7 |
+| D3 | Session files uploaded to S3 are the main dataset; live upload is a capability | Superseded by D32 | Live-only ingest | 02 §3, §7 |
 | D4 | Streaming with Kinesis on-demand (+ Firehose archive) | Superseded by D22 | Kafka on MSK, self-hosted Redpanda | 02 §5, §6 |
 | D5 | Ingest: API Gateway HTTP API + Lambda outside the VPC; duplicates removed in the database | Superseded by D23 | DynamoDB duplicate check (data-loss bug) | 02 §5 |
 | D6 | Processing in Python on ECS Fargate; same code for live and batch | Superseded by D24 | Lambda windows, Managed Flink | 02 §5, §9 |
@@ -43,7 +43,9 @@ Decisions D1–D17 were researched and then reviewed by an independent advisor m
 | D27 | Terraform `azurerm`, one cloud environment, state in Blob Storage; GitHub Actions only, OIDC via federated credentials | Accepted | Bicep; dev + demo environments | 02 §12, §13 |
 | D28 | Job queue: Event Grid (`_complete.json` filter) → Service Bus Basic queue with dead-letter → backfill job started by KEDA | Accepted | Storage Queues, RabbitMQ | 02 §5, §7 |
 | D29 | All database logins use Entra managed identities (migrator, writer, reader); password login off | Accepted | Admin password in Key Vault | 02 §5 |
-| D30 | Migrations run in their own job before deploys; aggregation runs at the end of each backfill under an advisory lock; only uploaded sessions are aggregated | Accepted | Migrations at processor start-up; live sessions in the aggregate | 02 §5, §7, §9 |
+| D30 | Migrations run in their own job before deploys; aggregation runs at the end of each backfill under an advisory lock; only uploaded sessions are aggregated | Partly superseded by D32 (which trips are aggregated) | Migrations at processor start-up; live sessions in the aggregate | 02 §5, §7, §9 |
 | D31 | Dashboard hosted on Static Web Apps (Free) | Accepted | Storage static website + Front Door | 02 §5 |
+| D32 | The live path is the main path: the app's disk-queued batches carry the full dataset, the dashboard's Live view is the main screen, and a finalize job reprocesses each finished trip from the raw archive and aggregates it; laptop upload is only a fallback | Accepted | Uploaded session files as the main dataset (D3) | 02 §1, §3, §5, §7 |
+| D33 | The app sends `session.json` at Start and Stop (`PUT /api/sessions/{id}`) through the same queue; it travels on the device's Event Hubs partition, so the processor sees context first and the trip end after the last batch | Accepted | Trip end by inactivity only; context from laptop upload only | 02 §5, 01 §6.1 |
 
 To change a decision: add a row with a new number, mark the old one "Superseded by Dxx", and explain why in the plan.

@@ -117,6 +117,17 @@ unit, and UTC timestamp") it adds these optional, additive fields:
 
 Backend: please don't use pydantic `extra="forbid"` or a fixed `units` literal.
 
+**Session metadata (spec §6.1):** `PUT {API}/api/ingest/sessions/{sessionId}`, with the gzipped
+`session.json`.
+- It is sent at Start, and at Stop with an added `batchCount`.
+- It goes through the same disk queue, so the Start copy is sent before batch 0 and the Stop copy
+  after the last batch. Queue files are named `<createdMs>_<sessionId>_meta-start|stop.json.gz`, next
+  to `<createdMs>_<sessionId>_<seq>.json.gz` for batches.
+- The idempotency key is `<sessionId>:meta-start|stop`.
+- `batchSeq` is assigned only to batches actually queued, so `batchCount` tells the backend exactly
+  which `0…batchCount-1` to expect. Windows recorded while upload was OFF don't consume a number.
+- Batches are about 30–50 KB of JSON; a warning is logged above 180 KB (the function's limit is 200 KB).
+
 One request at a time, oldest first, with backoff 1 → 30 s; 2xx/409 means done.
 - **404 / 401 / 403** are retried; they mean a config error.
 - **Redirects** are refused.

@@ -565,6 +565,21 @@ class MockServer:
         h.update(extra or {})
         return self.request("POST", "/api/ingest", raw, h)
 
+    def put_meta(self, meta=None, raw=None, session_id=None, key=KEY, encoding="gzip", idem=True,
+                 extra=None):
+        """PUT /api/ingest/sessions/<id> (spec §6.1). The path id defaults to the body's sessionId
+        and the idempotency key to the phase the body implies (meta-stop iff batchCount)."""
+        sid = session_id or (meta or {}).get("sessionId")
+        if raw is None:
+            raw = gzip.compress(json.dumps(meta).encode("utf-8"))
+        h = {"Content-Type": "application/json", "Content-Encoding": encoding}
+        if key is not None:
+            h["x-device-key"] = key
+        if idem and isinstance(meta, dict):
+            h["x-idempotency-key"] = f"{sid}:meta-{'stop' if 'batchCount' in meta else 'start'}"
+        h.update(extra or {})
+        return self.request("PUT", f"/api/ingest/sessions/{sid}", raw, h)
+
 
 def make_batch(seq=0, n=3, session_id=None):
     t = [round(i * 0.01, 6) for i in range(n)]
@@ -589,6 +604,37 @@ def make_batch(seq=0, n=3, session_id=None):
         "labels": [{"t": 0.01, "type": "pothole", "value": None, "note": None}] if n else [],
         "device": {"battery": 0.82, "thermal": "nominal", "lowPower": False},
     }
+
+
+def make_meta(session_id=None, batch_count=None, recovered=False, ended=True):
+    """session.json as SessionMetadata.swift encodes it (spec §3.8). batch_count set = Stop copy."""
+    m = {
+        "sessionId": session_id or str(uuid.uuid4()).upper(),
+        "appVersion": "1.0.0 (abc1234)",
+        "device": {"model": "iPhone15,2", "name": "iPhone 14 Pro", "iosVersion": "18.1"},
+        "timezone": "Europe/Bucharest",
+        "startedAtUtc": "2026-11-21T09:12:03.512Z",
+        "startUptimeSec": 123456.789012,
+        "endedAtUtc": None,
+        "vehicle": {"type": "bus", "makeModel": "Solaris Urbino", "line": "24", "notes": ""},
+        "mount": {"location": "taped flat on floor", "phoneOrientation": "screen up", "rigid": True,
+                  "handheld": False, "seatOverAxle": False, "photoFile": None},
+        "people": {"operatorSeat": "front", "raterSeat": "rear left", "raterPosture": "standing",
+                   "passengerCount": 30, "raterName": ""},
+        "conditions": {"weather": "dry", "notes": ""},
+        "audioEnabled": False,
+        "requestedRatesHz": {"deviceMotion": 100, "accel": 100, "gyro": 100, "mag": 50, "audioLevel": 10},
+        "recovered": recovered,
+        "syntheticSensors": False,
+        "folderName": "2026-11-21T09-12-03Z_abcd",
+        "deviceId": "8C3F1A2B-0000-4000-8000-000000000001",
+        "stats": None,
+    }
+    if batch_count is not None:
+        m["batchCount"] = batch_count
+        if ended:
+            m["endedAtUtc"] = "2026-11-21T10:02:41.007Z"
+    return m
 
 
 class MockIngestServerTests(unittest.TestCase):
@@ -698,6 +744,110 @@ class MockIngestServerTests(unittest.TestCase):
         self.assertStatus(self.srv.request("GET", "/api/ingest"), 404)
         self.assertStatus(self.srv.request("POST", "/api/other", b"{}"), 404)
 
+    def test_batch_over_200kb_decompressed_is_413(self):
+        b = make_batch(n=2000)
+        raw_json = json.dumps(b).encode()
+        self.assertGreater(len(raw_json), 200 * 1024)
+        p = self.assertStatus(self.srv.ingest(b), 413)
+        self.assertIn("decompressed body larger than", p["error"])
+
+    # -- PUT /api/ingest/sessions/<id> (spec §6.1) -------------------------------------------
+
+    def test_meta_start_201_then_repeat_200(self):
+        m = make_meta()
+        p = self.assertStatus(self.srv.put_meta(m), 201)
+        self.assertEqual(p["phase"], "start")
+        p = self.assertStatus(self.srv.put_meta(m), 200)
+        self.assertTrue(p.get("duplicate"))
+
+    def test_meta_stop_with_batch_count_is_201(self):
+        m = make_meta()
+        self.assertStatus(self.srv.put_meta(m), 201)
+        p = self.assertStatus(self.srv.put_meta(make_meta(m["sessionId"], batch_count=12)), 201)
+        self.assertEqual(p["phase"], "stop")
+        self.assertStatus(self.srv.put_meta(make_meta(m["sessionId"], batch_count=12)), 200)
+        # recovered session: Stop copy without endedAtUtc is fine; batchCount 0 is valid
+        self.assertStatus(self.srv.put_meta(make_meta(batch_count=0, recovered=True, ended=False)), 201)
+
+    def test_meta_path_body_session_mismatch_is_400(self):
+        m = make_meta()
+        p = self.assertStatus(self.srv.put_meta(m, session_id=str(uuid.uuid4()).upper()), 400)
+        self.assertIn("path sessionId", p["error"])
+
+    def test_meta_stop_needs_end_or_recovered(self):
+        p = self.assertStatus(self.srv.put_meta(make_meta(batch_count=3, ended=False)), 400)
+        self.assertIn("endedAtUtc", p["error"])
+
+    def test_meta_idempotency_key_must_match_phase(self):
+        m = make_meta(batch_count=3)
+        p = self.assertStatus(self.srv.put_meta(
+            m, extra={"x-idempotency-key": f"{m['sessionId']}:meta-start"}), 400)
+        self.assertIn("x-idempotency-key", p["error"])
+        m = make_meta()
+        self.assertStatus(self.srv.put_meta(m, extra={"x-idempotency-key": f"{m['sessionId']}:meta-stop"}), 400)
+        self.assertStatus(self.srv.put_meta(m, extra={"x-idempotency-key": f"{m['sessionId']}:0"}), 400)
+        self.assertStatus(self.srv.put_meta(m, idem=False), 201)  # header is optional
+
+    def test_meta_schema_strict(self):
+        cases = [("batchCount", -1), ("batchCount", 2.0), ("batchCount", True), ("recovered", None),
+                 ("startUptimeSec", "1"), ("startedAtUtc", None), ("endedAtUtc", 5),
+                 ("vehicle", None), ("mount", []), ("people", "x"), ("audioEnabled", 1)]
+        for k, v in cases:
+            with self.subTest(k=k, v=v):
+                m = make_meta(batch_count=1)
+                m[k] = v
+                self.assertStatus(self.srv.put_meta(m, idem=False), 400)
+        m = make_meta()
+        del m["endedAtUtc"]
+        self.assertStatus(self.srv.put_meta(m), 400)
+        self.assertStatus(self.srv.put_meta(raw=gzip.compress(b"[1]"), session_id="ABC"), 400)
+
+    def test_meta_wrong_key_is_401_before_body(self):
+        self.assertStatus(self.srv.put_meta(make_meta(), key="wrong"), 401)
+        self.assertStatus(self.srv.put_meta(make_meta(), key=None), 401)
+        self.assertStatus(self.srv.put_meta(raw=b"junk", session_id="ABC", key="wrong", encoding="br"), 401)
+
+    def test_meta_not_gzip_is_400(self):
+        m = make_meta()
+        self.assertStatus(self.srv.put_meta(m, raw=json.dumps(m).encode(), encoding="identity"), 400)
+        self.assertStatus(self.srv.put_meta(m, raw=json.dumps(m).encode(), encoding="gzip"), 400)
+        self.assertStatus(self.srv.put_meta(m, extra={"Content-Type": "text/plain"}), 400)
+
+    def test_meta_nan_rejected(self):
+        m = make_meta()
+        raw = gzip.compress(json.dumps(m).replace('"startUptimeSec": 123456.789012',
+                                                  '"startUptimeSec": Infinity').encode())
+        p = self.assertStatus(self.srv.put_meta(m, raw=raw), 400)
+        self.assertIn("invalid JSON", p["error"])
+
+    def test_meta_over_200kb_decompressed_is_413(self):
+        m = make_meta()
+        m["conditions"]["notes"] = "x" * (200 * 1024)
+        self.assertStatus(self.srv.put_meta(m), 413)
+
+    def test_sessions_path_other_methods_are_404(self):
+        # Like an Azure Functions route restricted to PUT: other methods get 404 (not 405).
+        sid = str(uuid.uuid4()).upper()
+        raw = gzip.compress(json.dumps(make_meta(sid)).encode())
+        h = {"x-device-key": KEY, "Content-Type": "application/json", "Content-Encoding": "gzip"}
+        path = f"/api/ingest/sessions/{sid}"
+        self.assertStatus(self.srv.request("GET", path, headers=h), 404)
+        self.assertStatus(self.srv.request("POST", path, raw, h), 404)
+        self.assertStatus(self.srv.request("DELETE", path, headers=h), 404)
+        self.assertStatus(self.srv.request("PUT", "/api/ingest", raw, h), 404)
+
+    def test_sessions_unknown_subpaths_are_404(self):
+        sid = str(uuid.uuid4()).upper()
+        raw = gzip.compress(json.dumps(make_meta(sid)).encode())
+        h = {"x-device-key": KEY, "Content-Type": "application/json", "Content-Encoding": "gzip"}
+        for path in (f"/api/ingest/sessions/{sid}/extra", f"/api/ingest/sessions/{sid}/",
+                     "/api/ingest/sessions/", "/api/ingest/sessions", f"/api/ingest/session/{sid}",
+                     f"/api/ingest/sessions/{sid}%2F..", f"/api/ingest/sessions/{sid}.json"):
+            with self.subTest(path=path):
+                self.assertStatus(self.srv.request("PUT", path, raw, h), 404)
+        # query strings are ignored, as on the batch route
+        self.assertStatus(self.srv.request("PUT", f"/api/ingest/sessions/{sid}?x=1", raw, h), 201)
+
     def test_contract_fixture_from_swift_encoder(self):
         if not os.path.exists(FIXTURE):
             self.skipTest(f"{os.path.relpath(FIXTURE, HERE)} missing - it is written by the Swift "
@@ -711,6 +861,21 @@ class MockIngestServerTests(unittest.TestCase):
                    "x-device-key": KEY}
         status, payload = self.srv.request("POST", "/api/ingest", raw, headers)
         self.assertEqual(status, 201, f"app-encoded batch rejected by the mock backend: {payload}")
+
+    def test_contract_session_metadata_fixture_from_swift(self):
+        """§6.1 Stop copy built by the app's own code (RecordingSession.sessionMetadataBody)."""
+        path = os.path.join(os.path.dirname(FIXTURE), "session_meta_stop_v1.json.gz")
+        if not os.path.exists(path):
+            self.skipTest("session_meta_stop_v1.json.gz missing - written by the Swift unit tests "
+                          "(TEST_RUNNER_REGENERATE_FIXTURES=1); cross-language contract not checked")
+        with open(path, "rb") as fh:
+            raw = fh.read()
+        doc = json.loads(gzip.decompress(raw).decode("utf-8"))
+        self.assertIn("batchCount", doc)
+        headers = {"Content-Type": "application/json", "Content-Encoding": "gzip",
+                   "x-idempotency-key": f"{doc['sessionId']}:meta-stop", "x-device-key": KEY}
+        status, payload = self.srv.request("PUT", f"/api/ingest/sessions/{doc['sessionId']}", raw, headers)
+        self.assertEqual(status, 201, f"app-built session metadata rejected by the mock backend: {payload}")
 
 
 class MockIngestDupStatusTests(unittest.TestCase):
@@ -728,6 +893,50 @@ class MockIngestDupStatusTests(unittest.TestCase):
         self.assertIn("unique batches: 2 in 1 session(s); duplicates answered 409: 1", out)
         self.assertIn("1 missing in between", out)
         self.assertIn("400 content-encoding: 1", out)
+
+    def test_meta_repeat_answers_dup_status_409(self):
+        srv = MockServer("--dup-status", "409")
+        try:
+            m = make_meta()
+            self.assertEqual(srv.put_meta(m, key=None)[0], 201)
+            self.assertEqual(srv.put_meta(m, key=None)[0], 409)
+        finally:
+            out = srv.stop()
+        self.assertIn("repeats answered 409: 1", out)
+        self.assertRegex(out, r"\d\d:\d\d:\d\d 201 PUT /api/ingest/sessions/\S+ sid=\S{8} "
+                              r"phase=start batchCount=-")
+
+
+class MockIngestSessionSummaryTests(unittest.TestCase):
+    def test_summary_reports_missing_seqs_and_writes_metadata(self):
+        tmp = tempfile.mkdtemp(prefix="mock-ingest-out-")
+        try:
+            srv = MockServer("--out", tmp)
+            try:
+                sid = str(uuid.uuid4()).upper()
+                self.assertEqual(srv.put_meta(make_meta(sid), key=None)[0], 201)
+                self.assertEqual(srv.ingest(make_batch(seq=0, session_id=sid), key=None)[0], 201)
+                self.assertEqual(srv.ingest(make_batch(seq=2, session_id=sid), key=None)[0], 201)
+                self.assertEqual(srv.put_meta(make_meta(sid, batch_count=3), key=None)[0], 201)
+                # a late retry of the Start copy must not replace the stored Stop copy
+                self.assertEqual(srv.put_meta(make_meta(sid), key=None)[0], 200)
+                other = str(uuid.uuid4()).upper()  # metadata only, no batches
+                self.assertEqual(srv.put_meta(make_meta(other), key=None)[0], 201)
+            finally:
+                out = srv.stop()
+            self.assertIn(f"  {sid}: 2 batches, batchSeq 0..2, batchCount 3, missing 1 [1], "
+                          f"meta start=yes stop=yes", out)
+            self.assertIn(f"  {other}: 0 batches, batchCount unknown, meta start=yes stop=no", out)
+            self.assertIn("session metadata: 2 start, 1 stop; repeats answered 200: 1", out)
+            self.assertRegex(out, r"201 PUT /api/ingest/sessions/\S+ sid=\S{8} phase=stop batchCount=3")
+            with open(os.path.join(tmp, "sessions", f"{sid}.json"), encoding="utf-8") as fh:
+                stored = json.load(fh)
+            self.assertEqual(stored["batchCount"], 3)
+            self.assertTrue(os.path.exists(os.path.join(tmp, "sessions", f"{other}.json")))
+            with open(os.path.join(tmp, f"{sid}.jsonl"), encoding="utf-8") as fh:
+                self.assertEqual(len(fh.readlines()), 2)
+        finally:
+            shutil.rmtree(tmp, ignore_errors=True)
 
 
 if __name__ == "__main__":

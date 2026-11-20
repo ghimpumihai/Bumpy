@@ -25,8 +25,8 @@ There is **ONE real test drive**. Every decision favours: over-collect, local-fi
 hard to break. Losing data is the worst possible bug; a red banner is better than silent failure.
 
 The backend (Azure: ingest Function → Event Hubs, see 02) is built by teammates. The app's contract is
-`POST {API}/api/ingest` (gzip JSON, spec §6), plus the proposed `PUT {API}/api/ingest/sessions/{id}`
-(session.json at Start and Stop, spec §6.1, not built yet); there is no health route, so connectivity is tested
+`POST {API}/api/ingest` (gzip JSON, spec §6) plus `PUT {API}/api/ingest/sessions/{id}` (session.json at
+Start and Stop, spec §6.1, implemented in the app and the mock); there is no health route, so connectivity is tested
 with a probe POST. `tools/mock_ingest_server.py` stands in for it locally. Do **not** write
 backend, processing or web-dashboard code in this folder.
 

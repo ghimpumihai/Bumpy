@@ -88,8 +88,8 @@ test("session page draws the synchronized charts", async ({ page }) => {
   expect(errors).toEqual([]);
 });
 
-test("the data-source dialog saves a choice and reloads with it", async ({ page }) => {
-  await page.goto("/sessions");
+test("the data-source dialog saves a choice and reloads with it, even from a ?mock= URL", async ({ page }) => {
+  await page.goto("/sessions?mock=1");
   await page.getByRole("button", { name: /data source settings/ }).click();
   const dialog = page.getByRole("dialog", { name: "Data source" });
   // Pick the API with a half-typed URL first, then switch to mock: saving must still work.
@@ -102,6 +102,8 @@ test("the data-source dialog saves a choice and reloads with it", async ({ page 
   const saved = await page.evaluate(() => window.localStorage.getItem("dashboard.data-source"));
   expect(JSON.parse(saved ?? "null")).toEqual({ mode: "mock", apiBase: "" });
   await expect(page.getByRole("button", { name: /Mock data: data source settings/ })).toBeVisible();
+  // ?mock= would win over the saved choice, so the reload drops it.
+  expect(new URL(page.url()).searchParams.has("mock")).toBe(false);
 });
 
 test("deep links load directly (Static Web Apps falls back to index.html)", async ({ page }) => {

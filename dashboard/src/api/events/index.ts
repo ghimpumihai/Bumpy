@@ -4,11 +4,13 @@ import { api } from "@/config/api-client";
 import { AGGREGATE_REFRESH_INTERVAL_MS, STATIC_STALE_TIME_MS } from "@/constants";
 import type { RoadEventCollection } from "@/types/sessions";
 import type { VehicleFilter } from "@/types/segments";
+import { expectShape, shapes } from "@/utils/api-shape";
 
 export const EVENTS_QUERY_KEY = "events";
 
+const EVENTS_ROUTE = "/api/events";
 const getEvents = async (vehicle: VehicleFilter) =>
-  (await api.get<RoadEventCollection>("/api/events", { params: { vehicle } })).data;
+  expectShape<RoadEventCollection>((await api.get<unknown>(EVENTS_ROUTE, { params: { vehicle } })).data, EVENTS_ROUTE, shapes.featureCollection);
 
 /** Detected events of every aggregated session (replays and live-only sessions excluded by the API). */
 const useEvents = (vehicle: VehicleFilter) =>

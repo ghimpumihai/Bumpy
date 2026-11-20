@@ -1,6 +1,8 @@
 import { AnimatePresence, motion } from "motion/react";
 
 import { liveApi } from "@/api/live";
+import { ErrorAlert } from "@/components/error-alert";
+import { LIVE_API_STALE_MS } from "@/constants";
 import { QueryState } from "@/components/query-state";
 import { Skeleton } from "@/components/ui/skeleton";
 import { useNow } from "@/hooks/use-now";
@@ -15,6 +17,8 @@ export function LiveView() {
   const devices = live.data?.devices ?? [];
   // Ages are measured on the server's clock: offset = server time − local time at the last response.
   const clockOffsetMs = live.data ? Date.parse(live.data.serverTime) - live.dataUpdatedAt : 0;
+  // If the dashboard can't reach the read API, the cards must not blame the phones for the silence.
+  const apiUnreachable = live.data !== undefined && (live.isError || now - live.dataUpdatedAt > LIVE_API_STALE_MS);
   return (
     <div className="grid flex-1 grid-rows-[minmax(22rem,1fr)_auto] lg:grid-cols-[1fr_24rem] lg:grid-rows-1">
       <div className="relative min-h-[22rem]">
@@ -27,9 +31,17 @@ export function LiveView() {
             Phones and replays sending data right now, a few seconds behind the phone (target under 10 s). Refreshes every 2 s.
           </p>
         </div>
+        {apiUnreachable && (
+          <ErrorAlert
+            title="Live data"
+            error={live.error ?? new Error("The read API hasn't answered for a few seconds; the cards show the last data received.")}
+            onRetry={() => void live.refetch()}
+          />
+        )}
         <QueryState
           isPending={live.isPending}
-          error={live.error}
+          error={apiUnreachable ? null : live.error}
+          hasData={live.data !== undefined}
           onRetry={() => void live.refetch()}
           skeleton={<Skeleton className="h-36 w-full" />}
         >
@@ -45,7 +57,7 @@ export function LiveView() {
                 exit={{ opacity: 0, y: -CARD_ANIMATION_OFFSET_PX }}
                 transition={{ duration: CARD_ANIMATION_S }}
               >
-                <LiveDeviceCard device={device} now={now + clockOffsetMs} />
+                <LiveDeviceCard device={device} now={now + clockOffsetMs} apiUnreachable={apiUnreachable} />
               </motion.div>
             ))}
             {devices.length === 0 && (

@@ -164,14 +164,15 @@ export function getAggregation(nowMs: number = Date.now()): AggregationResult {
   const included = [...getDataset().sims.values()].filter((sim) => isIncluded(sim, nowMs));
   const key = included.map((sim) => sim.spec.sessionId).join(",");
   if (cachedAggregation?.key === key) return cachedAggregation.result;
-  const fittedAt = Math.max(...included.map((sim) => processedAt(sim, nowMs) ?? 0));
+  const fittedTimes = included.flatMap((sim) => processedAt(sim, nowMs) ?? []);
+  const fittedAt = fittedTimes.length > 0 ? new Date(Math.max(...fittedTimes)).toISOString() : null;
   const result = aggregate(
     included.map((sim) => ({
       sim,
       roughnessEligible: isRoughnessEligible(sim.spec),
       sicknessEligible: !isSicknessExperimental(sim.spec),
     })),
-    new Date(fittedAt).toISOString(),
+    fittedAt,
   );
   cachedAggregation = { key, result };
   return result;

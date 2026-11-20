@@ -26,6 +26,7 @@ export function QualityView() {
           <QueryState
             isPending={query.isPending}
             error={query.error}
+            hasData={query.data !== undefined}
             onRetry={() => void query.refetch()}
             isEmpty={rows.length === 0}
             emptyMessage="No sessions yet."

@@ -15,7 +15,10 @@ function createFakeMap() {
     addSource: vi.fn((id: string) => sources.set(id, { setData: vi.fn() })),
     removeSource: vi.fn((id: string) => sources.delete(id)),
     getLayer: vi.fn((id: string) => (layers.includes(id) ? { id } : undefined)),
-    addLayer: vi.fn((layer: { id: string }) => layers.push(layer.id)),
+    addLayer: vi.fn((layer: { id: string }, beforeId?: string) => {
+      if (beforeId && layers.includes(beforeId)) layers.splice(layers.indexOf(beforeId), 0, layer.id);
+      else layers.push(layer.id);
+    }),
     removeLayer: vi.fn((id: string) => layers.splice(layers.indexOf(id), 1)),
     setPaintProperty: vi.fn(),
     setLayoutProperty: vi.fn(),
@@ -60,6 +63,17 @@ describe("GeoJsonLayer", () => {
     expect(fake.map.setFilter).toHaveBeenCalledWith("selected", ["==", ["get", "h3"], "b"]);
     expect(fake.map.setPaintProperty).toHaveBeenCalledWith("fill", "fill-color", "blue");
     expect(fake.map.setPaintProperty).not.toHaveBeenCalledWith("selected", "line-width", expect.anything());
+  });
+
+  it("draws below the given layer whatever order layers are added in", () => {
+    const fake = createFakeMap();
+    fake.layers.push("events-circle"); // the events finished loading first
+    render(
+      <MapContext.Provider value={{ map: fake.map as unknown as MapLibreMap, styleGeneration: 1 }}>
+        <GeoJsonLayer id="segments" data={DATA} layers={specs("a", "red")} beforeId="events-circle" />
+      </MapContext.Provider>,
+    );
+    expect(fake.layers).toEqual(["fill", "selected", "events-circle"]);
   });
 
   it("pushes new data without recreating anything, and cleans up layers before the source", () => {

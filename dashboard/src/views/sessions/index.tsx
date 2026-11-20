@@ -32,6 +32,7 @@ export function SessionsView() {
           <QueryState
             isPending={query.isPending}
             error={query.error}
+            hasData={query.data !== undefined}
             onRetry={() => void query.refetch()}
             isEmpty={query.data?.length === 0}
             emptyMessage="No sessions match these filters."

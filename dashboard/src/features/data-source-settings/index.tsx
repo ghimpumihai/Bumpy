@@ -9,7 +9,7 @@ import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, D
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
-import { readDataSourceOverride, writeDataSourceOverride } from "@/config/runtime-config";
+import { applyDataSourceOverride, readDataSourceOverride } from "@/config/runtime-config";
 import { DataSourceMode, type DataSource } from "@/types/config";
 
 import { dataSourceFormSchema, type DataSourceFormInput, type DataSourceFormValues } from "./schema";
@@ -34,11 +34,8 @@ export function DataSourceSettings({ dataSource }: DataSourceSettingsProps) {
   });
   const mode = useWatch({ control: form.control, name: "mode" });
 
-  const apply = (values: DataSourceFormValues | null) => {
-    writeDataSourceOverride(values);
-    // The data source is resolved once at startup; reloading guarantees no mixed caches.
-    window.location.reload();
-  };
+  // The data source is resolved once at startup; reloading guarantees no mixed caches.
+  const apply = (values: DataSourceFormValues | null) => applyDataSourceOverride(values);
 
   return (
     <Dialog open={open} onOpenChange={setOpen}>

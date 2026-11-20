@@ -1,7 +1,7 @@
 import { AlertTriangle, RotateCcw } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
-import { writeDataSourceOverride } from "@/config/runtime-config";
+import { applyDataSourceOverride } from "@/config/runtime-config";
 
 interface StartupErrorProps {
   message: string;
@@ -9,10 +9,7 @@ interface StartupErrorProps {
 
 /** Shown instead of the app when it cannot start (no providers are available at this point). */
 export function StartupError({ message }: StartupErrorProps) {
-  const resetAndReload = () => {
-    writeDataSourceOverride(null);
-    window.location.assign(window.location.pathname);
-  };
+  const resetAndReload = () => applyDataSourceOverride(null);
   return (
     <main className="mx-auto vertical min-h-svh max-w-lg justify-center gap-4 p-6" role="alert">
       <div className="horizontal gap-2 text-destructive">

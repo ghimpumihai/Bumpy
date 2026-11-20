@@ -12,12 +12,15 @@ interface EventsLayerProps {
   beforeId?: string;
 }
 
+/** Id of the circle layer of an `EventsLayer`, for drawing other layers below it. */
+export const eventsCircleLayerId = (sourceId: string) => `${sourceId}-circle`;
+
 /** Detected potholes, speed bumps and rail joints as coloured dots (shared by the map and session views). */
 export function EventsLayer({ id, data, beforeId }: EventsLayerProps) {
   const colors = useThemeColors(COLOR_VARS);
   const layers: SourceLayer[] = [
     {
-      id: `${id}-circle`,
+      id: eventsCircleLayerId(id),
       type: "circle",
       paint: {
         "circle-radius": [

@@ -6,13 +6,13 @@ import { VehicleLabel } from "@/components/status/vehicle-label";
 import { Badge } from "@/components/ui/badge";
 import { Card, CardContent } from "@/components/ui/card";
 import { PLACEHOLDER } from "@/constants";
-import { MS_PER_SECOND } from "@/constants/units";
+import { MISC_MAX } from "@/constants/sessions";
 import type { LiveDevice } from "@/types/live";
 import { StreamStatus } from "@/types/sessions";
 import { formatTime } from "@/utils/format-date-time";
-import { formatAcceleration, formatFraction, formatMsdv, formatNumber, formatSeconds, formatSpeedFromMs } from "@/utils/format-number";
+import { formatAcceleration, formatFraction, formatMsdv, formatNumber, formatSpeedFromMs } from "@/utils/format-number";
 
-import { liveFreshness } from "../utils/freshness";
+import { freshnessLabel, liveFreshness } from "../utils/freshness";
 
 const FRESHNESS_BADGE: Record<StreamStatus, "success" | "warning" | "destructive"> = {
   [StreamStatus.OK]: "success",
@@ -24,11 +24,11 @@ interface LiveDeviceCardProps {
   device: LiveDevice;
   /** Current time on the server's clock (so a wrong laptop clock can't make data look stale). */
   now: number;
+  /** The dashboard lost the read API: show when the data is from, without judging the phone. */
+  apiUnreachable: boolean;
 }
 
-const seconds = (ms: number) => ms / MS_PER_SECOND;
-
-export function LiveDeviceCard({ device, now }: LiveDeviceCardProps) {
+export function LiveDeviceCard({ device, now, apiUnreachable }: LiveDeviceCardProps) {
   const freshness = liveFreshness(device, now);
   const metrics = [
     { label: "Speed", value: formatSpeedFromMs(device.speedMs) },
@@ -36,15 +36,11 @@ export function LiveDeviceCard({ device, now }: LiveDeviceCardProps) {
     { label: "MSDV so far", value: formatMsdv(device.msdvSoFar) },
     {
       label: "Latest MISC",
-      value: device.latestRating ? `${device.latestRating.value} / 10` : PLACEHOLDER,
+      value: device.latestRating ? `${formatNumber(device.latestRating.value)} / ${MISC_MAX}` : PLACEHOLDER,
       hint: device.latestRating ? `at ${formatTime(device.latestRating.tUtc)}` : "no rating yet",
     },
   ];
-  const freshnessText = freshness.catchingUp
-    ? `catching up · ${formatNumber(seconds(freshness.transportDelayMs))} s behind`
-    : freshness.status === StreamStatus.OK
-      ? `${formatSeconds(seconds(freshness.dataAgeMs), 1)} behind the phone`
-      : `no data for ${formatNumber(seconds(freshness.silentForMs))} s`;
+  const freshnessText = freshnessLabel(device, freshness, apiUnreachable);
   return (
     <Card className="py-0">
       <CardContent className="vertical gap-3 p-4">
@@ -62,7 +58,10 @@ export function LiveDeviceCard({ device, now }: LiveDeviceCardProps) {
           ))}
         </dl>
         <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-xs text-muted-foreground">
-          <Badge variant={FRESHNESS_BADGE[freshness.status]} title="End-to-end delay: phone → ingest → stream → processor → this screen">
+          <Badge
+            variant={apiUnreachable || freshness.ended ? "secondary" : FRESHNESS_BADGE[freshness.status]}
+            title="End-to-end delay: phone → ingest → stream → processor → this screen"
+          >
             {freshnessText}
           </Badge>
           <span className="horizontal gap-1">

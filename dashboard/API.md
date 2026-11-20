@@ -8,7 +8,9 @@ demoed without Azure.
 
 General rules:
 
-- `GET` only, JSON responses (`application/json`). Map data is GeoJSON (RFC 7946, `[lon, lat]`).
+- `GET` only, JSON responses (`application/json`). Map data is GeoJSON (RFC 7946, `[lon, lat]`). The
+  dashboard rejects any other content type, and checks each response's envelope (e.g. `sessions` is an
+  array) before using it, so a wrong API URL shows a clear error instead of breaking a page.
 - Field names are camelCase. Timestamps are ISO-8601 UTC strings (`2026-11-21T09:12:03.512Z`) unless
   the field is documented as epoch milliseconds.
 - Units: acceleration m/s² (gravity removed), speed m/s unless the name ends in `Kmh`, MSDV m/s^1.5.
@@ -36,8 +38,8 @@ General rules:
 | `GET /api/sessions/{id}/labels` | `SessionLabelsResponse` (sessions) | Rows of the app's `labels.csv` |
 | `GET /api/segments?vehicle=all\|car\|bus\|tram` | `SegmentCollection` (segments) | One H3 hexagon polygon per segment with its `segment_agg` row for that vehicle filter |
 | `GET /api/segments/{h3}` | `SegmentDetail` (segments) | Per-vehicle aggregates, sickness split by seat/posture, every pass |
-| `GET /api/events?vehicle=&type=` | `RoadEventCollection` (sessions) | Detected events of aggregated sessions only |
-| `GET /api/live` | `LiveResponse` (live) | `live_state` of devices the ingest function heard from in the last 60 s, with the last ~2 min of track, `receivedAt` (arrival of the newest processed batch) and the latest MISC rating. Polled every 2 s; `serverTime` lets the dashboard measure ages on the server's clock |
+| `GET /api/events?vehicle=all\|car\|bus\|tram&type=` | `RoadEventCollection` (sessions) | Detected events of aggregated sessions only; `vehicle` takes the same values as `/api/segments` (the dashboard always sends it), `type` is optional (`pothole\|speed_bump\|rail_joint`) |
+| `GET /api/live` | `LiveResponse` (live) | `live_state` of devices the ingest function heard from in the last 60 s, with the last ~2 min of track, `receivedAt` (arrival of the newest processed batch), `sessionStatus` (`live` while recording; a trip that just ended keeps its device listed for up to 60 s with its new status) and the latest MISC rating. **Privacy:** a device is left out while its trip is within the first (or, once ended, last) 200 m. Polled every 2 s; `serverTime` lets the dashboard measure ages on the server's clock |
 | `GET /api/quality` | `QualityListResponse` (sessions) | The data-quality panel for every session |
 
 The ingest routes (`POST /api/ingest`, and `PUT /api/ingest/sessions/{id}` from spec §6.1) belong to the ingest
@@ -64,9 +66,13 @@ it from roughness only).
 
 For each live device the dashboard derives, on the server's clock:
 - data age = now − `updatedAt` (sample time): the end-to-end delay to the screen (target < 10 s);
-- silence = now − `receivedAt`: amber after 10 s, red after 30 s (a dead zone);
+- silence = now − `receivedAt`: amber after 10 s, red after 30 s (a dead zone) — unless `sessionStatus`
+  says the trip ended, which is shown as "trip ended";
 - transport delay = `receivedAt` − `updatedAt`: above 10 s while batches are arriving, the phone is
   sending a backlog after a dead zone, shown as **catching up** rather than live.
+
+If the dashboard itself can't reach the read API (a failed poll, or no answer for 3 poll intervals), it
+says so and shows each card's last data time, instead of reporting the phones as silent.
 
 ## Where each field comes from (plan §8)
 
@@ -102,4 +108,6 @@ no framing). `vite preview` serves the same headers, so the e2e tests run under 
 The deployed site reads `/config.json` at startup: `{"apiBase": "https://<read-api>.<env>.northeurope.azurecontainerapps.io"}`.
 The `deploy-dashboard.yml` workflow writes this file from a Terraform output just before uploading;
 the committed `public/config.json` stays empty. An empty `apiBase` (the
-default in `public/config.json`) makes the dashboard use its built-in mock data.
+default in `public/config.json`) makes the dashboard use its built-in mock data. A missing, unreachable
+(5 s timeout) or invalid `config.json` stops the dashboard with an error instead: a broken deploy must not
+quietly show mock data.

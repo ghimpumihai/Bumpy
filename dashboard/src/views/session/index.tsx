@@ -22,6 +22,7 @@ export function SessionView() {
       <QueryState
         isPending={query.isPending}
         error={query.error}
+            hasData={query.data !== undefined}
         onRetry={() => void query.refetch()}
         skeleton={
           <div className="vertical gap-4">
@@ -35,7 +36,7 @@ export function SessionView() {
           <>
             <SessionHeader session={session} />
             <SessionStats session={session} />
-            <TrackMap sessionId={session.sessionId} finalized={session.status === "complete"} />
+            <TrackMap sessionId={session.sessionId} status={session.status} />
             <SessionCharts session={session} />
             <div className="grid gap-6 lg:grid-cols-2">
               <DetectionCard detection={session.detection} />

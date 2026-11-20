@@ -4,7 +4,7 @@ import { cn } from "@/lib/utils";
 import { StreamStatus, type StreamQuality } from "@/types/sessions";
 import { formatHz, formatNumber, formatSeconds } from "@/utils/format-number";
 
-import { streamStatus } from "./utils";
+import { expectedRateDigits, rateDigits, streamStatus } from "./utils";
 
 const STATUS_DOT: Record<StreamStatus, string> = {
   [StreamStatus.OK]: "bg-success",
@@ -38,8 +38,10 @@ export function StreamQualityTable({ streams }: { streams: Record<string, Stream
               <TableCell>{STREAM_LABELS[name] ?? name}</TableCell>
               <TableCell className="text-right tabular-nums">{formatNumber(stream.rows)}</TableCell>
               <TableCell className="text-right tabular-nums">
-                {formatHz(stream.rateHz, stream.expectedHz !== null && stream.expectedHz < 2 ? 2 : 1)}
-                {stream.expectedHz !== null && <span className="text-muted-foreground"> / {formatNumber(stream.expectedHz, stream.expectedHz < 1 ? 1 : 0)}</span>}
+                {formatHz(stream.rateHz, rateDigits(stream.expectedHz))}
+                {stream.expectedHz !== null && (
+                  <span className="text-muted-foreground"> / {formatNumber(stream.expectedHz, expectedRateDigits(stream.expectedHz))}</span>
+                )}
               </TableCell>
               <TableCell className={cn("text-right tabular-nums", status === StreamStatus.PROBLEM && "text-destructive")}>{formatSeconds(stream.maxGapS)}</TableCell>
               <TableCell className={cn("text-right tabular-nums", status === StreamStatus.PROBLEM && stream.gapsOver1s > 0 && "text-destructive")}>

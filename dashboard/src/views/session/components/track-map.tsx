@@ -1,10 +1,11 @@
 import { sessionsApi } from "@/api/sessions";
 import { ErrorAlert } from "@/components/error-alert";
-import { EventsLayer } from "@/components/map/events-layer";
+import { EventsLayer, eventsCircleLayerId } from "@/components/map/events-layer";
 import { GeoJsonLayer, type SourceLayer } from "@/components/map/geojson-layer";
 import { MapCanvas } from "@/components/map/map-canvas";
 import { MapLegend } from "@/components/map/map-legend";
 import { useThemeColors } from "@/hooks/use-theme-colors";
+import type { ProcessingStatus } from "@/types/common";
 import type { Position } from "@/types/common";
 import { boundsOf } from "@/utils/geo";
 import { stepColorExpression } from "@/utils/scale";
@@ -16,13 +17,12 @@ const COLOR_VARS = ["--scale-1", "--scale-2", "--scale-3", "--scale-4", "--scale
 
 interface TrackMapProps {
   sessionId: string;
-  /** Recording or processing trips are re-polled until finalized. */
-  finalized: boolean;
+  status: ProcessingStatus;
 }
 
-export function TrackMap({ sessionId, finalized }: TrackMapProps) {
-  const track = sessionsApi.useSessionTrack(sessionId, finalized);
-  const events = sessionsApi.useSessionEvents(sessionId, finalized);
+export function TrackMap({ sessionId, status }: TrackMapProps) {
+  const track = sessionsApi.useSessionTrack(sessionId, status);
+  const events = sessionsApi.useSessionEvents(sessionId, status);
   const colors = useThemeColors(COLOR_VARS);
   const bounds = track.data ? boundsOf(track.data.geometry.coordinates as Position[]) : null;
   const layers: SourceLayer[] = [
@@ -44,7 +44,9 @@ export function TrackMap({ sessionId, finalized }: TrackMapProps) {
   return (
     <div className="relative h-96 overflow-hidden rounded-lg border">
       <MapCanvas ariaLabel="Map of this trip coloured by speed, with detected events" className="absolute inset-0" bounds={bounds} boundsKey={bounds ? sessionId : undefined}>
-        {track.data && <GeoJsonLayer id={TRACK_SOURCE_ID} data={trackPieces(track.data)} layers={layers} />}
+        {track.data && (
+          <GeoJsonLayer id={TRACK_SOURCE_ID} data={trackPieces(track.data)} layers={layers} beforeId={eventsCircleLayerId(TRACK_EVENTS_SOURCE_ID)} />
+        )}
         {events.data && <EventsLayer id={TRACK_EVENTS_SOURCE_ID} data={events.data} />}
       </MapCanvas>
       {(track.error || events.error) && (

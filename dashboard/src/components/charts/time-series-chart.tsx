@@ -12,6 +12,10 @@ const AXIS_COLOR_VARS = ["--muted-foreground", "--border"] as const;
 const CHART_COLOR_VARS = ["--chart-1", "--chart-2", "--chart-3", "--chart-4", "--chart-5", "--event-pothole", "--event-speed-bump"] as const;
 const POINT_SIZE_PX = 7;
 const LINE_WIDTH_PX = 1.25;
+/** Width before the container is measured (the ResizeObserver corrects it immediately). */
+const INITIAL_WIDTH_PX = 600;
+const TIME_AXIS_SIZE_PX = 40;
+const VALUE_AXIS_SIZE_PX = 56;
 
 interface TimeSeriesChartProps {
   /** Short accessible title, also shown above the chart. */
@@ -45,15 +49,17 @@ export function TimeSeriesChart({ title, times, series, height = 180, syncKey, c
     const axis = { stroke: axisColors["--muted-foreground"], grid: { stroke: axisColors["--border"], width: 1 }, ticks: { stroke: axisColors["--border"] } };
     const unitOf = (side: "left" | "right") => series.find((s) => (s.axis ?? "left") === side)?.unit ?? "";
     const options: Options = {
-      width: container.clientWidth || 600,
+      width: container.clientWidth || INITIAL_WIDTH_PX,
       height,
       cursor: syncKey ? { sync: { key: syncKey } } : {},
       legend: { show: true, live: true },
       scales: { x: { time: true }, y: {}, ...(hasRightAxis ? { y2: {} } : {}) },
       axes: [
-        { ...axis, values: (_plot, splits) => splits.map((seconds) => formatTime(seconds * MS_PER_SECOND)), size: 40 },
-        { ...axis, label: unitOf("left"), size: 56 },
-        ...(hasRightAxis ? [{ ...axis, scale: "y2", side: 1 as const, label: unitOf("right"), size: 56, grid: { show: false } }] : []),
+        { ...axis, values: (_plot, splits) => splits.map((seconds) => formatTime(seconds * MS_PER_SECOND)), size: TIME_AXIS_SIZE_PX },
+        { ...axis, label: unitOf("left"), size: VALUE_AXIS_SIZE_PX },
+        ...(hasRightAxis
+          ? [{ ...axis, scale: "y2", side: 1 as const, label: unitOf("right"), size: VALUE_AXIS_SIZE_PX, grid: { show: false } }]
+          : []),
       ],
       series: [
         {},

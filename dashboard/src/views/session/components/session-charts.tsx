@@ -11,9 +11,8 @@ import { buildChartData } from "../utils/series";
 
 /** The road band, the sickness band and their context on one synchronized time axis. */
 export function SessionCharts({ session }: { session: SessionDetail }) {
-  const finalized = session.status === "complete";
-  const series = sessionsApi.useSessionSeries(session.sessionId, finalized);
-  const events = sessionsApi.useSessionEvents(session.sessionId, finalized);
+  const series = sessionsApi.useSessionSeries(session.sessionId, session.status);
+  const events = sessionsApi.useSessionEvents(session.sessionId, session.status);
   const data = series.data ? buildChartData(series.data, events.data, session.sickness.ratings) : null;
   const syncKey = `session-${session.sessionId}`;
 
@@ -29,6 +28,7 @@ export function SessionCharts({ session }: { session: SessionDetail }) {
         <QueryState
           isPending={series.isPending}
           error={series.error}
+            hasData={series.data !== undefined}
           onRetry={() => void series.refetch()}
           isEmpty={data?.times.length === 0}
           skeleton={<Skeleton className="h-[42rem] w-full" />}

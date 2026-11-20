@@ -54,7 +54,7 @@ export function LiveMap({ devices }: { devices: LiveDevice[] }) {
   ];
   return (
     <MapCanvas ariaLabel="Live positions of the phones that are streaming" className="absolute inset-0" bounds={bounds} boundsKey={bounds ? boundsKey : undefined}>
-      <GeoJsonLayer id={LIVE_TRACKS_SOURCE_ID} data={liveTracks(devices)} layers={trackLayers} />
+      <GeoJsonLayer id={LIVE_TRACKS_SOURCE_ID} data={liveTracks(devices)} layers={trackLayers} beforeId={`${LIVE_DEVICES_SOURCE_ID}-halo`} />
       <GeoJsonLayer id={LIVE_DEVICES_SOURCE_ID} data={livePositions(devices)} layers={deviceLayers} />
     </MapCanvas>
   );

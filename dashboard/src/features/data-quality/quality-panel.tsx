@@ -25,7 +25,7 @@ export function QualityPanel({ quality }: { quality: SessionQuality }) {
     <Card>
       <CardHeader>
         <CardTitle>Data quality</CardTitle>
-        <CardDescription>Measured on the uploaded files; windows that fail a check are left out of roughness and potholes.</CardDescription>
+        <CardDescription>Measured on the trip's data (finalized from the full archive); windows that fail a check are left out of roughness and potholes.</CardDescription>
       </CardHeader>
       <CardContent className="vertical gap-4">
         <dl className="grid grid-cols-2 gap-3 sm:grid-cols-5">

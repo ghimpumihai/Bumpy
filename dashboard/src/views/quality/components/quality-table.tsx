@@ -1,6 +1,6 @@
 import { Link } from "@tanstack/react-router";
 
-import { IncompleteBadge, MockBadge, QualityBadge, SourceBadge } from "@/components/status/session-badges";
+import { IncompleteBadge, MockBadge, QualityBadge, SourceBadge, StatusBadge } from "@/components/status/session-badges";
 import { VehicleLabel } from "@/components/status/vehicle-label";
 import { Table, TableBody, TableCaption, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { STREAM_GAP_PROBLEM_S, STREAM_RATE_WARN_RATIO } from "@/constants/sessions";
@@ -44,6 +44,7 @@ export function QualityTable({ rows }: { rows: QualityRow[] }) {
                   <span className="horizontal flex-wrap gap-1 text-xs">
                     <VehicleLabel type={row.vehicle.type} line={row.vehicle.line} />
                     <SourceBadge source={row.source} />
+                    <StatusBadge status={row.status} />
                     {row.incomplete && <IncompleteBadge />}
                     {row.isMock && <MockBadge />}
                   </span>

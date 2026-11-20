@@ -32,7 +32,7 @@ export function SessionHeader({ session }: { session: SessionDetail }) {
       </div>
       <p className="text-sm text-muted-foreground">
         {formatDateTime(session.startedAt)}
-        {session.endedAt ? ` – ${formatDateTime(session.endedAt)}` : " · recording now"} ·{" "}
+        {session.endedAt ? ` – ${formatDateTime(session.endedAt)}` : session.status === "live" ? " · recording now" : ""} ·{" "}
         <span className="font-mono text-xs">{session.sessionId}</span>
       </p>
       {session.exclusionReasons.length > 0 && (

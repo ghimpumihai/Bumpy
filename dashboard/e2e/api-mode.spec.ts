@@ -31,3 +31,24 @@ test("?mock=1 still forces mock data on a deployed site", async ({ page }) => {
   await page.goto("/sessions?mock=1");
   await expect(page.getByRole("button", { name: /Mock data: data source settings/ })).toBeVisible();
 });
+
+test("a wrong API URL that answers with an HTML page shows a clear error on every page, never a crash", async ({ page }) => {
+  await page.route(`${API_ORIGIN}/**`, (route) =>
+    route.fulfill({ status: 200, contentType: "text/html", headers: { "access-control-allow-origin": "*" }, body: "<!doctype html><title>x</title>" }),
+  );
+  for (const path of ["/map", "/sessions", "/sessions/3f1c2b9e-0d4a-4e7b-9c51-6a2d8e0f4b11", "/live", "/quality"]) {
+    await page.goto(path);
+    await expect(page.getByText(/instead of JSON\. Check the API URL/).first(), path).toBeVisible();
+    await expect(page.getByText("Something went wrong!"), path).toHaveCount(0);
+  }
+});
+
+test("when the read API stops answering, the live view says so instead of blaming the phones", async ({ page }) => {
+  await page.goto("/live");
+  const panel = page.getByRole("complementary", { name: "Streaming devices" });
+  await expect(panel.getByText(/behind the phone|catching up/).first()).toBeVisible();
+  await page.route(`${API_ORIGIN}/api/live`, (route) => route.abort("connectionrefused"));
+  await expect(panel.getByRole("alert")).toContainText("Live data could not be loaded");
+  await expect(panel.getByText(/^last data \d\d:\d\d:\d\d$/).first()).toBeVisible();
+  await expect(panel.getByText(/no data for/)).toHaveCount(0);
+});

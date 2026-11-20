@@ -6,29 +6,50 @@ import { ProcessingStatus } from "@/types/common";
 import type {
   RoadEventCollection,
   SessionDetail,
+  SessionLabel,
   SessionLabelsResponse,
   SessionListFilters,
   SessionListResponse,
   SessionSeries,
+  SessionSummary,
   SessionTrack,
 } from "@/types/sessions";
+import { expectShape, shapes } from "@/utils/api-shape";
 
 export const SESSIONS_QUERY_KEY = "sessions";
 
-const sessionPath = (sessionId: string, part = "") => `/api/sessions/${encodeURIComponent(sessionId)}${part}`;
+const SESSIONS_ROUTE = "/api/sessions";
+const sessionRoute = (sessionId: string, part = "") => `${SESSIONS_ROUTE}/${encodeURIComponent(sessionId)}${part}`;
 
-const getSessions = async (filters: SessionListFilters) =>
-  (await api.get<SessionListResponse>("/api/sessions", { params: filters })).data.sessions;
-const getSession = async (sessionId: string) => (await api.get<SessionDetail>(sessionPath(sessionId))).data;
-const getSeries = async (sessionId: string) => (await api.get<SessionSeries>(sessionPath(sessionId, "/series"))).data;
-const getTrack = async (sessionId: string) => (await api.get<SessionTrack>(sessionPath(sessionId, "/track"))).data;
-const getEvents = async (sessionId: string) => (await api.get<RoadEventCollection>(sessionPath(sessionId, "/events"))).data;
-const getLabels = async (sessionId: string) =>
-  (await api.get<SessionLabelsResponse>(sessionPath(sessionId, "/labels"))).data.labels;
+async function getJson<T>(route: string, check: Parameters<typeof expectShape>[2], params?: object): Promise<T> {
+  return expectShape<T>((await api.get<unknown>(route, { params })).data, route, check);
+}
 
-/** Finalized sessions never change; recording and processing ones are re-polled until they are finalized. */
-const pollUntilFinalized = (finalized: boolean) => (finalized ? false : LIVE_SESSION_POLL_INTERVAL_MS);
+const getSessions = async (filters: SessionListFilters): Promise<SessionSummary[]> =>
+  (await getJson<SessionListResponse>(SESSIONS_ROUTE, shapes.sessionList, filters)).sessions;
+const getSession = (sessionId: string) => getJson<SessionDetail>(sessionRoute(sessionId), shapes.sessionDetail);
+const getSeries = (sessionId: string) => getJson<SessionSeries>(sessionRoute(sessionId, "/series"), shapes.series);
+const getTrack = (sessionId: string) => getJson<SessionTrack>(sessionRoute(sessionId, "/track"), shapes.track);
+const getEvents = (sessionId: string) => getJson<RoadEventCollection>(sessionRoute(sessionId, "/events"), shapes.featureCollection);
+const getLabels = async (sessionId: string): Promise<SessionLabel[]> =>
+  (await getJson<SessionLabelsResponse>(sessionRoute(sessionId, "/labels"), shapes.labels)).labels;
+
 const isFinalized = (status: ProcessingStatus | undefined) => status === ProcessingStatus.COMPLETE;
+/** Recording and processing trips are re-polled until they are finalized; finalized ones never change. */
+const pollUntilFinalized = (finalized: boolean) => (finalized ? false : LIVE_SESSION_POLL_INTERVAL_MS);
+
+/**
+ * The trip's own data (series, track, events, labels) is keyed by whether the trip is finalized: when the
+ * finalize job replaces the live results, the key changes and everything is fetched once more — without
+ * that, the page would keep showing the live-path data under a "finalized" header.
+ */
+const tripDataQuery = <T,>(part: string, sessionId: string, status: ProcessingStatus, fetch: (id: string) => Promise<T>) => ({
+  queryKey: [SESSIONS_QUERY_KEY, part, sessionId, isFinalized(status)],
+  queryFn: () => fetch(sessionId),
+  staleTime: STATIC_STALE_TIME_MS,
+  // Only a trip being recorded grows; a processing trip changes once, when it is finalized.
+  refetchInterval: status === ProcessingStatus.LIVE ? LIVE_SESSION_POLL_INTERVAL_MS : (false as const),
+});
 
 const useSessions = (filters: SessionListFilters = {}) =>
   useQuery({
@@ -46,37 +67,10 @@ const useSession = (sessionId: string) =>
     refetchInterval: (query) => pollUntilFinalized(query.state.data ? isFinalized(query.state.data.status) : true),
   });
 
-const useSessionSeries = (sessionId: string, finalized: boolean) =>
-  useQuery({
-    queryKey: [SESSIONS_QUERY_KEY, "series", sessionId],
-    queryFn: () => getSeries(sessionId),
-    staleTime: STATIC_STALE_TIME_MS,
-    refetchInterval: pollUntilFinalized(finalized),
-  });
-
-const useSessionTrack = (sessionId: string, finalized: boolean) =>
-  useQuery({
-    queryKey: [SESSIONS_QUERY_KEY, "track", sessionId],
-    queryFn: () => getTrack(sessionId),
-    staleTime: STATIC_STALE_TIME_MS,
-    refetchInterval: pollUntilFinalized(finalized),
-  });
-
-const useSessionEvents = (sessionId: string, finalized: boolean) =>
-  useQuery({
-    queryKey: [SESSIONS_QUERY_KEY, "events", sessionId],
-    queryFn: () => getEvents(sessionId),
-    staleTime: STATIC_STALE_TIME_MS,
-    refetchInterval: pollUntilFinalized(finalized),
-  });
-
-const useSessionLabels = (sessionId: string, finalized: boolean) =>
-  useQuery({
-    queryKey: [SESSIONS_QUERY_KEY, "labels", sessionId],
-    queryFn: () => getLabels(sessionId),
-    staleTime: STATIC_STALE_TIME_MS,
-    refetchInterval: pollUntilFinalized(finalized),
-  });
+const useSessionSeries = (sessionId: string, status: ProcessingStatus) => useQuery(tripDataQuery("series", sessionId, status, getSeries));
+const useSessionTrack = (sessionId: string, status: ProcessingStatus) => useQuery(tripDataQuery("track", sessionId, status, getTrack));
+const useSessionEvents = (sessionId: string, status: ProcessingStatus) => useQuery(tripDataQuery("events", sessionId, status, getEvents));
+const useSessionLabels = (sessionId: string, status: ProcessingStatus) => useQuery(tripDataQuery("labels", sessionId, status, getLabels));
 
 export const sessionsApi = {
   getSessions,

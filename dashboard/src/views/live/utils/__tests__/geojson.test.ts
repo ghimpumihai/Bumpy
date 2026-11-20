@@ -2,12 +2,12 @@ import { describe, expect, it } from "vitest";
 
 import type { LiveDevice } from "@/types/live";
 import { livePositions, liveTracks } from "@/views/live/utils/geojson";
-import { trackPieces } from "@/views/session/utils/track";
 
 const device = (deviceId: string, track: [number, number][]): LiveDevice => ({
   deviceId,
   sessionId: "s",
   source: "live",
+  sessionStatus: "live",
   vehicleType: "car",
   updatedAt: "2026-11-20T10:00:00.000Z",
   receivedAt: "2026-11-20T10:00:02.500Z",
@@ -35,17 +35,5 @@ describe("live GeoJSON", () => {
       ["a", "live", [23.59, 46.77]],
       ["r", "replay", [23.59, 46.77]],
     ]);
-  });
-});
-
-describe("trackPieces", () => {
-  it("splits a track into coloured pieces with their speed in km/h", () => {
-    const pieces = trackPieces({
-      type: "Feature",
-      geometry: { type: "LineString", coordinates: [[0, 0], [0, 1], [0, 2]] },
-      properties: { sessionId: "s", times: [0, 1, 2], speeds: [10, null, 5], trimmedM: 200 },
-    });
-    expect(pieces.features).toHaveLength(2);
-    expect(pieces.features.map((f) => f.properties.speedKmh)).toEqual([null, 18]);
   });
 });

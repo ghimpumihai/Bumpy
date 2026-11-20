@@ -26,9 +26,10 @@ describe("staticwebapp.config.json (Azure Static Web Apps)", () => {
     expect(config.routes.find((route) => route.route === "/config.json")?.headers?.["Cache-Control"]).toBe("no-store");
   });
 
-  it("caches hashed assets for good but always revalidates index.html", () => {
+  it("revalidates every page (deep links are served by the fallback) but caches hashed assets for good", () => {
+    // Route headers match the request path, so /live and /sessions/x need the global no-cache.
+    expect(config.globalHeaders["Cache-Control"]).toBe("no-cache");
     expect(config.routes.find((route) => route.route === "/assets/*")?.headers?.["Cache-Control"]).toContain("immutable");
-    expect(config.routes.find((route) => route.route === "/index.html")?.headers?.["Cache-Control"]).toBe("no-cache");
   });
 
   it("sends a CSP that allows only what the app needs", () => {

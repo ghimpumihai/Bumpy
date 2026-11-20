@@ -20,7 +20,8 @@ export function ModelFitCard() {
         <CardDescription>Re-fitted by the aggregation step after every processed session.</CardDescription>
       </CardHeader>
       <CardContent>
-        <QueryState isPending={query.isPending} error={query.error} onRetry={() => void query.refetch()}>
+        <QueryState isPending={query.isPending} error={query.error}
+            hasData={query.data !== undefined} onRetry={() => void query.refetch()}>
           {fit && (
             <div className="vertical gap-3 text-sm">
               <p>

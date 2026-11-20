@@ -9,6 +9,10 @@ export const LIVE_SESSION_POLL_INTERVAL_MS = 5 * MS_PER_SECOND;
 /** Aggregates change whenever a trip is finalized; refresh them while the page is open. */
 export const AGGREGATE_REFRESH_INTERVAL_MS = 60 * MS_PER_SECOND;
 export const API_TIMEOUT_MS = 15 * MS_PER_SECOND;
+/** The live poll must answer well within a few poll intervals. */
+export const LIVE_REQUEST_TIMEOUT_MS = 4 * MS_PER_SECOND;
+/** The read API counts as unreachable for the live view when its last good answer is older than this. */
+export const LIVE_API_STALE_MS = 3 * LIVE_POLL_INTERVAL_MS;
 export const QUERY_RETRY_COUNT = 2;
 
 export const RUNTIME_CONFIG_PATH = "/config.json";
@@ -16,6 +20,9 @@ export const RUNTIME_CONFIG_PATH = "/config.json";
 export const MOCK_QUERY_PARAM = "mock";
 /** localStorage key of the data-source override set in the settings dialog. */
 export const DATA_SOURCE_STORAGE_KEY = "dashboard.data-source";
+/** sessionStorage key remembering `?mock=` for the tab. */
+export const DATA_SOURCE_SESSION_KEY = "dashboard.forced-mock";
+export const RUNTIME_CONFIG_TIMEOUT_MS = 5 * MS_PER_SECOND;
 
 export const PLACEHOLDER = "—";
 export const GENERIC_ERROR_MESSAGE = "Something went wrong while loading data.";

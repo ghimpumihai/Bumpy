@@ -106,8 +106,16 @@ src/
 ## TanStack Query
 
 - Stable query keys built from `<FEATURE>_QUERY_KEY`. `staleTime` long for processed data
-  (`STATIC_STALE_TIME_MS`), polling only for live data (`LIVE_POLL_INTERVAL_MS`, 2 s — plan §5).
-- Handle loading, empty, error and success with `QueryState`.
+  (`STATIC_STALE_TIME_MS`). Polling: the live view every 2 s (`LIVE_POLL_INTERVAL_MS`, plan §5, no retries —
+  polling is the retry); recording/processing trips every 5 s until finalized; aggregates every 60 s
+  (they change whenever a trip is finalized). Finalized trips never poll.
+- A trip's own data (series, track, events, labels) is keyed by "finalized", so it is fetched once more
+  when the finalize job replaces the live results.
+- Every response passes `expectShape` (`utils/api-shape.ts`) and the client rejects non-JSON answers.
+- Handle loading, empty, error and success with `QueryState`. Pass `hasData`: a failed background refresh
+  keeps the loaded content with a small notice; the full error replaces the page only when nothing loaded.
+  Exceptions: map overlays (overview strip, segment/event/track errors) use `ErrorAlert` directly so the
+  map stays visible.
 - Never copy server state into local state.
 
 ## Forms
@@ -123,7 +131,10 @@ URL in mock mode) stays registered, and the schema decides when it is validated.
   Processing → finalized; `incomplete` is a separate flag. Never call a finalized streamed trip "live".
 - Only finalized trips count in the map; always show *why* a trip doesn't (`EXCLUSION_LABELS`).
 - Live freshness is measured on the server clock and distinguishes "behind the phone", "no data"
-  (dead zone) and "catching up" (backlog after a dead zone) — never claim "live" for old data.
+  (dead zone), "catching up" (backlog after a dead zone), "trip ended" and "read API unreachable" — never
+  claim "live" for old data, never blame the phone for the dashboard's own outage.
+- Map layers: segments and tracks are inserted below the event dots (`beforeId`), whatever order requests
+  finish in. Everything on the map must also be reachable by keyboard (the worst-segments list).
 
 ## Maps and charts
 

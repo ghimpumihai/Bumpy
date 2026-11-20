@@ -12,3 +12,5 @@ export const SEGMENT_OUTLINE_WIDTH_PX = 0.5;
 export const SEGMENT_OUTLINE_OPACITY = 0.7;
 
 export const SEGMENT_INTERACTIVE_LAYERS = [SEGMENT_FILL_LAYER_ID];
+/** Entries in the keyboard-accessible list of worst segments. */
+export const HIGHLIGHT_COUNT = 8;

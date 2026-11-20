@@ -11,7 +11,10 @@ export function ContextCard({ session }: { session: SessionDetail }) {
     { label: "Phone orientation", value: session.mount.phoneOrientation },
     { label: "Rater", value: `${session.people.raterSeat}, ${session.people.raterPosture}` },
     { label: "Passengers", value: String(session.people.passengerCount) },
-    { label: "Audio recording", value: session.audioEnabled ? "on" : "off (public transport)" },
+    {
+      label: "Audio recording",
+      value: session.audioEnabled ? "on" : session.vehicle.type === "bus" || session.vehicle.type === "tram" ? "off (public transport)" : "off",
+    },
     { label: "Device", value: session.deviceId ?? PLACEHOLDER },
     { label: "Processed", value: `${formatDateTime(session.processedAt)}${session.processorVersion ? ` · ${session.processorVersion}` : ""}` },
   ];

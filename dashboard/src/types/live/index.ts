@@ -1,4 +1,4 @@
-import type { IsoDateTime, SessionSource, VehicleType } from "@/types/common";
+import type { IsoDateTime, ProcessingStatus, SessionSource, VehicleType } from "@/types/common";
 import type { StreamStatus } from "@/types/sessions";
 
 /** The passenger's most recent motion-sickness rating (MISC 0–10). */
@@ -12,6 +12,8 @@ export interface LiveDevice {
   deviceId: string;
   sessionId: string;
   source: SessionSource;
+  /** `live` while recording; `processing`/`complete` for a trip that ended in the last minute. */
+  sessionStatus: ProcessingStatus;
   vehicleType: VehicleType;
   /** Time of the newest sample processed for this device (phone clock, UTC). */
   updatedAt: IsoDateTime;
@@ -49,5 +51,7 @@ export interface LiveFreshness {
   transportDelayMs: number;
   /** The phone is sending a backlog after a dead zone (plan 02 §5, "Gaps and late data"). */
   catchingUp: boolean;
+  /** The trip has ended (Stop received): silence is expected, not a dead zone. */
+  ended: boolean;
   status: StreamStatus;
 }

@@ -10,6 +10,7 @@ import {
   sessionDetail,
   sessionSummary,
 } from "@/mock/dataset";
+import { aggregate } from "@/mock/aggregate";
 import { handleMockRequest, MockHttpError } from "@/mock/handlers";
 import { PRIVACY_TRIM_M, TRUE_SPEED_EXPONENT } from "@/mock/simulate";
 import { getWorld } from "@/mock/world";
@@ -169,6 +170,40 @@ describe("mock dataset", () => {
     expect(lastSampleIndex(sim, at(zone.startS + zone.durationS + 60))).toBeGreaterThan(before);
     const caughtUp = at(zone.startS + zone.durationS + 60);
     expect(receivedAtMs(sim, caughtUp) - sim.t[lastSampleIndex(sim, caughtUp)]).toBeLessThan(5_000);
+  });
+
+  it("reports no fit (and doesn't crash) when no trip is finalized yet", () => {
+    const empty = aggregate([], null);
+    expect(empty.info).toMatchObject({ method: "none", fittedAt: null });
+    expect(empty.segments.size).toBe(0);
+  });
+
+  it("never publishes a live position inside the privacy zone at the start of a trip", () => {
+    const sim = getDataset().sims.get("aa61f0d4-3b8e-4c5a-9d27-6f1e4b8c0d76");
+    if (!sim) throw new Error("live car missing");
+    // A moment when the newest processed sample is within the first 200 m.
+    const early = sim.startMs + 20_000;
+    expect(sim.s[lastSampleIndex(sim, early)]).toBeLessThan(PRIVACY_TRIM_M);
+    const realNow = Date.now;
+    Date.now = () => early;
+    try {
+      const live = get<{ devices: { sessionId: string }[] }>("/api/live");
+      expect(live.devices.map((d) => d.sessionId)).not.toContain(sim.spec.sessionId);
+    } finally {
+      Date.now = realNow;
+    }
+  });
+
+  it("lists the passes of a trip that is still recording, marked as not included", () => {
+    const liveId = "aa61f0d4-3b8e-4c5a-9d27-6f1e4b8c0d76";
+    const sim = getDataset().sims.get(liveId);
+    if (!sim) throw new Error("live car missing");
+    const passed = sim.observations.find((obs) => !obs.inPrivacyZone && obs.firstSample <= lastSampleIndex(sim));
+    if (!passed) throw new Error("live car has no pass yet");
+    const detail = get<{ observations: { sessionId: string; includedInAgg: boolean }[] }>(`/api/segments/${passed.cell}`);
+    const own = detail.observations.filter((obs) => obs.sessionId === liveId);
+    expect(own.length).toBeGreaterThan(0);
+    expect(own.every((obs) => !obs.includedInAgg)).toBe(true);
   });
 
   it("answers unknown sessions and bad filters with HTTP errors", () => {

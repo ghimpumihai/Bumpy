@@ -9,6 +9,7 @@ import { Sheet, SheetContent, SheetDescription, SheetHeader, SheetTitle } from "
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import type { SegmentAggregate } from "@/types/segments";
 import { formatDateTime } from "@/utils/format-date-time";
+import { PLACEHOLDER } from "@/constants";
 import { formatAcceleration, formatFraction, formatKmh, formatPercent } from "@/utils/format-number";
 
 interface SegmentPanelProps {
@@ -20,23 +21,26 @@ const VEHICLE_ROW_LABEL: Record<SegmentAggregate["vehicleType"], string> = { all
 
 function roughnessText(row: SegmentAggregate) {
   if (row.roughnessMethod === "model") return formatAcceleration(row.roughness);
-  if (row.roughnessMethod === "percentile") return `p${Math.round((row.roughnessPctl ?? 0) * 100)}`;
-  return "n/a";
+  if (row.roughnessMethod === "percentile") return row.roughnessPctl === null ? PLACEHOLDER : `${formatFraction(row.roughnessPctl)} pctl`;
+  return PLACEHOLDER;
 }
 
 /** Everything known about one road segment: per-vehicle aggregates, sickness by seat, every pass. */
 export function SegmentPanel({ h3, onClose }: SegmentPanelProps) {
   const query = segmentsApi.useSegment(h3);
-  const detail = query.data;
+  // While another segment loads, keep the previous one only for the closing animation, never under a new id.
+  const switching = query.isPlaceholderData && h3 !== undefined && query.data?.h3 !== h3;
+  const detail = switching ? undefined : query.data;
   return (
     <Sheet open={Boolean(h3)} onOpenChange={(open) => !open && onClose()}>
-      <SheetContent className="w-full overflow-y-auto sm:max-w-xl">
+      <SheetContent className="overflow-y-auto data-[side=right]:w-full data-[side=right]:sm:max-w-xl">
         <SheetHeader>
           <SheetTitle>Road segment</SheetTitle>
           <SheetDescription className="font-mono text-xs">{h3 ?? detail?.h3}</SheetDescription>
         </SheetHeader>
         <div className="vertical gap-6 px-4 pb-6">
-          <QueryState isPending={query.isPending} error={query.error} onRetry={() => void query.refetch()}>
+          <QueryState isPending={query.isPending || switching} error={query.error}
+            hasData={query.data !== undefined} onRetry={() => void query.refetch()}>
             {detail && (
               <>
                 <section className="vertical gap-2">

@@ -24,6 +24,7 @@ import {
   isIncluded,
   lastSampleIndex,
   processedAt,
+  processingStatus,
   qualityRow,
   receivedAtMs,
   sessionDetail,
@@ -150,11 +151,12 @@ function segmentDetail(h3: string): SegmentDetail {
   const perFilter = aggregation.segments.get(h3);
   if (!perFilter) throw new MockHttpError(404, `segment ${h3} has no observations`);
   const [lat, lon] = cellToLatLng(h3);
+  const now = Date.now();
   const observations = [...sims.values()]
-    .filter((sim) => !sim.spec.live)
     .flatMap((sim) =>
       sim.observations
-        .filter((obs) => obs.cell === h3 && !obs.inPrivacyZone)
+        // Passes recorded so far; a trip still recording or processing is listed as not included.
+        .filter((obs) => obs.cell === h3 && !obs.inPrivacyZone && obs.firstSample <= lastSampleIndex(sim, now))
         .map((obs) => ({
           sessionId: sim.spec.sessionId,
           vehicleType: sim.spec.vehicle.type,
@@ -163,7 +165,7 @@ function segmentDetail(h3: string): SegmentDetail {
           roughnessRms: obs.roughnessRms === null ? null : round(obs.roughnessRms, 4),
           awRms: round(obs.awRms, 4),
           potholeCount: obs.potholeCount,
-          includedInAgg: isIncluded(sim),
+          includedInAgg: isIncluded(sim, now),
         })),
     )
     .sort((a, b) => a.tStart.localeCompare(b.tStart));
@@ -223,7 +225,9 @@ function live(): LiveResponse {
       const last = lastSampleIndex(sim, now);
       // Devices the ingest function heard from in the last minute (a dead zone keeps them listed, stale).
       const receivedAt = receivedAtMs(sim, now);
-      if (now - receivedAt > LIVE_WINDOW_S * MS_PER_SECOND || last >= sim.t.length - 1) return [];
+      if (now - receivedAt > LIVE_WINDOW_S * MS_PER_SECOND) return [];
+      // Privacy (plan §11): no position is published while the trip is in its first 200 m.
+      if (inPrivacyZone(sim, last, now)) return [];
       const latest = sim.ratings.filter((rating) => rating.sampleIndex <= last).at(-1);
       const window = ROUGHNESS_NOW_WINDOW_S * SERIES_HZ;
       let sumSquares = 0;
@@ -239,6 +243,7 @@ function live(): LiveResponse {
           deviceId: sim.spec.deviceId,
           sessionId: sim.spec.sessionId,
           source: sim.spec.source,
+          sessionStatus: processingStatus(sim, now),
           vehicleType: sim.spec.vehicle.type,
           updatedAt: new Date(sim.t[last]).toISOString(),
           receivedAt: new Date(receivedAt).toISOString(),

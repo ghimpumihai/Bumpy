@@ -1,7 +1,10 @@
 import { isAxiosError } from "axios";
 
+import { ApiContractError } from "@/utils/api-shape";
+
 /** A short, user-readable description of a failed request. */
 export function describeError(error: unknown): string {
+  if (error instanceof ApiContractError) return error.message;
   if (isAxiosError(error)) {
     const status = error.response?.status;
     const body = error.response?.data as { error?: unknown } | undefined;

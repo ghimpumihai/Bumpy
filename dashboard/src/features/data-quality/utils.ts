@@ -18,3 +18,9 @@ export function streamStatus(stream: StreamQuality): StreamStatus {
   }
   return StreamStatus.OK;
 }
+
+/** Slow streams (≈1 Hz GPS, 0.2 Hz device health) need more decimals to show their rate meaningfully. */
+const SLOW_STREAM_HZ = 2;
+export const rateDigits = (expectedHz: number | null) => (expectedHz !== null && expectedHz < SLOW_STREAM_HZ ? 2 : 1);
+/** Expected rates are whole numbers except for sub-1 Hz streams (0.2 Hz). */
+export const expectedRateDigits = (expectedHz: number) => (Number.isInteger(expectedHz) ? 0 : 1);

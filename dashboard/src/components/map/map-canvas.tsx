@@ -14,6 +14,7 @@ import { MapLibreMap, NavigationControl, ScaleControl } from "@/lib/maplibre";
 import { cn } from "@/lib/utils";
 import type { MapState } from "@/types/map";
 import type { Position } from "@/types/common";
+import { useThemeColors } from "@/hooks/use-theme-colors";
 import { readCssColor } from "@/utils/css-color";
 
 import { MapContext } from "./map-context";
@@ -22,11 +23,14 @@ import { MapContext } from "./map-context";
  * Used when the OpenFreeMap style cannot be loaded (bad Wi-Fi in the presentation room, plan 02 §17):
  * our own data layers still render on a plain, theme-coloured background.
  */
+const FALLBACK_COLOR_VARS = ["--muted"] as const;
+const FALLBACK_BACKGROUND_LAYER_ID = "background";
+
 function fallbackStyle(): StyleSpecification {
   return {
     version: 8,
     sources: {},
-    layers: [{ id: "background", type: "background", paint: { "background-color": readCssColor("--muted") } }],
+    layers: [{ id: FALLBACK_BACKGROUND_LAYER_ID, type: "background", paint: { "background-color": readCssColor("--muted") } }],
   };
 }
 
@@ -48,6 +52,7 @@ export function MapCanvas({ ariaLabel, className, bounds, boundsKey, children }:
   const [state, setState] = useState<MapState | null>(null);
   const map = state?.map ?? null;
   const [basemapFailed, setBasemapFailed] = useState(false);
+  const fallbackColors = useThemeColors(FALLBACK_COLOR_VARS);
 
   useEffect(() => {
     if (!containerRef.current) return;
@@ -91,6 +96,12 @@ export function MapCanvas({ ariaLabel, className, bounds, boundsKey, children }:
       instance.remove();
     };
   }, []);
+
+  // The offline background follows theme changes like the data layers do.
+  useEffect(() => {
+    if (!map || !basemapFailed || !map.getLayer(FALLBACK_BACKGROUND_LAYER_ID)) return;
+    map.setPaintProperty(FALLBACK_BACKGROUND_LAYER_ID, "background-color", fallbackColors["--muted"]);
+  }, [map, basemapFailed, fallbackColors]);
 
   useEffect(() => {
     if (!map || !bounds) return;

@@ -24,12 +24,14 @@ const COLOR_VARS = ["--scale-1", "--scale-2", "--scale-3", "--scale-4", "--scale
 
 interface SegmentsLayerProps {
   data: SegmentCollection;
+  /** Draw below this layer (the event dots), whatever order the requests finish in. */
+  beforeId?: string;
   scale: MetricScale;
   selectedH3: string | undefined;
   onSelect: (h3: string) => void;
 }
 
-export function SegmentsLayer({ data, scale, selectedH3, onSelect }: SegmentsLayerProps) {
+export function SegmentsLayer({ data, beforeId, scale, selectedH3, onSelect }: SegmentsLayerProps) {
   const colors = useThemeColors(COLOR_VARS);
   const bandColors = scale.bands.map((band) => colors[band.colorVar as (typeof COLOR_VARS)[number]]);
   const layers: SourceLayer[] = [
@@ -66,6 +68,7 @@ export function SegmentsLayer({ data, scale, selectedH3, onSelect }: SegmentsLay
       id={SEGMENTS_SOURCE_ID}
       data={data}
       layers={layers}
+      beforeId={beforeId}
       interactiveLayerIds={SEGMENT_INTERACTIVE_LAYERS}
       onFeatureClick={handleClick}
     />

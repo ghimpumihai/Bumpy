@@ -193,7 +193,7 @@ function sicknessSplits(rows: Row[]): SegmentSicknessSplit[] {
 }
 
 /** Plays the role of the aggregation step + the `segment_agg` materialized view (plan 02 §8–9). */
-export function aggregate(inputs: AggregationInput[], fittedAt: string): AggregationResult {
+export function aggregate(inputs: AggregationInput[], fittedAt: string | null): AggregationResult {
   const rows: Row[] = inputs.flatMap((input) =>
     input.sim.observations
       .filter((obs) => !obs.inPrivacyZone)
@@ -201,7 +201,7 @@ export function aggregate(inputs: AggregationInput[], fittedAt: string): Aggrega
   );
   percentRanks(rows);
   const model = fitRoughnessModel(rows);
-  const method: RoughnessMethod = model ? "model" : "percentile";
+  const method: RoughnessMethod = rows.length === 0 ? "none" : model ? "model" : "percentile";
 
   const byCell = new Map<string, Row[]>();
   for (const row of rows) byCell.set(row.obs.cell, [...(byCell.get(row.obs.cell) ?? []), row]);

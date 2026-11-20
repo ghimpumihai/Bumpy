@@ -1,0 +1,18 @@
+# Local PostGIS for development and tests (plan §15). Same major versions as Azure (PostgreSQL 17).
+#   docker compose up -d db
+# Then, from services/processor:
+#   $env:PGHOST='localhost'; $env:PGPORT='5433'; $env:PGUSER='postgres'; $env:PGPASSWORD='postgres'; $env:PGDATABASE='roadride'
+#   python -m roadride             # with RUN_MODE=migrate
+#   python -m pytest -q tests      # integration tests run when PGHOST is set
+services:
+  db:
+    image: postgis/postgis:17-3.5
+    environment:
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: roadride
+    ports:
+      - "5433:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 5s
+      retries: 10

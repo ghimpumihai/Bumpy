@@ -1,0 +1,79 @@
+name: deploy-services
+
+# Builds the processor image, runs the migrate job and waits for it, then updates the stream
+# processor (plan §13). Migrations always run before the processor sees new code.
+# Needs the `prod` environment and the repo variables AZURE_CLIENT_ID_DEPLOY, AZURE_TENANT_ID,
+# AZURE_SUBSCRIPTION_ID, plus ACR_NAME and RESOURCE_GROUP (from `.\infra\tf.ps1 output`).
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "services/processor/**"
+      - "db/**"
+      - ".github/workflows/deploy-services.yml"
+  workflow_dispatch:
+
+permissions:
+  id-token: write
+  contents: read
+
+concurrency:
+  group: deploy-services
+  cancel-in-progress: false
+
+env:
+  MIGRATE_JOB: caj-roadride-migrate
+  PROCESSOR_APP: ca-roadride-processor
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    environment: prod
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: azure/login@v2
+        with:
+          client-id: ${{ vars.AZURE_CLIENT_ID_DEPLOY }}
+          tenant-id: ${{ vars.AZURE_TENANT_ID }}
+          subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Build and push the image
+        id: image
+        env:
+          ACR_NAME: ${{ vars.ACR_NAME }}
+        run: |
+          az acr login --name "$ACR_NAME"
+          image="$ACR_NAME.azurecr.io/processor:${GITHUB_SHA::12}"
+          docker build -f services/processor/Dockerfile -t "$image" .
+          docker push "$image"
+          echo "ref=$image" >> "$GITHUB_OUTPUT"
+
+      - name: Run the migrate job and wait for it
+        env:
+          RG: ${{ vars.RESOURCE_GROUP }}
+          IMAGE: ${{ steps.image.outputs.ref }}
+        run: |
+          az config set extension.use_dynamic_install=yes_without_prompt >/dev/null
+          az containerapp job update -n "$MIGRATE_JOB" -g "$RG" --image "$IMAGE" --output none
+          execution=$(az containerapp job start -n "$MIGRATE_JOB" -g "$RG" --query name -o tsv)
+          echo "execution: $execution"
+          for i in $(seq 1 60); do
+            status=$(az containerapp job execution show -n "$MIGRATE_JOB" -g "$RG" \
+              --job-execution-name "$execution" --query properties.status -o tsv)
+            echo "status: $status"
+            case "$status" in
+              Succeeded) exit 0 ;;
+              Failed|Stopped|Degraded) break ;;
+            esac
+            sleep 10
+          done
+          echo "::error::migrate job did not succeed (status: $status). Logs: Log Analytics, ContainerAppConsoleLogs_CL where ContainerJobName_s == '$MIGRATE_JOB'"
+          exit 1
+
+      - name: Update the stream processor
+        env:
+          RG: ${{ vars.RESOURCE_GROUP }}
+          IMAGE: ${{ steps.image.outputs.ref }}
+        run: az containerapp update -n "$PROCESSOR_APP" -g "$RG" --image "$IMAGE" --output none

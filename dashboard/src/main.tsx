@@ -1,5 +1,6 @@
 import { QueryClientProvider, type QueryClient } from "@tanstack/react-query";
 import { createRouter, RouterProvider } from "@tanstack/react-router";
+import { MotionConfig } from "motion/react";
 import { ThemeProvider } from "next-themes";
 import { StrictMode } from "react";
 import { createRoot } from "react-dom/client";
@@ -49,10 +50,12 @@ async function bootstrap() {
           scriptProps={{ type: "application/json" }}
         >
           <QueryClientProvider client={queryClient}>
-            <TooltipProvider delayDuration={200}>
-              <RouterProvider router={router} />
-              <Toaster richColors closeButton />
-            </TooltipProvider>
+            <MotionConfig reducedMotion="user">
+              <TooltipProvider delayDuration={200}>
+                <RouterProvider router={router} />
+                <Toaster richColors closeButton />
+              </TooltipProvider>
+            </MotionConfig>
           </QueryClientProvider>
         </ThemeProvider>
       </HelmetProvider>

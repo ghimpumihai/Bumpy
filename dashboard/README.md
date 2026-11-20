@@ -37,7 +37,8 @@ Data source precedence: `?mock=1` / `?mock=0` in the URL → the browser overrid
 
 ```bash
 npm run check      # typecheck + oxlint + depcruise (no import cycles) + unit tests
-npm run test:e2e   # Playwright smoke test against a production build
+npm run test:e2e   # Playwright against the production build: smoke tests on every route
+                   # + axe-core WCAG 2.1 AA scan of every route in light and dark mode
 ```
 
 Conventions are in [CLAUDE.md](CLAUDE.md).

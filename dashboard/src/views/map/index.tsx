@@ -49,7 +49,7 @@ export function MapView() {
           <MapControls search={search} onChange={update} />
           {segments.error && <QueryState isPending={false} error={segments.error} onRetry={() => void segments.refetch()}>{null}</QueryState>}
         </div>
-        <div className="pointer-events-auto sm:mr-12">
+        <div className="pointer-events-auto hidden sm:mr-12 sm:block">
           <OverviewStrip />
         </div>
       </div>

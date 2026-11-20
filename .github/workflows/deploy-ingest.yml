@@ -1,0 +1,52 @@
+name: deploy-ingest
+
+# Deploys services/ingest to the Flex Consumption function app on every merge to main (plan §13).
+# Logs in with GitHub OIDC; no Azure secrets are stored. Needs, once:
+#   - a GitHub environment named `prod` (its federated credential is created by infra/bootstrap)
+#   - repo variables AZURE_CLIENT_ID_DEPLOY, AZURE_TENANT_ID, AZURE_SUBSCRIPTION_ID
+#     (from `terraform -chdir=infra/bootstrap output github_variables`) and INGEST_FUNCTION_APP
+#     (from `.\infra\tf.ps1 output -raw ingest_function_name`)
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "services/ingest/**"
+      - ".github/workflows/deploy-ingest.yml"
+  workflow_dispatch:
+
+permissions:
+  id-token: write
+  contents: read
+
+concurrency:
+  group: deploy-ingest
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    environment: prod
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: azure/login@v2
+        with:
+          client-id: ${{ vars.AZURE_CLIENT_ID_DEPLOY }}
+          tenant-id: ${{ vars.AZURE_TENANT_ID }}
+          subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Package (app files only)
+        working-directory: services/ingest
+        run: |
+          mkdir -p "$RUNNER_TEMP/pkg"
+          cp function_app.py host.json requirements.txt "$RUNNER_TEMP/pkg/"
+          cp -r ingest_core "$RUNNER_TEMP/pkg/"
+          find "$RUNNER_TEMP/pkg" -name __pycache__ -prune -exec rm -rf {} +
+
+      - uses: Azure/functions-action@v1
+        with:
+          app-name: ${{ vars.INGEST_FUNCTION_APP }}
+          package: ${{ runner.temp }}/pkg
+          sku: flexconsumption
+          remote-build: true

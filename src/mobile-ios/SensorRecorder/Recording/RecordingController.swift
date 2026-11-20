@@ -51,13 +51,14 @@ final class RecordingController {
     @ObservationIgnored private var toastExpiry: Date?
     @ObservationIgnored private var trackVersion = -1
     @ObservationIgnored private var tickCount = 0
-    @ObservationIgnored private let haptics = UINotificationFeedbackGenerator()
-    @ObservationIgnored private let impact = UIImpactFeedbackGenerator(style: .heavy)
+    @ObservationIgnored private let alerter: Alerter
 
     static let refreshHz = 8.0
 
-    init(session: RecordingSession, sicknessInterval: TimeInterval = 120, sicknessTimeout: TimeInterval = 30) {
+    init(session: RecordingSession, sicknessInterval: TimeInterval = 120, sicknessTimeout: TimeInterval = 30,
+         alerter: Alerter? = nil) {
         self.session = session
+        self.alerter = alerter ?? SystemAlerter()
         scheduler = SicknessScheduler(start: session.startUp, interval: sicknessInterval, timeout: sicknessTimeout)
     }
 
@@ -66,8 +67,7 @@ final class RecordingController {
     func start() {
         UIApplication.shared.isIdleTimerDisabled = true // screen never auto-locks while recording
         session.start()
-        haptics.prepare()
-        impact.prepare()
+        alerter.prepare()
         let t = Timer(timeInterval: 1 / Self.refreshHz, repeats: true) { [weak self] _ in
             MainActor.assumeIsolated { self?.refresh() }
         }
@@ -87,7 +87,7 @@ final class RecordingController {
         sicknessManualOpen = false
         finished = session.stop()
         UIApplication.shared.isIdleTimerDisabled = false
-        haptics.notificationOccurred(.success)
+        alerter.stopped()
     }
 
     var isFinished: Bool { finished != nil }
@@ -119,6 +119,15 @@ final class RecordingController {
         sicknessManualOpen = false
     }
 
+    /// The rater declined / the operator needs the screen: logged as missed, never as a rating.
+    func skipSicknessPrompt() {
+        guard sicknessPromptActive else { return }
+        session.addLabel(.sicknessMissed, note: "skipped")
+        scheduler.answered()
+        sicknessPromptActive = false
+        confirm("Sickness prompt skipped", at: Date())
+    }
+
     func rateSickness(_ value: Int) {
         let prompted = sicknessPromptActive
         session.addLabel(.sickness, value: String(value), note: prompted ? "prompt" : "manual")
@@ -130,7 +139,7 @@ final class RecordingController {
     }
 
     private func confirm(_ text: String, at date: Date) {
-        impact.impactOccurred()
+        alerter.labelConfirmed()
         let f = DateFormatter()
         f.dateFormat = "HH:mm:ss"
         toast = "\(text) · \(f.string(from: date))"
@@ -139,7 +148,8 @@ final class RecordingController {
 
     // MARK: Refresh (8 Hz)
 
-    private func refresh() {
+    /// Internal (not private) so tests can drive refresh ticks deterministically.
+    func refresh() {
         tickCount += 1
         let now = session.timeBase.uptimeNow()
 
@@ -156,8 +166,7 @@ final class RecordingController {
             session.addLabel(.sicknessPrompt)
             sicknessPromptActive = true
             sicknessManualOpen = false
-            haptics.notificationOccurred(.warning)
-            AudioServicesPlaySystemSound(1007)
+            alerter.sicknessPrompt()
         case .missed:
             session.addLabel(.sicknessMissed)
             session.log(.info, "sickness prompt missed")
@@ -197,8 +206,7 @@ final class RecordingController {
         knownIssues = current
         if newProblem {
             // spec: strong haptic + sound on PROBLEM
-            haptics.notificationOccurred(.error)
-            AudioServicesPlayAlertSound(1005)
+            alerter.newProblem()
         }
     }
 
@@ -255,7 +263,7 @@ final class RecordingController {
         // Audio
         let audioOn = session.audioRecording
         var audioDetail: String?
-        if let lvl = session.audioLevel, audioOn {
+        if let lvl = session.audioLevel, audioOn, lvl.avgDbfs.isFinite { // Int(NaN) would trap
             let bars = max(0, min(6, Int((lvl.avgDbfs + 60) / 10)))
             audioDetail = String(format: "level %.0f dBFS ", lvl.avgDbfs) + String(repeating: "▮", count: bars) + String(repeating: "▯", count: 6 - bars)
         }
@@ -292,4 +300,34 @@ final class RecordingController {
         s.msdv = live.msdv
         return s
     }
+}
+
+/// Operator feedback channel (haptics + sounds). Injected so tests can assert *when* the
+/// operator is alerted; the system implementation is used in the app.
+@MainActor
+protocol Alerter {
+    func prepare()
+    func labelConfirmed()
+    func sicknessPrompt()
+    func newProblem()
+    func stopped()
+}
+
+@MainActor
+final class SystemAlerter: Alerter {
+    private let haptics = UINotificationFeedbackGenerator()
+    private let impact = UIImpactFeedbackGenerator(style: .heavy)
+
+    func prepare() { haptics.prepare(); impact.prepare() }
+    func labelConfirmed() { impact.impactOccurred() }
+    func sicknessPrompt() {
+        haptics.notificationOccurred(.warning)
+        AudioServicesPlaySystemSound(1007)
+    }
+    func newProblem() {
+        // spec: strong haptic + sound on PROBLEM
+        haptics.notificationOccurred(.error)
+        AudioServicesPlayAlertSound(1005)
+    }
+    func stopped() { haptics.notificationOccurred(.success) }
 }

@@ -3,7 +3,7 @@ import XCTest
 
 final class CSVTests: XCTestCase {
     func testFixedMatchesPrintfWithinHalfULPOfLastDigit() {
-        var rng = SystemRandomNumberGenerator()
+        var rng = SeededGenerator(seed: 0x5EED) // reproducible
         for _ in 0..<20_000 {
             let mag = [1e-7, 1e-3, 1, 50, 360, 1e5, 1e6][Int.random(in: 0..<7, using: &rng)]
             let v = Double.random(in: -mag...mag, using: &rng)
@@ -56,9 +56,13 @@ final class CSVTests: XCTestCase {
             .labels: "t_up,t_utc_ms,type,value,note",
             .clock: "t_up,t_utc_ms,source",
         ]
-        for (file, header) in expected { XCTAssertEqual(file.header, header, file.rawValue) }
-        // Activity: spec columns first, extra column appended at the end.
-        XCTAssertTrue(StreamFile.activity.header.hasPrefix("t_up,t_utc_ms,stationary,walking,running,automotive,cycling,unknown,confidence"))
+        var all = expected
+        // Additions documented in the README (extra files / trailing column):
+        all[.activity] = "t_up,t_utc_ms,stationary,walking,running,automotive,cycling,unknown,confidence,start_utc_ms"
+        all[.absAltitude] = "t_up,t_utc_ms,altitude_m,accuracy_m,precision_m"
+        all[.audioSegments] = "t_up,t_utc_ms,event,file"
+        XCTAssertEqual(Set(all.keys), Set(StreamFile.allCases), "every file's header is pinned")
+        for (file, header) in all { XCTAssertEqual(file.header, header, file.rawValue) }
     }
 }
 
@@ -165,11 +169,17 @@ final class WriterTests: XCTestCase {
         w.start()
         w.append(.accelRaw, "1.000000,1000,0.1,0.2,0.3")
         w.log(.info, "hello")
-        let exp = expectation(description: "flushed")
-        DispatchQueue.global().asyncAfter(deadline: .now() + 1.0) { exp.fulfill() }
-        wait(for: [exp], timeout: 3)
-        let text = try String(contentsOf: dir.appendingPathComponent("s/accel_raw.csv"), encoding: .utf8)
+        // The 0.5 s timer must get it to disk without any explicit flush. Poll (slow CI simulators).
+        let url = dir.appendingPathComponent("s/accel_raw.csv")
+        let deadline = Date().addingTimeInterval(5)
+        var text = ""
+        while Date() < deadline {
+            text = (try? String(contentsOf: url, encoding: .utf8)) ?? ""
+            if text.contains("1000,0.1") { break }
+            Thread.sleep(forTimeInterval: 0.05)
+        }
         XCTAssertEqual(text, "t_up,t_utc_ms,x,y,z\n1.000000,1000,0.1,0.2,0.3\n")
+        Thread.sleep(forTimeInterval: 0.6) // the log line is flushed by the same timer
         let log = try String(contentsOf: dir.appendingPathComponent("s/app_log.txt"), encoding: .utf8)
         XCTAssertTrue(log.contains("[INFO] hello"))
         w.close()

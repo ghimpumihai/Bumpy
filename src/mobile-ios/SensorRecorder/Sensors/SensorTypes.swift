@@ -160,6 +160,9 @@ protocol AudioSource: AnyObject {
     var bytesWritten: Int64 { get }
     var latestLevel: AudioLevelSample? { get }
     var formatDescription: String { get }
+    /// True if this source writes microphone audio to files (S2); false for the level-meter-only
+    /// source used when audio recording is off (public transport).
+    var recordsAudio: Bool { get }
 }
 
 protocol DeviceStatusSource: AnyObject {

@@ -39,6 +39,8 @@
 		<key>RoadMapping</key>
 		<string>Precise location is required to place road-quality measurements on the correct street.</string>
 	</dict>
+	<key>NSLocalNetworkUsageDescription</key>
+	<string>Only used when you point the upload URL at a test server on your local network.</string>
 	<key>NSMicrophoneUsageDescription</key>
 	<string>Records road noise to classify road surfaces.</string>
 	<key>NSCameraUsageDescription</key>

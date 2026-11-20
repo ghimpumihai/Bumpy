@@ -8,29 +8,112 @@ struct SessionMetadata: Codable, Equatable {
         var iosVersion: String
     }
 
+    // Nested types decode with defaults for every key, so session.json files written by older app
+    // versions (without the public-transport fields) still load (list, detail, recovery).
+
     struct Vehicle: Codable, Equatable {
         var type: String = "car"
         var makeModel: String = ""
+        /// Bus/tram line number; `null` for other vehicles (spec §3.8).
+        var line: String? = nil
         var notes: String = ""
+
+        init() {}
+
+        init(from decoder: Decoder) throws {
+            let c = try decoder.container(keyedBy: CodingKeys.self)
+            type = try c.decodeIfPresent(String.self, forKey: .type) ?? "car"
+            makeModel = try c.decodeIfPresent(String.self, forKey: .makeModel) ?? ""
+            line = try c.decodeIfPresent(String.self, forKey: .line)
+            notes = try c.decodeIfPresent(String.self, forKey: .notes) ?? ""
+        }
+
+        func encode(to encoder: Encoder) throws {
+            var c = encoder.container(keyedBy: CodingKeys.self)
+            try c.encode(type, forKey: .type)
+            try c.encode(makeModel, forKey: .makeModel)
+            try c.encode(line, forKey: .line) // explicit null
+            try c.encode(notes, forKey: .notes)
+        }
+
+        enum CodingKeys: String, CodingKey { case type, makeModel, line, notes }
+
+        var isPublicTransport: Bool { type == "bus" || type == "tram" }
     }
 
     struct Mount: Codable, Equatable {
         var location: String = "taped flat on center console"
         var phoneOrientation: String = "screen up, top of phone pointing to vehicle front"
         var rigid: Bool = true
+        /// Phone held in the hand (no mount). The backend excludes these from roughness (02 §10).
+        var handheld: Bool = false
+        var seatOverAxle: Bool = false
         var photoFile: String? = nil
+
+        init() {}
+
+        init(from decoder: Decoder) throws {
+            let c = try decoder.container(keyedBy: CodingKeys.self)
+            let d = Mount()
+            location = try c.decodeIfPresent(String.self, forKey: .location) ?? d.location
+            phoneOrientation = try c.decodeIfPresent(String.self, forKey: .phoneOrientation) ?? d.phoneOrientation
+            rigid = try c.decodeIfPresent(Bool.self, forKey: .rigid) ?? d.rigid
+            handheld = try c.decodeIfPresent(Bool.self, forKey: .handheld) ?? false
+            seatOverAxle = try c.decodeIfPresent(Bool.self, forKey: .seatOverAxle) ?? false
+            photoFile = try c.decodeIfPresent(String.self, forKey: .photoFile)
+        }
+
+        func encode(to encoder: Encoder) throws {
+            var c = encoder.container(keyedBy: CodingKeys.self)
+            try c.encode(location, forKey: .location)
+            try c.encode(phoneOrientation, forKey: .phoneOrientation)
+            try c.encode(rigid, forKey: .rigid)
+            try c.encode(handheld, forKey: .handheld)
+            try c.encode(seatOverAxle, forKey: .seatOverAxle)
+            try c.encode(photoFile, forKey: .photoFile) // explicit null (spec shows the key)
+        }
+
+        enum CodingKeys: String, CodingKey { case location, phoneOrientation, rigid, handheld, seatOverAxle, photoFile }
     }
 
     struct People: Codable, Equatable {
+        static let postures = ["seated", "standing"]
+
         var operatorSeat: String = "front passenger"
         var raterSeat: String = "rear left"
+        /// "seated" | "standing" (spec §3.8)
+        var raterPosture: String = "seated"
         var passengerCount: Int = 2
         var raterName: String = ""
+
+        init() {}
+
+        init(from decoder: Decoder) throws {
+            let c = try decoder.container(keyedBy: CodingKeys.self)
+            let d = People()
+            operatorSeat = try c.decodeIfPresent(String.self, forKey: .operatorSeat) ?? d.operatorSeat
+            raterSeat = try c.decodeIfPresent(String.self, forKey: .raterSeat) ?? d.raterSeat
+            raterPosture = try c.decodeIfPresent(String.self, forKey: .raterPosture) ?? d.raterPosture
+            passengerCount = try c.decodeIfPresent(Int.self, forKey: .passengerCount) ?? d.passengerCount
+            raterName = try c.decodeIfPresent(String.self, forKey: .raterName) ?? ""
+        }
+
+        enum CodingKeys: String, CodingKey { case operatorSeat, raterSeat, raterPosture, passengerCount, raterName }
     }
 
     struct Conditions: Codable, Equatable {
         var weather: String = "dry"
         var notes: String = ""
+
+        init() {}
+
+        init(from decoder: Decoder) throws {
+            let c = try decoder.container(keyedBy: CodingKeys.self)
+            weather = try c.decodeIfPresent(String.self, forKey: .weather) ?? "dry"
+            notes = try c.decodeIfPresent(String.self, forKey: .notes) ?? ""
+        }
+
+        enum CodingKeys: String, CodingKey { case weather, notes }
     }
 
     struct StreamStats: Codable, Equatable {
@@ -52,6 +135,7 @@ struct SessionMetadata: Codable, Equatable {
         var fileSizes: [String: Int64]
         var totalBytes: Int64
         var writeErrors: Int
+        /// Batches queued for live upload (0 when upload was off).
         var uploadBatchesCreated: Int
     }
 
@@ -86,6 +170,9 @@ struct SessionMetadata: Codable, Equatable {
     var mount: Mount
     var people: People
     var conditions: Conditions
+    /// Microphone audio recorded to file (S2). Off on public transport (GDPR, spec §3.5);
+    /// the level meter (S1, numbers only) may still run.
+    var audioEnabled: Bool = true
     var requestedRatesHz: [String: Double]
     var recovered: Bool
     var recoveredAtUtc: String?
@@ -98,7 +185,7 @@ struct SessionMetadata: Codable, Equatable {
     // Explicit encoding so that `endedAtUtc` is written as `null` (spec shows it) instead of omitted.
     enum CodingKeys: String, CodingKey {
         case sessionId, appVersion, device, timezone, startedAtUtc, startUptimeSec, endedAtUtc
-        case vehicle, mount, people, conditions, requestedRatesHz, recovered, recoveredAtUtc
+        case vehicle, mount, people, conditions, audioEnabled, requestedRatesHz, recovered, recoveredAtUtc
         case syntheticSensors, folderName, deviceId, preflight, stats
     }
 
@@ -115,6 +202,7 @@ struct SessionMetadata: Codable, Equatable {
         try c.encode(mount, forKey: .mount)
         try c.encode(people, forKey: .people)
         try c.encode(conditions, forKey: .conditions)
+        try c.encode(audioEnabled, forKey: .audioEnabled)
         try c.encode(requestedRatesHz, forKey: .requestedRatesHz)
         try c.encode(recovered, forKey: .recovered)
         try c.encodeIfPresent(recoveredAtUtc, forKey: .recoveredAtUtc)
@@ -123,6 +211,43 @@ struct SessionMetadata: Codable, Equatable {
         try c.encode(deviceId, forKey: .deviceId)
         try c.encodeIfPresent(preflight, forKey: .preflight)
         try c.encode(stats, forKey: .stats) // Optional -> null until the end
+    }
+
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        sessionId = try c.decode(String.self, forKey: .sessionId)
+        appVersion = try c.decodeIfPresent(String.self, forKey: .appVersion) ?? "unknown"
+        device = try c.decodeIfPresent(Device.self, forKey: .device) ?? Device(model: "unknown", name: "unknown", iosVersion: "unknown")
+        timezone = try c.decodeIfPresent(String.self, forKey: .timezone) ?? "UTC"
+        startedAtUtc = try c.decode(String.self, forKey: .startedAtUtc)
+        startUptimeSec = try c.decodeIfPresent(Double.self, forKey: .startUptimeSec) ?? 0
+        endedAtUtc = try c.decodeIfPresent(String.self, forKey: .endedAtUtc)
+        vehicle = try c.decodeIfPresent(Vehicle.self, forKey: .vehicle) ?? Vehicle()
+        mount = try c.decodeIfPresent(Mount.self, forKey: .mount) ?? Mount()
+        people = try c.decodeIfPresent(People.self, forKey: .people) ?? People()
+        conditions = try c.decodeIfPresent(Conditions.self, forKey: .conditions) ?? Conditions()
+        audioEnabled = try c.decodeIfPresent(Bool.self, forKey: .audioEnabled) ?? true // older versions always recorded
+        requestedRatesHz = try c.decodeIfPresent([String: Double].self, forKey: .requestedRatesHz) ?? Self.requestedRates
+        recovered = try c.decodeIfPresent(Bool.self, forKey: .recovered) ?? false
+        recoveredAtUtc = try c.decodeIfPresent(String.self, forKey: .recoveredAtUtc)
+        syntheticSensors = try c.decodeIfPresent(Bool.self, forKey: .syntheticSensors) ?? false
+        folderName = try c.decodeIfPresent(String.self, forKey: .folderName) ?? ""
+        deviceId = try c.decodeIfPresent(String.self, forKey: .deviceId) ?? ""
+        preflight = try? c.decodeIfPresent(Preflight.self, forKey: .preflight)
+        stats = try? c.decodeIfPresent(Stats.self, forKey: .stats)
+    }
+
+    init(sessionId: String, appVersion: String, device: Device, timezone: String, startedAtUtc: String,
+         startUptimeSec: Double, endedAtUtc: String?, vehicle: Vehicle, mount: Mount, people: People,
+         conditions: Conditions, audioEnabled: Bool = true, requestedRatesHz: [String: Double], recovered: Bool,
+         recoveredAtUtc: String?, syntheticSensors: Bool, folderName: String, deviceId: String,
+         preflight: Preflight?, stats: Stats?) {
+        self.sessionId = sessionId; self.appVersion = appVersion; self.device = device; self.timezone = timezone
+        self.startedAtUtc = startedAtUtc; self.startUptimeSec = startUptimeSec; self.endedAtUtc = endedAtUtc
+        self.vehicle = vehicle; self.mount = mount; self.people = people; self.conditions = conditions
+        self.audioEnabled = audioEnabled; self.requestedRatesHz = requestedRatesHz; self.recovered = recovered
+        self.recoveredAtUtc = recoveredAtUtc; self.syntheticSensors = syntheticSensors; self.folderName = folderName
+        self.deviceId = deviceId; self.preflight = preflight; self.stats = stats
     }
 
     static let requestedRates: [String: Double] = [
@@ -148,8 +273,17 @@ struct SessionMetadata: Codable, Equatable {
 /// The parts of the metadata the operator fills in on the setup screen.
 struct SessionSetup: Equatable {
     var vehicle = SessionMetadata.Vehicle()
+    /// Record microphone audio to file. Defaults to off for bus/tram (spec §3.5).
+    var audioEnabled = true
     var mount = SessionMetadata.Mount()
     var people = SessionMetadata.People()
     var conditions = SessionMetadata.Conditions()
     var mountPhotoJPEG: Data?
+
+    /// Spec §3.5/§3.8: audio defaults to OFF on public transport (GDPR) and ON otherwise; the line
+    /// number only applies to bus/tram. Called when the operator changes the vehicle type.
+    mutating func applyVehicleTypeDefaults() {
+        audioEnabled = !vehicle.isPublicTransport
+        if !vehicle.isPublicTransport { vehicle.line = nil }
+    }
 }

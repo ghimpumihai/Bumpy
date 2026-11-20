@@ -79,7 +79,9 @@ struct IngestBatch: Encodable, Equatable {
 
     func jsonData() throws -> Data {
         let enc = JSONEncoder()
-        enc.outputFormatting = [.withoutEscapingSlashes]
+        // sortedKeys: deterministic bytes (dictionary order is otherwise unspecified), so a re-sent
+        // batch is byte-identical and payloads diff cleanly.
+        enc.outputFormatting = [.withoutEscapingSlashes, .sortedKeys]
         return try enc.encode(self)
     }
 }

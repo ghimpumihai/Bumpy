@@ -62,6 +62,12 @@ final class UploadQueue: @unchecked Sendable {
     private let kickFlag = Locked(false)
     private var loopTask: Task<Void, Never>?
 
+    /// After this many consecutive server-side errors (5xx/408/429) for the SAME batch, move it to the
+    /// back of the queue so one bad batch can't block every newer one. Network errors don't count
+    /// (that's an outage, not the batch). Nothing is ever deleted on failure.
+    static let maxServerErrorsPerBatch = 5
+    private let headFailures = Locked<(name: String, count: Int)>(("", 0))
+
     static let minBackoff: TimeInterval = 1
     static let maxBackoff: TimeInterval = 30
 
@@ -85,6 +91,9 @@ final class UploadQueue: @unchecked Sendable {
     }
 
     var status: UploadStatus { statusBox.current }
+
+    /// Upload configured right now (API URL set).
+    var isEnabled: Bool { configProvider().isEnabled }
 
     // MARK: Enqueue
 
@@ -174,16 +183,17 @@ final class UploadQueue: @unchecked Sendable {
         }
         statusBox.withLock { $0.lastAttemptUp = now }
         let outcome: Outcome
+        var serverSide = false
         do {
             let req = try makeRequest(for: file, config: config)
             let code = try await transport.send(req)
             switch code {
             case 200..<300: outcome = .uploaded(status: code)
             case 409: outcome = .duplicate
-            case 408, 429: outcome = .retry(reason: "HTTP \(code)")
+            case 408, 429: outcome = .retry(reason: "HTTP \(code)"); serverSide = true
             case 401, 403: outcome = .retry(reason: "HTTP \(code) (check device key)")
             case 400..<500: outcome = .permanentFailure(status: code)
-            default: outcome = .retry(reason: "HTTP \(code)")
+            default: outcome = .retry(reason: "HTTP \(code)"); serverSide = true
             }
         } catch {
             outcome = .retry(reason: (error as? URLError).map { "network: \($0.code.rawValue)" } ?? error.localizedDescription)
@@ -193,6 +203,7 @@ final class UploadQueue: @unchecked Sendable {
         switch outcome {
         case .uploaded, .duplicate:
             try? fm.removeItem(at: file)
+            headFailures.withLock { $0 = ("", 0) }
             statusBox.withLock {
                 $0.uploadedCount += 1
                 $0.lastSuccessUp = self.uptime()
@@ -211,14 +222,33 @@ final class UploadQueue: @unchecked Sendable {
             }
             onEvent?(.warn, "upload: \(file.lastPathComponent) rejected with HTTP \(code), moved to upload_failed/")
         case .retry(let reason):
-            statusBox.withLock {
-                $0.lastError = reason
-                $0.currentBackoff = Self.nextBackoff($0.currentBackoff)
+            let previous = statusBox.withLock { s -> String? in
+                let p = s.lastError
+                s.lastError = reason
+                s.currentBackoff = Self.nextBackoff(s.currentBackoff)
+                return p
             }
+            if previous != reason { onEvent?(.warn, "upload retry: \(reason)") }
+            if serverSide { rotateIfPoisoned(file) } else { headFailures.withLock { $0 = ("", 0) } }
         case .disabled, .empty:
             break
         }
         return outcome
+    }
+
+    private func rotateIfPoisoned(_ file: URL) {
+        let name = file.lastPathComponent
+        let count = headFailures.withLock { h -> Int in
+            h = h.name == name ? (name, h.count + 1) : (name, 1)
+            return h.count
+        }
+        guard count >= Self.maxServerErrorsPerBatch, let p = Self.parse(fileName: name) else { return }
+        let nowMs = Int64(Date().timeIntervalSince1970 * 1000)
+        let dest = directory.appendingPathComponent(Self.fileName(createdUtcMs: nowMs, sessionId: p.sessionId, seq: p.seq))
+        if (try? FileManager.default.moveItem(at: file, to: dest)) != nil {
+            headFailures.withLock { $0 = ("", 0) }
+            onEvent?(.warn, "upload: \(name) failed \(count)× on the server, moved to the back of the queue")
+        }
     }
 
     static func nextBackoff(_ current: TimeInterval) -> TimeInterval {
@@ -269,18 +299,34 @@ final class UploadQueue: @unchecked Sendable {
 
     // MARK: Preflight connectivity test (warning only)
 
-    /// `GET {API_BASE}/api/health` with the device key. Never blocks recording.
+    /// Probe `POST {API}/api/ingest` with a deliberately invalid body (`{"probe":true}`, gzipped,
+    /// with the device key). The ingest Lambda checks the key first and the schema second, so:
+    /// 400/422 = reachable + key accepted (the probe is rejected, never stored); 401/403 = key
+    /// rejected; 404 = wrong base URL. There is no `/api/health` route in the AWS plan. Never blocks.
     static func testConnection(config: UploadConfig, transport: HTTPTransport = URLSessionTransport()) async -> (ok: Bool, detail: String) {
-        guard let url = config.healthURL else { return (false, "upload off (no URL)") }
+        guard let url = config.ingestURL else { return (false, "upload off (no URL)") }
         var r = URLRequest(url: url)
-        r.httpMethod = "GET"
+        r.httpMethod = "POST"
+        r.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        r.setValue("gzip", forHTTPHeaderField: "Content-Encoding")
         r.setValue(config.deviceKey, forHTTPHeaderField: "x-device-key")
+        r.setValue("1", forHTTPHeaderField: "x-probe")
+        r.httpBody = try? Gzip.compress(Data(#"{"probe":true}"#.utf8))
         r.timeoutInterval = 8
         do {
-            let code = try await transport.send(r)
-            return ((200..<300).contains(code), "HTTP \(code) from /api/health")
+            return interpretProbe(status: try await transport.send(r))
         } catch {
-            return (false, error.localizedDescription)
+            return (false, "unreachable: \(error.localizedDescription)")
+        }
+    }
+
+    static func interpretProbe(status: Int) -> (ok: Bool, detail: String) {
+        switch status {
+        case 400, 422: return (true, "reachable, key accepted (HTTP \(status) to probe)")
+        case 200..<300: return (true, "reachable (HTTP \(status))")
+        case 401, 403: return (false, "device key rejected (HTTP \(status))")
+        case 404: return (false, "endpoint not found (HTTP 404): check the API URL")
+        default: return (false, "HTTP \(status) from /api/ingest")
         }
     }
 }

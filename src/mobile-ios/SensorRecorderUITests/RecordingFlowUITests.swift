@@ -28,7 +28,7 @@ final class RecordingFlowUITests: XCTestCase {
         app.launch()
     }
 
-    private func startRecording(expectAllGreen: Bool = false) {
+    private func startRecording() {
         let newSession = app.buttons["newSessionButton"]
         XCTAssertTrue(newSession.waitForExistence(timeout: 10))
         newSession.tap()
@@ -37,22 +37,17 @@ final class RecordingFlowUITests: XCTestCase {
         XCTAssertTrue(cont.waitForExistence(timeout: 5))
         cont.tap()
 
-        // Preflight runs a 5 s motion test; on the Simulator stillness fails (synthetic sway) -> override.
+        // Preflight runs a 5 s motion test. The Simulator has no motion hardware, so the motion
+        // checks fail and the (recorded) override path is used; Start/Override wait for all checks.
         let start = app.buttons["startRecording"]
         let override = app.buttons["preflightOverride"]
-        let deadline = Date().addingTimeInterval(30)
-        while Date() < deadline && !start.exists && !(override.exists && override.isEnabled) {
-            app.tap() // lets interruption monitors fire
+        let deadline = Date().addingTimeInterval(40)
+        while Date() < deadline && !(start.exists && start.isEnabled) && !(override.exists && override.isEnabled) {
+            // Tap the status-bar band (never a control) so interruption monitors can fire.
+            app.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.01)).tap()
             usleep(500_000)
         }
-        // wait for the motion test to finish before deciding
-        let motionRow = app.descendants(matching: .any)["check.motion.still"]
-        XCTAssertTrue(motionRow.waitForExistence(timeout: 5))
-        sleep(6)
-        if expectAllGreen {
-            XCTAssertTrue(start.waitForExistence(timeout: 10), "every preflight check is green")
-            XCTAssertFalse(override.exists)
-        }
+        XCTAssertTrue(app.descendants(matching: .any)["check.motion.still"].exists)
         if start.exists {
             XCTAssertTrue(start.waitForEnabled(timeout: 10))
             start.tap()
@@ -117,13 +112,13 @@ final class RecordingFlowUITests: XCTestCase {
         let misc3 = app.buttons["misc.3"]
         XCTAssertTrue(misc3.waitForExistence(timeout: 3))
         misc3.tap()
-        XCTAssertFalse(misc3.waitForExistence(timeout: 1), "grid closes after rating")
+        XCTAssertTrue(misc3.waitForNonExistence(timeout: 3), "grid closes after rating")
 
         // Scheduled sickness prompt (every 40 s here) with countdown; answer it
         let countdown = app.staticTexts["sicknessCountdown"]
         XCTAssertTrue(countdown.waitForExistence(timeout: 45), "periodic prompt appears")
         app.buttons["misc.2"].tap()
-        XCTAssertFalse(countdown.waitForExistence(timeout: 1))
+        XCTAssertTrue(countdown.waitForNonExistence(timeout: 3), "prompt closes after rating")
 
         // A short tap must NOT stop
         let stop = app.descendants(matching: .any)["holdToStop"]
@@ -169,9 +164,12 @@ final class RecordingFlowUITests: XCTestCase {
         startRecording()
         let countdown = app.staticTexts["sicknessCountdown"]
         XCTAssertTrue(countdown.waitForExistence(timeout: 10))
-        let gone = NSPredicate(format: "exists == false")
-        expectation(for: gone, evaluatedWith: countdown)
-        waitForExpectations(timeout: 6)
+        XCTAssertTrue(countdown.waitForNonExistence(timeout: 6), "unanswered prompt auto-dismisses (missed)")
+        // Next prompt: Skip must close it without a rating
+        XCTAssertTrue(countdown.waitForExistence(timeout: 10))
+        app.buttons["sicknessSkip"].tap()
+        XCTAssertTrue(countdown.waitForNonExistence(timeout: 3))
+        sleep(2) // let some GPS fixes land on disk
 
         app.terminate() // simulates a crash / force-quit while recording
         app.launchArguments = ["-uiTesting"]
@@ -179,17 +177,43 @@ final class RecordingFlowUITests: XCTestCase {
         XCTAssertTrue(app.staticTexts["RECOVERED"].waitForExistence(timeout: 10), "interrupted session is recovered")
         let session = app.buttons.matching(NSPredicate(format: "identifier BEGINSWITH 'session.'")).firstMatch
         session.tap()
-        XCTAssertTrue(app.descendants(matching: .any)["stat.deviceMotion"].waitForExistence(timeout: 10),
-                      "stats rebuilt from the CSV files")
+        // Assert on data this test itself created (labels: prompt, missed, prompt, skipped), not on
+        // environment-dependent streams (the Simulator has no motion hardware and its simulated
+        // location is cleared on reboot).
+        let labels = app.descendants(matching: .any)["stat.labelsCount"]
+        for _ in 0..<8 where !labels.exists { app.swipeUp() }
+        XCTAssertTrue(labels.waitForExistence(timeout: 5), "stats rebuilt from the CSV files")
+        let count = Int(labels.value as? String ?? "") ?? 0
+        XCTAssertGreaterThanOrEqual(count, 4, "labels recorded before the kill survived recovery: \(labels.value ?? "nil")")
     }
 
     func testSettingsShowsUploadOffWhenEmpty() {
-        launch()
+        launch(["-upload.baseURL", ""]) // later argument wins: no API URL
         let settings = app.buttons["settingsButton"]
         XCTAssertTrue(settings.waitForExistence(timeout: 10))
         settings.tap()
-        XCTAssertTrue(app.staticTexts["UPLOAD OFF (local only)"].waitForExistence(timeout: 5)
-                      || !app.textFields["apiBaseURL"].value.debugDescription.isEmpty)
+        XCTAssertTrue(app.staticTexts["UPLOAD OFF (local only)"].waitForExistence(timeout: 5))
+    }
+
+    /// Spec §3.5/§3.8: choosing bus/tram turns audio recording OFF by default and asks for the line.
+    func testPublicTransportDefaultsAudioOffAndAsksForLine() {
+        launch()
+        let newSession = app.buttons["newSessionButton"]
+        XCTAssertTrue(newSession.waitForExistence(timeout: 10))
+        newSession.tap()
+        let audio = app.switches["audioToggle"]
+        for _ in 0..<6 where !audio.exists { app.swipeUp() }
+        XCTAssertEqual(audio.value as? String, "1", "car: audio on")
+        for _ in 0..<6 { app.swipeDown() }
+        let typePicker = app.buttons.matching(NSPredicate(format: "label BEGINSWITH 'Type'")).firstMatch
+        XCTAssertTrue(typePicker.waitForExistence(timeout: 5))
+        typePicker.tap()
+        let bus = app.buttons["bus"].firstMatch
+        XCTAssertTrue(bus.waitForExistence(timeout: 5))
+        bus.tap()
+        XCTAssertTrue(app.textFields["vehicleLine"].waitForExistence(timeout: 3), "line number field for bus")
+        for _ in 0..<6 where !audio.isHittable { app.swipeUp() }
+        XCTAssertEqual(audio.value as? String, "0", "bus: audio recording OFF by default (GDPR)")
     }
 }
 
@@ -198,6 +222,14 @@ extension XCUIElement {
         let end = Date().addingTimeInterval(timeout)
         while Date() < end { if exists && isHittable { return true }; usleep(200_000) }
         return false
+    }
+
+    /// Polls until the element is gone (XCTAssertFalse(waitForExistence) passes instantly while an
+    /// element is still animating out).
+    func waitForNonExistence(timeout: TimeInterval) -> Bool {
+        let end = Date().addingTimeInterval(timeout)
+        while Date() < end { if !exists { return true }; usleep(100_000) }
+        return !exists
     }
 
     func waitForEnabled(timeout: TimeInterval) -> Bool {

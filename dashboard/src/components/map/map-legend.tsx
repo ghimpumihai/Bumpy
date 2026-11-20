@@ -30,7 +30,7 @@ export function MapLegend({ title, bands, missingLabel, footnote, className }: M
           </li>
         )}
       </ul>
-      {footnote && <p className="max-w-56 text-[11px] text-muted-foreground">{footnote}</p>}
+      {footnote && <p className="hidden max-w-56 text-[11px] text-muted-foreground sm:block">{footnote}</p>}
     </section>
   );
 }

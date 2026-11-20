@@ -158,5 +158,6 @@ messages, `aria-current` on the active nav link); tables have headers.
 - Pure logic (`utils/`, `mock/`, view utils) has Vitest unit tests next to it (`__tests__/`).
 - The mock backend tests pin the plan's rules (replays never aggregated, privacy trimming, β recovered
   by the fixed-effects fit, crowd-confirmed potholes).
-- `npm run test:e2e` builds, serves and clicks through every route in Chromium and fails on console errors.
+- `npm run test:e2e` builds, serves and clicks through every route in Chromium and fails on console errors;
+  `e2e/accessibility.spec.ts` runs axe-core (WCAG 2.1 AA) on every route in light and dark mode.
 - A change is done when `npm run check` and `npm run build` pass with zero errors.

@@ -1,3 +1,5 @@
+import { AnimatePresence, motion } from "motion/react";
+
 import { liveApi } from "@/api/live";
 import { QueryState } from "@/components/query-state";
 import { Skeleton } from "@/components/ui/skeleton";
@@ -35,9 +37,21 @@ export function LiveView() {
           }
           skeleton={<Skeleton className="h-36 w-full" />}
         >
-          {devices.map((device) => (
-            <LiveDeviceCard key={device.deviceId} device={device} now={now} />
-          ))}
+          <AnimatePresence initial={false}>
+            {devices.map((device) => (
+              // Phones appear and disappear as they start and stop streaming.
+              <motion.div
+                key={device.deviceId}
+                layout
+                initial={{ opacity: 0, y: 8 }}
+                animate={{ opacity: 1, y: 0 }}
+                exit={{ opacity: 0, y: -8 }}
+                transition={{ duration: 0.2 }}
+              >
+                <LiveDeviceCard device={device} now={now} />
+              </motion.div>
+            ))}
+          </AnimatePresence>
         </QueryState>
       </aside>
     </div>

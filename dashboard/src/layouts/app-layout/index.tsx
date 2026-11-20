@@ -21,7 +21,7 @@ const NAV_ITEMS: NavItem[] = [
 ];
 
 const linkClass =
-  "horizontal gap-1.5 rounded-md px-2.5 py-1.5 text-sm font-medium text-muted-foreground transition-colors hover:bg-background-hover hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2";
+  "horizontal gap-1.5 whitespace-nowrap rounded-md px-2.5 py-1.5 text-sm font-medium text-muted-foreground transition-colors hover:bg-background-hover hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2";
 
 export function AppLayout({ children }: { children: ReactNode }) {
   const { dataSource } = useRouteContext({ from: "__root__" });

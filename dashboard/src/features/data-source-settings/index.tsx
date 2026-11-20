@@ -44,7 +44,7 @@ export function DataSourceSettings({ dataSource }: DataSourceSettingsProps) {
   return (
     <Dialog open={open} onOpenChange={setOpen}>
       <DialogTrigger asChild>
-        <Button variant="ghost" size="sm" aria-label="Data source settings">
+        <Button variant="ghost" size="sm" aria-label={`${dataSource.kind === "mock" ? "Mock data" : "Read API"}: data source settings`}>
           {dataSource.kind === "mock" ? (
             <Badge variant="highlight">
               <FlaskConical aria-hidden="true" />

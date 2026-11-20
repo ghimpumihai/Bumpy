@@ -7,8 +7,10 @@ import { QualityPanel } from "@/features/data-quality/quality-panel";
 
 import { ContextCard } from "./components/context-card";
 import { DetectionCard } from "./components/detection-card";
+import { SessionCharts } from "./components/session-charts";
 import { SessionHeader } from "./components/session-header";
 import { SessionStats } from "./components/session-stats";
+import { SicknessCard } from "./components/sickness-card";
 import { TrackMap } from "./components/track-map";
 
 export function SessionView() {
@@ -34,10 +36,12 @@ export function SessionView() {
             <SessionHeader session={session} />
             <SessionStats session={session} />
             <TrackMap sessionId={session.sessionId} isLive={session.status === "live"} />
+            <SessionCharts session={session} />
             <div className="grid gap-6 lg:grid-cols-2">
               <DetectionCard detection={session.detection} />
-              <ContextCard session={session} />
+              <SicknessCard sickness={session.sickness} />
             </div>
+            <ContextCard session={session} />
             <QualityPanel quality={session.quality} />
           </>
         )}

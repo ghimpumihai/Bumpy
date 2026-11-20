@@ -1,10 +1,10 @@
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { STREAM_LABELS } from "@/constants/sessions";
 import { cn } from "@/lib/utils";
-import type { StreamQuality } from "@/types/sessions";
+import type { StreamQuality, StreamStatus } from "@/types/sessions";
 import { formatHz, formatNumber, formatSeconds } from "@/utils/format-number";
 
-import { streamStatus, type StreamStatus } from "./utils";
+import { streamStatus } from "./utils";
 
 const STATUS_DOT: Record<StreamStatus, string> = {
   ok: "bg-success",

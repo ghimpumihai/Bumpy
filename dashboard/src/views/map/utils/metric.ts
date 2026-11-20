@@ -1,14 +1,6 @@
 import { ROUGHNESS_BANDS, ROUGHNESS_PERCENTILE_BANDS, SICKNESS_BANDS } from "@/constants/map";
-import type { MapMetric, ScaleBand } from "@/types/map";
-import type { RoughnessMethod, SegmentAggregate } from "@/types/segments";
-
-export interface MetricScale {
-  /** Property of `SegmentAggregate` that colours the hexagon. */
-  property: keyof Pick<SegmentAggregate, "roughness" | "roughnessPctl" | "msi1hPct">;
-  bands: ScaleBand[];
-  title: string;
-  footnote: string;
-}
+import type { MapMetric, MetricScale } from "@/types/map";
+import type { RoughnessMethod } from "@/types/segments";
 
 /** Which aggregate and colour bands a metric uses; roughness falls back to percentiles when the model could not be fitted. */
 export function metricScale(metric: MapMetric, method: RoughnessMethod | undefined): MetricScale {

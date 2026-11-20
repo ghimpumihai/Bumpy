@@ -10,9 +10,10 @@ import {
 } from "@/constants/map";
 import { MapLibreMap, NavigationControl, ScaleControl } from "@/lib/maplibre";
 import { cn } from "@/lib/utils";
-import type { Position } from "@/utils/geo";
+import type { MapState } from "@/types/map";
+import type { Position } from "@/types/common";
 
-import { MapContext, type MapState } from "./map-context";
+import { MapContext } from "./map-context";
 
 /**
  * Used when the OpenFreeMap tiles cannot be loaded (bad Wi-Fi in the presentation room, plan 02 §17):

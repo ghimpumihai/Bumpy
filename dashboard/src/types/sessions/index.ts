@@ -232,3 +232,17 @@ export interface QualityRow extends SessionSummary {
 export interface QualityListResponse {
   sessions: QualityRow[];
 }
+
+/** Optional filters of `GET /api/sessions`. */
+export interface SessionListFilters {
+  source?: SessionSource;
+  vehicle?: VehicleType;
+}
+
+/** `ok` | `warn` (rate below 90 % of expected) | `problem` (gaps over 1 s), as on the phone's summary screen. */
+export type StreamStatus = "ok" | "warn" | "problem";
+
+/** Properties of one coloured piece of a session track. */
+export interface TrackPieceProperties {
+  speedKmh: number | null;
+}

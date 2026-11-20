@@ -1,7 +1,8 @@
 import { latLngToCell } from "h3-js";
 
 import { H3_RESOLUTION } from "@/constants/map";
-import { bearingDeg, bearingDelta, cumulativeDistances, haversineM, pointAtDistance, type Position } from "@/utils/geo";
+import type { Position } from "@/types/common";
+import { bearingDeg, bearingDelta, cumulativeDistances, haversineM, pointAtDistance } from "@/utils/geo";
 
 import { unitHash } from "./random";
 import routesJson from "./routes.json";

@@ -28,7 +28,10 @@ Data source precedence: `?mock=1` / `?mock=0` in the URL → the browser overrid
 |---|---|
 | `/` | Aggregated map: H3 road segments coloured by normalized roughness (ISO 2631-1 comfort bands) or by predicted motion sickness, detected events, crowd-confirmed potholes, per-vehicle filter, segment details |
 | `/sessions` | Every session: vehicle, source (uploaded / live / replay), quality, whether it counts in the map and why not |
-| `/sessions/{id}` | One trip: track coloured by speed, events, detection precision/recall vs. taps, context, data-quality panel |
+| `/sessions/{id}` | One trip: track coloured by speed, events, synchronized charts (road band, sway, speed, MSDV + MISC ratings), detection precision/recall vs. taps, prediction vs. ratings, context, data-quality panel |
+| `/live` | Phones and replays streaming right now (polled every 2 s): moving markers, recent track, speed, roughness, MSDV, battery, staleness |
+| `/quality` | Data-quality panel of every session: rates, gaps, GPS accuracy, valid share, invalid windows, rejected/late/duplicate live batches |
+| `/method` | How the metrics are computed, with the current cross-vehicle fit (β, vehicle factors) |
 
 ## Checks
 

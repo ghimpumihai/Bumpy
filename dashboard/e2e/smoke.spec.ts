@@ -37,7 +37,7 @@ test("sessions list links to a session with its data-quality panel", async ({ pa
 
   await page.goto(`/sessions/${RECORDED_SESSION}`);
   await expect(page.getByText("Detection vs. manual taps")).toBeVisible();
-  await expect(page.getByText("Data quality", { exact: true })).toBeVisible();
+  await expect(page.locator("#content").getByText("Data quality", { exact: true })).toBeVisible();
   await expect(page.getByRole("cell", { name: "Device motion" })).toBeVisible();
   await expect(page.getByRole("region", { name: /Map of this trip/ })).toBeVisible();
   expect(errors).toEqual([]);
@@ -46,4 +46,34 @@ test("sessions list links to a session with its data-quality panel", async ({ pa
 test("unknown session shows a not-found error instead of crashing", async ({ page }) => {
   await page.goto("/sessions/does-not-exist");
   await expect(page.getByRole("alert")).toContainText("Not found");
+});
+
+test("live view lists the streaming phone and the replay", async ({ page }) => {
+  const errors = trackErrors(page);
+  await page.goto("/live");
+  const panel = page.getByRole("complementary", { name: "Streaming devices" });
+  await expect(panel.getByText("Replay")).toBeVisible();
+  await expect(panel.getByText("Live", { exact: true })).toBeVisible();
+  await expect(panel.getByText(/updated \d+ s ago/).first()).toBeVisible();
+  expect(errors).toEqual([]);
+});
+
+test("data quality and method pages render", async ({ page }) => {
+  const errors = trackErrors(page);
+  await page.goto("/quality");
+  await expect(page.getByRole("heading", { name: "Data quality" })).toBeVisible();
+  await expect(page.getByText("Degraded").first()).toBeVisible();
+  await page.getByRole("link", { name: "Method" }).click();
+  await expect(page.getByRole("heading", { name: "How it works" })).toBeVisible();
+  await expect(page.getByText(/speed exponent β =/)).toBeVisible();
+  expect(errors).toEqual([]);
+});
+
+test("session page draws the synchronized charts", async ({ page }) => {
+  const errors = trackErrors(page);
+  await page.goto(`/sessions/${RECORDED_SESSION}`);
+  await expect(page.getByRole("img", { name: /Vertical acceleration/ })).toBeVisible();
+  await expect(page.locator(".uplot")).toHaveCount(4);
+  await expect(page.getByText("Prediction vs. passenger ratings")).toBeVisible();
+  expect(errors).toEqual([]);
 });

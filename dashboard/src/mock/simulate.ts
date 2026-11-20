@@ -1,7 +1,7 @@
 import { MS_PER_SECOND, MS_TO_KMH } from "@/constants/units";
 import type { RoadEventType, VehicleType } from "@/types/common";
 import type { DetectionMetrics, DetectionScore, SessionLabel, SicknessRating } from "@/types/sessions";
-import type { Position } from "@/utils/geo";
+import type { Position } from "@/types/common";
 
 import type { SessionSpec } from "./catalog";
 import { createRandom, hashString, type Random } from "./random";

@@ -6,6 +6,10 @@ const PORT = 4173;
 export default defineConfig({
   testDir: "./e2e",
   timeout: 60_000,
+  // The mock backend generates its dataset in the browser (~1 s); several WebGL (SwiftShader)
+  // browsers at once make that slower, so allow more time per assertion and fewer workers.
+  expect: { timeout: 15_000 },
+  workers: 2,
   fullyParallel: true,
   retries: process.env.CI ? 1 : 0,
   reporter: process.env.CI ? "github" : "list",

@@ -3,6 +3,7 @@ import uPlot, { type AlignedData, type Options } from "uplot";
 
 import { useThemeColors } from "@/hooks/use-theme-colors";
 import { cn } from "@/lib/utils";
+import { formatTime } from "@/utils/format-date-time";
 import type { ChartSeries } from "@/types/charts";
 import type { EpochMs } from "@/types/common";
 
@@ -49,7 +50,7 @@ export function TimeSeriesChart({ title, times, series, height = 180, syncKey, c
       legend: { show: true, live: true },
       scales: { x: { time: true }, y: {}, ...(hasRightAxis ? { y2: {} } : {}) },
       axes: [
-        axis,
+        { ...axis, values: (_plot, splits) => splits.map((seconds) => formatTime(seconds * 1000)), size: 40 },
         { ...axis, label: unitOf("left"), size: 56 },
         ...(hasRightAxis ? [{ ...axis, scale: "y2", side: 1 as const, label: unitOf("right"), size: 56, grid: { show: false } }] : []),
       ],

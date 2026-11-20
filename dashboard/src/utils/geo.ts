@@ -1,7 +1,6 @@
 import { EARTH_RADIUS_M } from "@/constants/units";
+import type { Position } from "@/types/common";
 
-/** `[lon, lat]` in degrees, GeoJSON order. */
-export type Position = [number, number];
 
 const toRad = (deg: number) => (deg * Math.PI) / 180;
 const toDeg = (rad: number) => (rad * 180) / Math.PI;

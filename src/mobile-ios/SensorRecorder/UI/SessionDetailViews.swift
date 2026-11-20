@@ -6,24 +6,65 @@ struct SessionSummaryView: View {
     let metadata: SessionMetadata
     let folder: URL
     var onDone: () -> Void
+    @State private var exported = false
+    @State private var confirmDone = false
 
     var body: some View {
         List {
             Section {
+                DataVerdictRow(metadata: metadata)
                 Label("Export now and keep TWO copies before doing anything else.", systemImage: "exclamationmark.shield.fill")
                     .foregroundStyle(Theme.warn)
                     .font(.subheadline.weight(.semibold))
             }
             SessionStatsSections(metadata: metadata, folder: folder)
-            ExportSection(folder: folder, sessionId: metadata.sessionId)
+            ExportSection(folder: folder, sessionId: metadata.sessionId, onExported: { exported = true })
         }
         .navigationTitle("Session summary")
         .navigationBarTitleDisplayMode(.inline)
         .toolbar {
             ToolbarItem(placement: .confirmationAction) {
-                Button("Done", action: onDone).accessibilityIdentifier("summaryDone")
+                Button("Done") {
+                    if exported { onDone() } else { confirmDone = true }
+                }
+                .accessibilityIdentifier("summaryDone")
             }
         }
+        .confirmationDialog("Not exported yet. The data stays on the phone (Sessions list, Files app), but the protocol says export immediately.",
+                            isPresented: $confirmDone, titleVisibility: .visible) {
+            Button("Close without exporting") { onDone() }
+                .accessibilityIdentifier("closeWithoutExport")
+            Button("Stay and export", role: .cancel) {}
+        }
+    }
+}
+
+/// "Did we get good data?" in one line, at the top of the summary.
+struct DataVerdictRow: View {
+    let metadata: SessionMetadata
+
+    var body: some View {
+        let streams = metadata.stats?.streams ?? [:]
+        let gaps = streams.compactMap { key, s -> String? in
+            guard let id = StreamID(rawValue: key), s.maxGapSec > id.significantGap else { return nil }
+            return id.displayName
+        }.sorted()
+        let core: [StreamID] = [.deviceMotion, .accel, .gyro, .gps]
+        let missing = core.filter { (streams[$0.rawValue]?.samples ?? 0) == 0 }.map(\.displayName)
+        let ok = gaps.isEmpty && missing.isEmpty && (metadata.stats?.writeErrors ?? 0) == 0
+        let text: String = {
+            if ok { return "All streams OK" }
+            var parts: [String] = []
+            if !missing.isEmpty { parts.append("no data: " + missing.joined(separator: ", ")) }
+            if !gaps.isEmpty { parts.append("gaps: " + gaps.joined(separator: ", ")) }
+            if let e = metadata.stats?.writeErrors, e > 0 { parts.append("\(e) write errors") }
+            return parts.joined(separator: " · ")
+        }()
+        Label(text, systemImage: ok ? "checkmark.seal.fill" : "exclamationmark.octagon.fill")
+            .font(.headline)
+            .foregroundStyle(ok ? Theme.ok : Theme.problem)
+            .accessibilityElement(children: .combine)
+            .accessibilityIdentifier("dataVerdict")
     }
 }
 
@@ -90,6 +131,7 @@ struct SessionStatsSections: View {
                     VStack(alignment: .leading, spacing: 2) {
                         HStack {
                             Text(id.displayName).font(.body.weight(.semibold))
+                            if bad { Text("GAP").font(.caption2.bold()).foregroundStyle(Theme.problem) } // not colour-only
                             Spacer()
                             Text(String(format: "%.1f Hz", s.meanRateHz)).font(.body.monospacedDigit())
                         }
@@ -103,6 +145,8 @@ struct SessionStatsSections: View {
                         .foregroundStyle(bad ? Theme.problem : .secondary)
                     }
                     .listRowBackground(bad ? Theme.problem.opacity(0.15) : nil)
+                    .accessibilityElement(children: .combine)
+                    .accessibilityValue("\(s.samples) samples")
                     .accessibilityIdentifier("stat.\(id.rawValue)")
                 }
             } header: {
@@ -112,6 +156,9 @@ struct SessionStatsSections: View {
             }
             Section("Labels") {
                 row("Labels", "\(stats.labelsCount)")
+                    .accessibilityElement(children: .combine)
+                    .accessibilityValue("\(stats.labelsCount)")
+                    .accessibilityIdentifier("stat.labelsCount")
                 row("Sickness ratings", "\(stats.sicknessRatings)")
                 row("Sickness prompts missed", "\(stats.sicknessMissed)")
             }
@@ -119,7 +166,7 @@ struct SessionStatsSections: View {
                 row("Total size", ByteFormat.string(stats.totalBytes))
                 row("Audio files", stats.audioFiles.isEmpty ? "none" : stats.audioFiles.joined(separator: ", "))
                 row("Write errors", "\(stats.writeErrors)", color: stats.writeErrors > 0 ? Theme.problem : nil)
-                row("Upload batches", "\(stats.uploadBatchesCreated)")
+                row("Upload batches queued", "\(stats.uploadBatchesCreated)")
             }
         } else {
             Section { Text("No stats (session not finished).").foregroundStyle(.secondary) }
@@ -164,6 +211,7 @@ private struct FilesSection: View {
 struct ExportSection: View {
     let folder: URL
     let sessionId: String?
+    var onExported: () -> Void = {}
     @Environment(AppModel.self) private var app
     @State private var exporting = false
     @State private var lastExport: (name: String, bytes: Int64)?
@@ -208,6 +256,15 @@ struct ExportSection: View {
                     .accessibilityIdentifier("exportResult")
             }
             if let error { Text(error).foregroundStyle(Theme.problem).font(.footnote) }
+            if AppSettings.uploadConfig.isEnabled {
+                let st = app.uploadQueue.status
+                LabeledContent("Upload status",
+                               value: "\(queued) queued (this session) · \(st.uploadedCount) sent · \(st.failedCount) failed")
+                    .font(.footnote)
+                if let e = st.lastError { LabeledContent("Last upload error", value: e).font(.footnote) }
+            } else {
+                LabeledContent("Upload status", value: "OFF – local only").font(.footnote)
+            }
         } header: {
             Text("Export")
         } footer: {
@@ -229,6 +286,7 @@ struct ExportSection: View {
                 switch result {
                 case .success(let url):
                     lastExport = (url.lastPathComponent, FileManager.default.fileSize(url))
+                    onExported()
                     SharePresenter.share(url)
                 case .failure(let e): error = "Export failed: \(e.localizedDescription)"
                 }

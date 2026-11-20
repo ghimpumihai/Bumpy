@@ -24,7 +24,8 @@ final class SessionMetadataTests: XCTestCase {
         let device = try XCTUnwrap(obj["device"] as? [String: Any])
         XCTAssertEqual(device["model"] as? String, "iPhone15,2")
         let mount = try XCTUnwrap(obj["mount"] as? [String: Any])
-        XCTAssertEqual(Set(mount.keys), ["location", "phoneOrientation", "rigid"]) // photoFile omitted when nil
+        XCTAssertEqual(Set(mount.keys), ["location", "phoneOrientation", "rigid", "handheld", "seatOverAxle", "photoFile"])
+        XCTAssertTrue(mount["photoFile"] is NSNull, "explicit null when there is no photo")
         let people = try XCTUnwrap(obj["people"] as? [String: Any])
         XCTAssertNotNil(people["operatorSeat"]); XCTAssertNotNil(people["raterSeat"]); XCTAssertNotNil(people["passengerCount"])
         let rates = try XCTUnwrap(obj["requestedRatesHz"] as? [String: Double])

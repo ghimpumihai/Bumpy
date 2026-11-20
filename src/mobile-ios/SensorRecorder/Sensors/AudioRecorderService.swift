@@ -38,6 +38,7 @@ final class AudioRecorderService: NSObject, AudioSource, AVAudioRecorderDelegate
     private let shared = Locked<(recording: Bool, level: AudioLevelSample?, bytes: Int64)>((false, nil, 0))
 
     let formatDescription = "AAC 48 kHz mono 64 kbps"
+    var recordsAudio: Bool { true }
 
     private static let settings: [String: Any] = [
         AVFormatIDKey: kAudioFormatMPEG4AAC,
@@ -111,8 +112,7 @@ final class AudioRecorderService: NSObject, AudioSource, AVAudioRecorderDelegate
     private func configureSession() -> Bool {
         let session = AVAudioSession.sharedInstance()
         do {
-            try session.setCategory(.playAndRecord, mode: .measurement, options: [.defaultToSpeaker])
-            try? session.setPreferredSampleRate(48_000)
+            try Self.configure(session)
             try session.setActive(true)
             pinBuiltInMic()
             return true
@@ -130,6 +130,17 @@ final class AudioRecorderService: NSObject, AudioSource, AVAudioRecorderDelegate
                 callbacks.log(.warn, "could not pin built-in mic: \(error.localizedDescription)")
             }
         }
+    }
+
+    /// Shared by the recorder and the level meter.
+    /// - `.mixWithOthers`: never stops the phone's music/navigation/CarPlay, and can (re)activate
+    ///   while backgrounded (a non-mixable session fails there with `cannotInterruptOthers`).
+    /// - Haptics + system sounds are muted by iOS during recording unless explicitly allowed —
+    ///   without this the sickness prompt and PROBLEM alerts would be silent and vibration-free.
+    static func configure(_ session: AVAudioSession) throws {
+        try session.setCategory(.playAndRecord, mode: .measurement, options: [.defaultToSpeaker, .mixWithOthers])
+        try? session.setPreferredSampleRate(48_000)
+        try? session.setAllowHapticsAndSystemSoundsDuringRecording(true)
     }
 
     // MARK: - Segments
@@ -202,20 +213,22 @@ final class AudioRecorderService: NSObject, AudioSource, AVAudioRecorderDelegate
     private func meterTick() {
         meterTicks += 1
         let now = ProcessInfo.processInfo.systemUptime
-        if let r = recorder, r.isRecording {
+        let isRec = recorder?.isRecording ?? false
+        let action = AudioSegmentPolicy.decide(
+            now: now, isRecording: isRec, segmentStartedUp: segmentStartedUp, wantRecording: wantRecording,
+            interrupted: interrupted, interruptedAtUp: interruptedAtUp, lastRestartAttemptUp: lastRestartAttemptUp)
+        if let r = recorder, isRec {
             r.updateMeters()
             let s = AudioLevelSample(t: now, avgDbfs: Double(r.averagePower(forChannel: 0)),
                                      peakDbfs: Double(r.peakPower(forChannel: 0)))
             shared.withLock { $0.level = s; $0.recording = true }
             callbacks.level(s)
-            if now - segmentStartedUp >= Self.segmentDuration {
+            if action == .rotate {
                 startNewSegment()
             }
         } else {
             shared.withLock { $0.recording = false }
-            // Watchdog: if we should be recording but aren't (and not mid-interruption), retry every 5 s.
-            let interruptionBlocks = interrupted && now - interruptedAtUp < Self.interruptionRetryAfter
-            if wantRecording && !interruptionBlocks && now - lastRestartAttemptUp > 5 {
+            if action == .restart {
                 interrupted = false
                 lastRestartAttemptUp = now
                 callbacks.log(.warn, "audio not recording — attempting restart")
@@ -278,8 +291,7 @@ final class AudioRecorderService: NSObject, AudioSource, AVAudioRecorderDelegate
     private func handleMediaReset() {
         guard wantRecording else { return }
         callbacks.log(.warn, "media services were reset — rebuilding audio session")
-        recorder = nil
-        currentFile = nil
+        finishCurrentSegment(event: "reset") // logs the segment end; recorder object is invalid now
         if configureSession() { startNewSegment() }
     }
 
@@ -296,5 +308,24 @@ final class AudioRecorderService: NSObject, AudioSource, AVAudioRecorderDelegate
     func audioRecorderEncodeErrorDidOccur(_ recorder: AVAudioRecorder, error: Error?) {
         let msg = error?.localizedDescription ?? "unknown"
         queue.async { self.callbacks.log(.error, "audio encode error: \(msg)") }
+    }
+}
+
+/// When to rotate the segment file or restart a stopped recorder. Pure, unit-tested.
+enum AudioSegmentPolicy {
+    enum Action: Equatable { case none, rotate, restart }
+
+    static let restartEvery: TimeInterval = 5
+
+    static func decide(now: TimeInterval, isRecording: Bool, segmentStartedUp: TimeInterval, wantRecording: Bool,
+                       interrupted: Bool, interruptedAtUp: TimeInterval, lastRestartAttemptUp: TimeInterval) -> Action {
+        if isRecording {
+            return now - segmentStartedUp >= AudioRecorderService.segmentDuration ? .rotate : .none
+        }
+        guard wantRecording else { return .none }
+        // Mid-interruption (call/Siri) wait for "ended" — but not forever: iOS doesn't guarantee it.
+        let interruptionBlocks = interrupted && now - interruptedAtUp < AudioRecorderService.interruptionRetryAfter
+        guard !interruptionBlocks, now - lastRestartAttemptUp > restartEvery else { return .none }
+        return .restart
     }
 }

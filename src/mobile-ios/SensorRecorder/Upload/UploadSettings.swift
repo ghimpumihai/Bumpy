@@ -11,7 +11,6 @@ struct UploadConfig: Equatable, Sendable {
     var isEnabled: Bool { baseURL != nil }
 
     var ingestURL: URL? { baseURL?.appendingPathComponent("api/ingest") }
-    var healthURL: URL? { baseURL?.appendingPathComponent("api/health") }
 
     static let disabled = UploadConfig(baseURL: nil, deviceKey: "")
 
@@ -22,7 +21,22 @@ struct UploadConfig: Equatable, Sendable {
         guard !s.isEmpty, let url = URL(string: s),
               let scheme = url.scheme?.lowercased(), scheme == "https" || scheme == "http",
               let host = url.host, !host.isEmpty else { return nil }
+        // Plain http would send x-device-key in cleartext: allow it only for local test servers.
+        if scheme == "http" && !isLocalHost(host) { return nil }
         return url
+    }
+
+    /// localhost, loopback, RFC 1918 private IPv4, link-local, or mDNS `.local` names.
+    static func isLocalHost(_ host: String) -> Bool {
+        let h = host.lowercased()
+        if h == "localhost" || h.hasSuffix(".local") || h == "::1" { return true }
+        let parts = h.split(separator: ".").compactMap { Int($0) }
+        guard parts.count == 4, parts.allSatisfy({ (0...255).contains($0) }) else { return false }
+        switch (parts[0], parts[1]) {
+        case (127, _), (10, _), (192, 168), (169, 254): return true
+        case (172, let b) where (16...31).contains(b): return true
+        default: return false
+        }
     }
 }
 

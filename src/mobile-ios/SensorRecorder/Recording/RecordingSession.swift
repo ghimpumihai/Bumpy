@@ -104,6 +104,9 @@ final class RecordingSession: @unchecked Sendable {
     private var timers: [DispatchSourceTimer] = []
     private var lastBatchEndUp: TimeInterval
     private let stateBox = Locked((started: false, stopped: false))
+    /// Set after the final close; later labels are refused instead of silently vanishing.
+    private let writersClosed = Locked(false)
+    private let batchesQueued = Locked(0)
     private var motionAvailability = MotionAvailability(deviceMotion: false, accel: false, gyro: false, mag: false)
 
     static let anchorInterval: TimeInterval = 10
@@ -125,8 +128,15 @@ final class RecordingSession: @unchecked Sendable {
         startUp = anchor.up
         lastBatchEndUp = anchor.up
         startDate = Date(timeIntervalSince1970: anchor.utcMs / 1000)
-        folder = try store.makeSessionFolder(start: startDate, id: id)
-        writer = try SessionWriter(folder: folder, uptime: { deps.clock.uptime() })
+        let folder = try store.makeSessionFolder(start: startDate, id: id)
+        self.folder = folder
+        do {
+            writer = try SessionWriter(folder: folder, uptime: { deps.clock.uptime() })
+        } catch {
+            // Never leave a half-created folder behind (it would show as "unreadable" forever).
+            try? FileManager.default.removeItem(at: folder)
+            throw error
+        }
         isSynthetic = deps.motion.isSynthetic
         var m: [StreamID: StreamMonitor] = [:]
         for s in StreamID.allCases { m[s] = StreamMonitor(id: s) }
@@ -149,11 +159,18 @@ final class RecordingSession: @unchecked Sendable {
             sessionId: id.uuidString, appVersion: deps.appVersion, device: deps.deviceInfo,
             timezone: deps.timezone, startedAtUtc: ISO8601.string(startDate), startUptimeSec: anchor.up,
             endedAtUtc: nil, vehicle: setup.vehicle, mount: mount, people: setup.people,
-            conditions: setup.conditions, requestedRatesHz: SessionMetadata.requestedRates,
+            conditions: setup.conditions, audioEnabled: deps.audio?.recordsAudio ?? false,
+            requestedRatesHz: SessionMetadata.requestedRates,
             recovered: false, recoveredAtUtc: nil, syntheticSensors: deps.motion.isSynthetic,
             folderName: folder.lastPathComponent, deviceId: deps.deviceId, preflight: preflight, stats: nil)
         metadataBox = Locked(meta)
-        try meta.write(to: folder.appendingPathComponent(SessionFileName.metadata))
+        do {
+            try meta.write(to: folder.appendingPathComponent(SessionFileName.metadata))
+        } catch {
+            writer.close()
+            try? FileManager.default.removeItem(at: folder)
+            throw error
+        }
         writeClockRow(anchor, source: "start")
         writer.log(.info, "session \(id.uuidString) created: \(folder.lastPathComponent), app \(deps.appVersion), synthetic=\(deps.motion.isSynthetic)")
         writer.onWriteError = { [weak self] msg in
@@ -220,6 +237,7 @@ final class RecordingSession: @unchecked Sendable {
             writer.log(.error, "writing final session.json failed: \(error.localizedDescription)")
         }
         writer.close()
+        writersClosed.withLock { $0 = true }
         return meta
     }
 
@@ -438,10 +456,13 @@ final class RecordingSession: @unchecked Sendable {
         let end = timeBase.uptimeNow()
         let start = lastBatchEndUp
         lastBatchEndUp = end
+        // Always drain (keeps memory bounded); queue to disk only when upload is ON. With upload OFF
+        // nothing is written to upload_queue/ (the session files are the dataset; spec §6).
         let batch = accumulator.drain(t0Up: start, t0UtcMs: timeBase.utcMs(fromUptime: start), device: latestBox.current.device)
-        guard let q = deps.uploadQueue else { return }
+        guard let q = deps.uploadQueue, q.isEnabled else { return }
         do {
             try q.enqueue(batch: batch, createdUtcMs: Int64(timeBase.utcMs(fromUptime: end)))
+            batchesQueued.withLock { $0 += 1 }
         } catch {
             writer.log(.warn, "could not queue upload batch \(batch.batchSeq): \(error.localizedDescription)")
         }
@@ -449,10 +470,24 @@ final class RecordingSession: @unchecked Sendable {
 
     // MARK: - Labels
 
+    /// One line per label: newlines in free text would break line-based readers and crash repair.
+    static func sanitize(_ s: String?) -> String? {
+        guard let s else { return nil }
+        let flat = s.replacingOccurrences(of: "\r\n", with: " ")
+            .replacingOccurrences(of: "\n", with: " ").replacingOccurrences(of: "\r", with: " ")
+        let trimmed = flat.trimmingCharacters(in: .whitespaces)
+        return trimmed.isEmpty ? nil : trimmed
+    }
+
     @discardableResult
-    func addLabel(_ type: LabelType, value: String? = nil, note: String? = nil) -> LoggedLabel {
+    func addLabel(_ type: LabelType, value rawValue: String? = nil, note rawNote: String? = nil) -> LoggedLabel {
+        let value = Self.sanitize(rawValue), note = Self.sanitize(rawNote)
         let t = timeBase.uptimeNow()
         let label = LoggedLabel(type: type, value: value, note: note, tUp: t, date: timeBase.date(fromUptime: t))
+        guard !writersClosed.current else {
+            appLogger.error("label \(type.rawValue, privacy: .public) after session close was not recorded")
+            return label
+        }
         writer.append(.labels, CSV.row([CSV.f6(t), CSV.ms(timeBase.utcMs(fromUptime: t)), type.rawValue,
                                         CSV.escape(value), CSV.escape(note)]))
         accumulator.addLabel(t: t, type: type.rawValue, value: value, note: note)
@@ -522,7 +557,10 @@ final class RecordingSession: @unchecked Sendable {
         let l = latestBox.current
         i.gpsLastFixUp = l.gpsFixUp
         i.gpsHorizontalAccuracy = l.gps?.hAcc
-        if let audio = deps.audio {
+        // "Audio recorder not recording" is a PROBLEM only when this session records audio;
+        // with recording OFF (public transport) only the optional level meter runs.
+        i.audioMeterExpected = deps.audio != nil
+        if let audio = deps.audio, audio.recordsAudio {
             i.audioExpected = true
             i.audioRecording = audio.isRecording
         } else {
@@ -554,6 +592,7 @@ final class RecordingSession: @unchecked Sendable {
     var audioFormat: String { deps.audio?.formatDescription ?? "" }
     var audioLevel: AudioLevelSample? { deps.audio?.latestLevel }
     var audioRecording: Bool { deps.audio?.isRecording ?? false }
+    var recordsAudio: Bool { deps.audio?.recordsAudio ?? false }
     var uploadStatus: UploadStatus? { deps.uploadQueue?.status }
     var deviceStatus: DeviceStatus { deps.deviceStatus.currentStatus() }
 
@@ -585,6 +624,6 @@ final class RecordingSession: @unchecked Sendable {
         return .init(durationSec: endUp - startUp, streams: streams, labelsCount: l.count,
                      sicknessRatings: l.sicknessRatings, sicknessMissed: l.sicknessMissed,
                      audioFiles: audioFiles.sorted(), fileSizes: sizes, totalBytes: total,
-                     writeErrors: writer.writeErrors.count, uploadBatchesCreated: accumulator.batchesCreated)
+                     writeErrors: writer.writeErrors.count, uploadBatchesCreated: batchesQueued.current)
     }
 }

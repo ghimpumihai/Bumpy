@@ -1,4 +1,5 @@
 import SwiftUI
+import UIKit
 
 /// Screen 3: preflight checklist. Start is blocked until required checks pass (override possible).
 struct PreflightView: View {
@@ -30,6 +31,8 @@ struct PreflightView: View {
             Section {
                 ForEach(model.checks) { check in
                     CheckRow(check: check)
+                        .accessibilityElement(children: .combine) // one element: title + detail + status
+                        .accessibilityValue(check.status.rawValue)
                         .accessibilityIdentifier("check.\(check.id)")
                 }
             } footer: {
@@ -43,12 +46,20 @@ struct PreflightView: View {
                 }
             }
             Section {
+                if model.needsSettings {
+                    Button {
+                        if let url = URL(string: UIApplication.openSettingsURLString) { UIApplication.shared.open(url) }
+                    } label: {
+                        Label("Open Settings to grant permissions", systemImage: "gear")
+                    }
+                    .accessibilityIdentifier("openSettings")
+                }
                 Button {
-                    Task { await model.runMotionTest() }
+                    model.rerunMotionTest()
                 } label: {
                     Label("Re-run motion test", systemImage: "waveform.path.ecg")
                 }
-                .disabled(model.motionTestRunning)
+                .disabled(model.busy)
                 Button {
                     model.rerun()
                 } label: {
@@ -68,6 +79,7 @@ struct PreflightView: View {
                     }
                     .buttonStyle(.borderedProminent)
                     .tint(Theme.ok)
+                    .foregroundStyle(Theme.onBright) // contrast on green
                     .disabled(model.busy)
                     .accessibilityIdentifier("startRecording")
                 } else {

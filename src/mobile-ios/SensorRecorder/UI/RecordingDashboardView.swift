@@ -7,6 +7,8 @@ struct RecordingDashboardView: View {
     let controller: RecordingController
     @State private var showNote = false
     @State private var showIssues = false
+    /// Kept here (not in the sheet) so a sickness prompt closing the sheet doesn't lose the text.
+    @State private var noteDraft = ""
 
     var body: some View {
         VStack(spacing: 0) {
@@ -22,13 +24,18 @@ struct RecordingDashboardView: View {
                 .padding(.horizontal, 10)
                 .padding(.vertical, 8)
             }
+            // The prompt covers only the middle area: label buttons and hold-to-stop stay usable.
+            .overlay { SicknessOverlay(controller: controller) }
             LabelPanel(controller: controller, showNote: $showNote)
         }
         .background(Theme.background.ignoresSafeArea())
         .overlay(alignment: .top) { ToastView(controller: controller) }
-        .overlay { SicknessOverlay(controller: controller) }
-        .sheet(isPresented: $showNote) { NoteSheet(controller: controller) }
+        .sheet(isPresented: $showNote) { NoteSheet(controller: controller, text: $noteDraft) }
         .sheet(isPresented: $showIssues) { IssuesSheet(controller: controller) }
+        .onChange(of: controller.sicknessPromptActive) { _, active in
+            // Sheets are drawn above the dashboard: close them so the rater sees the prompt.
+            if active { showNote = false; showIssues = false }
+        }
         .persistentSystemOverlays(.hidden)
     }
 }
@@ -72,12 +79,12 @@ private struct HealthBanner: View {
                     .font(.system(size: 24, weight: .heavy))
                 if let first = issues.first {
                     Text(first.message + (issues.count > 1 ? "  (+\(issues.count - 1) more)" : ""))
-                        .font(.system(size: 15, weight: .semibold))
+                        .font(.system(size: 15, weight: .bold))
                         .lineLimit(2)
                         .multilineTextAlignment(.center)
                 }
             }
-            .foregroundStyle(level == .warn ? Theme.onBright : Theme.onSurface)
+            .foregroundStyle(level == .problem ? Theme.onSurface : Theme.onBright)
             .frame(maxWidth: .infinity, minHeight: 58)
             .padding(.horizontal, 8)
             .background(Theme.color(level))
@@ -144,6 +151,7 @@ private struct StreamTable: View {
                 }
                 .padding(.vertical, 3)
                 .accessibilityElement(children: .combine)
+                .accessibilityValue(Self.statusText(row.dot))
                 .accessibilityIdentifier("row.\(row.id)")
                 Divider().overlay(Theme.hairline)
             }
@@ -156,6 +164,13 @@ private struct StreamTable: View {
         }
         .padding(10)
         .background(Theme.panel, in: RoundedRectangle(cornerRadius: 10))
+    }
+
+    static func statusText(_ d: StreamRowModel.Dot) -> String {
+        switch d {
+        case .neutral: return "not applicable"
+        case .level(let l): return l.label
+        }
     }
 
     @ViewBuilder private func dot(_ d: StreamRowModel.Dot) -> some View {
@@ -173,9 +188,9 @@ private struct LivePlots: View {
 
     var body: some View {
         let s = controller.snapshot
-        VStack(spacing: 8) {
-            PlotView(title: "Vertical accel · last 10 s (road band)", values: s.vertical, color: Theme.accent, minRange: 0.05, unit: "g")
-            PlotView(title: "Lateral accel · low-pass · last 60 s (sway)", values: s.lateral, color: Theme.warn, minRange: 0.02, unit: "g")
+        HStack(spacing: 8) {
+            PlotView(title: "Vertical · 10 s", values: s.vertical, color: Theme.accent, minRange: 0.05, unit: "g")
+            PlotView(title: "Lateral sway · 60 s", values: s.lateral, color: Theme.warn, minRange: 0.02, unit: "g")
         }
     }
 }
@@ -243,8 +258,26 @@ private struct TrackMapSection: View {
 struct TrackMapView: View, Equatable {
     let points: [TrackBuffer.Point]
     @State private var position: MapCameraPosition = .automatic
+    @State private var lastFollow = Date.distantPast
 
     static func == (a: TrackMapView, b: TrackMapView) -> Bool { a.points == b.points }
+
+    /// Polyline vertices drawn at most (older track is thinned; the recorded data is untouched).
+    static let maxDrawnPoints = 1500
+
+    /// Keeps every point of the newest stretch and thins the rest evenly, always keeping the last point.
+    static func decimate(_ pts: [TrackBuffer.Point], max n: Int = maxDrawnPoints) -> [TrackBuffer.Point] {
+        guard pts.count > n, n >= 2 else { return pts }
+        let recent = n / 2
+        let old = pts.dropLast(recent)
+        let step = Double(old.count) / Double(n - recent)
+        var out: [TrackBuffer.Point] = []
+        out.reserveCapacity(n)
+        var i = 0.0
+        while Int(i) < old.count { out.append(old[old.startIndex + Int(i)]); i += step }
+        out.append(contentsOf: pts.suffix(recent))
+        return out
+    }
 
     struct Segment: Identifiable {
         let id: Int
@@ -283,15 +316,17 @@ struct TrackMapView: View, Equatable {
         return out
     }
 
+    /// Re-centre at most every 10 s (each camera move loads tiles over cellular).
     private func follow() {
-        guard let p = points.last else { return }
+        guard let p = points.last, Date().timeIntervalSince(lastFollow) >= 10 else { return }
+        lastFollow = Date()
         position = .camera(MapCamera(centerCoordinate: CLLocationCoordinate2D(latitude: p.lat, longitude: p.lon),
                                      distance: 1800))
     }
 
     var body: some View {
         Map(position: $position, interactionModes: [.pan, .zoom]) {
-            ForEach(Self.segments(points)) { seg in
+            ForEach(Self.segments(Self.decimate(points))) { seg in
                 MapPolyline(coordinates: seg.coords).stroke(seg.color, lineWidth: 4)
             }
             if let p = points.last {
@@ -354,7 +389,7 @@ private struct LabelPanel: View {
                 BigButton(title: "POTHOLE", color: Theme.labelPothole, id: "label.pothole") {
                     controller.label(.pothole, toastText: "Pothole logged")
                 }
-                BigButton(title: "SPEED BUMP", color: Theme.labelSpeedBump, id: "label.speedBump") {
+                BigButton(title: "SPEED BUMP", color: Theme.labelSpeedBump, textColor: Theme.onBright, id: "label.speedBump") {
                     controller.label(.speedBump, toastText: "Speed bump logged")
                 }
                 BigButton(title: "PHONE MOVED", color: Theme.labelPhoneMoved, id: "label.phoneMoved") {
@@ -392,6 +427,7 @@ private struct LabelPanel: View {
 private struct BigButton: View {
     let title: String
     let color: Color
+    var textColor: Color = Theme.onSurface
     let id: String
     let action: () -> Void
 
@@ -402,7 +438,7 @@ private struct BigButton: View {
                 .minimumScaleFactor(0.7)
                 .lineLimit(1)
                 .frame(maxWidth: .infinity, minHeight: 60)
-                .foregroundStyle(Theme.onSurface)
+                .foregroundStyle(textColor)
                 .background(color, in: RoundedRectangle(cornerRadius: 10))
         }
         .buttonStyle(PressableStyle())
@@ -437,7 +473,8 @@ private struct ToggleRow<Content: View>: View {
     var body: some View {
         HStack(spacing: 4) {
             Text(title).font(.system(size: 10, weight: .bold)).foregroundStyle(.secondary)
-                .frame(width: 30).rotationEffect(.degrees(-90)).fixedSize().frame(width: 14)
+                .fixedSize().rotationEffect(.degrees(-90)).frame(width: 14, height: 44)
+                .accessibilityHidden(true)
             content
         }
     }
@@ -455,7 +492,7 @@ private struct ToggleChip: View {
                 .font(.system(size: 12, weight: .bold))
                 .lineLimit(1)
                 .minimumScaleFactor(0.6)
-                .frame(maxWidth: .infinity, minHeight: 40)
+                .frame(maxWidth: .infinity, minHeight: 44)
                 .foregroundStyle(active ? Theme.onBright : Theme.onSurface)
                 .background(active ? Theme.ok : Theme.panelHigh, in: RoundedRectangle(cornerRadius: 8))
                 .overlay(RoundedRectangle(cornerRadius: 8).stroke(active ? Theme.onSurface : .clear, lineWidth: 2))
@@ -537,7 +574,8 @@ private struct SicknessOverlay: View {
     var body: some View {
         if controller.sicknessPromptActive || controller.sicknessManualOpen {
             ZStack {
-                Theme.scrim.ignoresSafeArea()
+                Theme.scrim
+                ScrollView {
                 VStack(spacing: 10) {
                     Text("How do you feel?").font(.title.bold())
                     Text("MISC rating · rater: glance only").font(.subheadline).foregroundStyle(.secondary)
@@ -566,13 +604,19 @@ private struct SicknessOverlay: View {
                         }
                     }
                     Text(MISC.symptomsNote).font(.caption).foregroundStyle(.secondary).multilineTextAlignment(.center)
-                    if controller.sicknessManualOpen && !controller.sicknessPromptActive {
+                    if controller.sicknessPromptActive {
+                        // Never force a fake rating: skipping is logged as a missed prompt.
+                        Button("Skip (no rating)") { controller.skipSicknessPrompt() }
+                            .font(.headline).padding(.top, 4)
+                            .accessibilityIdentifier("sicknessSkip")
+                    } else {
                         Button("Cancel") { controller.closeManualSickness() }
                             .font(.headline).padding(.top, 4)
                             .accessibilityIdentifier("sicknessCancel")
                     }
                 }
                 .padding()
+                }
             }
         }
     }
@@ -580,8 +624,8 @@ private struct SicknessOverlay: View {
 
 private struct NoteSheet: View {
     let controller: RecordingController
+    @Binding var text: String
     @Environment(\.dismiss) private var dismiss
-    @State private var text = ""
     @FocusState private var focused: Bool
 
     var body: some View {
@@ -600,6 +644,7 @@ private struct NoteSheet: View {
                     Button("Save") {
                         let t = text.trimmingCharacters(in: .whitespacesAndNewlines)
                         if !t.isEmpty { controller.label(.note, note: t, toastText: "Note logged") }
+                        text = ""
                         dismiss()
                     }
                     .accessibilityIdentifier("noteSave")

@@ -20,8 +20,10 @@ enum Theme {
     static let speedBuckets: [Color] = [accent, ok, Color(red: 1.0, green: 0.88, blue: 0.10), labelSpeedBump, problem]
 
     // Foregrounds on coloured surfaces, overlays
-    static let onBright = Color.black        // text on bright surfaces (amber banner, green chips, MISC grid)
-    static let onSurface = Color.white       // text on ok/problem/panel surfaces
+    /// Text on bright surfaces: ok/warn/accent/speed-bump/MISC (white there fails WCAG contrast).
+    static let onBright = Color.black
+    /// Text on dark surfaces and on `problem`/`labelPhoneMoved` (bold/large text only).
+    static let onSurface = Color.white
     static let toastBackground = Color.white
     static let toastForeground = Color.black
     static let scrim = Color.black.opacity(0.92)

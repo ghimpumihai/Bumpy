@@ -16,15 +16,18 @@ real-time data capture.
 This is the iPhone data-collection app of the Codelap Hackathon 2026 project (Porsche Engineering,
 "Data-Driven Infrastructure Engineering"). It records every useful sensor of an iPhone 14 Pro at
 the highest practical rate, **writes everything to local files first**, optionally uploads gzipped
-batches to Azure, and shows a live health dashboard. The single source of requirements is
-[`/mobile_app.md`](../../mobile_app.md); user-facing docs are in [`README.md`](README.md).
+batches to the AWS backend, and shows a live health dashboard. The single source of requirements is
+[`decisions/01-initial-plan.md`](../../decisions/01-initial-plan.md) (backend plan:
+[`02-infrastructure-plan.md`](../../decisions/02-infrastructure-plan.md)); user-facing docs are in
+[`README.md`](README.md).
 
 There is **ONE real test drive**. Every decision favours: over-collect, local-first, visible health,
 hard to break. Losing data is the worst possible bug; a red banner is better than silent failure.
 
-The backend does not exist yet. Its contract is `POST {API}/api/ingest` (gzip JSON, spec §6) and
-`GET {API}/api/health`. `tools/mock_ingest_server.py` stands in for it locally. Do **not** start
-backend, processing or web-dashboard code — there is no plan for those yet.
+The backend (AWS API Gateway + ingest Lambda, see 02) is built by teammates. The app's contract is
+`POST {API}/api/ingest` (gzip JSON, spec §6); there is no health route, so connectivity is tested
+with a probe POST. `tools/mock_ingest_server.py` stands in for it locally. Do **not** write
+backend, processing or web-dashboard code in this folder.
 
 ## Tech Stack
 
@@ -145,7 +148,7 @@ imports SwiftUI or UIKit** and never touches hardware frameworks.
 4. Wire it in `RecordingSession` (write row + `StreamMonitor.record`) and in
    `AppModel.makeDependencies()`.
 5. Add health rules (if any) to `HealthEvaluator` with a test per rule, and a dashboard row.
-6. Update `mobile_app.md`/`README.md` (file table), `tools/quick_check.py` (expected header),
+6. Update `decisions/01-initial-plan.md`/`README.md` (file table), `tools/quick_check.py` (expected header),
    and the header-pinning test.
 
 ---
@@ -174,7 +177,10 @@ imports SwiftUI or UIKit** and never touches hardware frameworks.
   sizes/durations through `ByteFormat`/`DurationFormat`. No ad-hoc `String(format:)` for file output.
 - Never rename or reorder existing columns; only append new ones at the end. Any schema change
   updates spec/README, `quick_check.py` and the tests in the same change.
-- Raw audio is never uploaded.
+- Raw audio is never uploaded. With `audioEnabled == false` (default on bus/tram, GDPR) no audio
+  is written at all — only the level meter runs.
+- `session.json` must stay decodable across app versions: new keys are decoded with
+  `decodeIfPresent` + defaults, and a test decodes an old-format file.
 
 ## Upload Layer (analogue of the data-fetching layer)
 

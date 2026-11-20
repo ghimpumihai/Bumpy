@@ -44,6 +44,8 @@ struct HealthInputs: Sendable {
     var gpsHorizontalAccuracy: Double?
     var audioExpected = true
     var audioRecording = true
+    /// An audio source (recorder or level meter) is part of this session.
+    var audioMeterExpected = false
     /// Uptime of the most recent disk write/flush failure.
     var lastWriteErrorUp: TimeInterval?
     var lastWriteError: String?
@@ -130,7 +132,16 @@ enum HealthEvaluator {
 
         // Audio
         if i.audioExpected && !i.audioRecording {
-            out.append(.init(level: .problem, key: "audio.off", message: "Audio recorder not recording"))
+            out.append(.init(level: .problem, key: "audio.off", message: "Audio recorder not recording (auto-retry every 5 s; end any call/Siri)"))
+        }
+
+        // Audio level meter: in audio-OFF mode (public transport) this is the only audio signal,
+        // so silence of the meter itself must not go unnoticed.
+        if i.audioMeterExpected, !(i.audioExpected && !i.audioRecording) {
+            let age = i.streams[.audioLevel]?.age ?? (elapsed > 3 ? elapsed : 0)
+            if age > 2 {
+                out.append(.init(level: .problem, key: "audio.meter", message: "Audio level meter: no data for \(Int(age)) s"))
+            }
         }
 
         // Disk writes

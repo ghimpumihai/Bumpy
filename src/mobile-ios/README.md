@@ -2,8 +2,9 @@
 
 Native Swift/SwiftUI app (iOS 17+, built for an iPhone 14 Pro) that records every useful
 sensor at the highest practical rate. It writes everything to local CSV files first, optionally
-uploads gzipped batches to Azure, and shows a live health dashboard. The full requirements are
-in [`/mobile_app.md`](../../mobile_app.md). No third-party dependencies.
+uploads gzipped batches to the AWS backend, and shows a live health dashboard. The requirements
+are in [`decisions/01-initial-plan.md`](../../decisions/01-initial-plan.md) (backend:
+[`02-infrastructure-plan.md`](../../decisions/02-infrastructure-plan.md)). No third-party dependencies.
 
 ## Run it on the iPhone
 
@@ -13,13 +14,18 @@ in [`/mobile_app.md`](../../mobile_app.md). No third-party dependencies.
 3. On the iPhone: **Settings → Privacy & Security → Developer Mode → On** (reboot), plug it in
    and press Run. The first time, trust the developer certificate under
    *Settings → General → VPN & Device Management*.
-4. Free provisioning expires after 7 days: just run it from Xcode again.
+4. Free provisioning expires after 7 days: just run it from Xcode again. Plan the drive inside that window.
+5. **For the drive itself:** ⌘R builds an optimized **Release** build. After it launches, press
+   Stop in Xcode, unplug, and start the app **from the home screen**. A debugger-attached app can be
+   killed when the cable or wireless-debug link drops.
 
 On first use the preflight asks for Motion & Fitness, Location (choose **Precise**) and Microphone.
+Turn the ring/silent switch **off silent**, so the sickness-prompt sound is audible (haptics work either way).
 
 ## Using it (operator)
 
-Sessions → **New session** → setup (pre-filled with your last values, plus a mount photo) →
+Sessions → **New session** → setup (pre-filled with your last values, plus a mount photo; for
+**bus/tram** also the line number, seat, rater posture, and **audio recording defaults to OFF**) →
 **Preflight** (must be all green; *Override* exists for emergencies and is recorded) →
 **Recording dashboard** → hold **Stop** for 2 s → **Summary** (red rows = gaps > 1 s) →
 **Export**. The full drive protocol is in the app (the **?** button) and in spec §9.
@@ -64,17 +70,34 @@ Label `type` values: `pothole`, `speed_bump`, `phone_moved`, `surface_start/surf
   drive's audio. Segments overlap at rotation (no gap), and each start time is logged, so
   segment *n* starts at the *n*-th `audio_start` row in `clock.csv`. After an interruption
   (phone call, Siri) a *new* segment starts, so every file maps linearly onto `t_up`.
-- **Audio session `.playAndRecord` + mode `.measurement`** (spec: `.record`). Measurement mode
-  still disables AGC/voice processing; playAndRecord is needed so prompt/alert sounds can play.
-  Input is pinned to the built-in mic so the car's Bluetooth hands-free can't take over.
+- **Audio session `.playAndRecord` + mode `.measurement` + `.mixWithOthers`** (spec: `.record`).
+  - Measurement mode still disables AGC and voice processing.
+  - playAndRecord plus `allowHapticsAndSystemSoundsDuringRecording` is needed so the prompt and
+    alert sounds and haptics work while recording (iOS mutes them otherwise).
+  - Mixable means the session never stops navigation or music, and can restart while backgrounded.
+  - Input is pinned to the built-in mic, so the car's Bluetooth hands-free can't take over.
+- **Audio OFF mode (bus/tram, GDPR, spec §3.5).** When `audioEnabled` is false, no audio is ever
+  written. `audio_level.csv` (S1) still comes from a live level meter (`AVAudioEngine` tap, numbers
+  only). A stalled meter is a PROBLEM on the dashboard.
 - **Extra files/columns:** `audio_segments.csv`, `abs_altitude.csv` (B2), `activity.csv … start_utc_ms`.
-- **Upload batches are always queued** to `Documents/upload_queue/`, even with upload off,
-  so a session can be uploaded later ("Upload full session") once the backend exists.
+- **One poison batch can't block the queue:** after 5 server errors (5xx/408/429) for the same
+  batch, it moves to the back of the queue. Network errors don't count, and nothing is deleted.
+  Upload batches are queued only while an API URL is set; the session folder is the dataset
+  (02 §2: "session files are the main path").
 - **401/403 are retried with backoff** instead of moved to `upload_failed/`; otherwise a mistyped
   key would dump the whole queue. 408/429/5xx/network errors are retried; other 4xx go to
   `upload_failed/` (Settings → *Move failed batches back to queue*).
-- **The preflight upload test is `GET {API}/api/health`**, so test data never pollutes the
-  ingest table. Backend: please implement it (200 when the `x-device-key` is valid).
+- **The upload test is a probe POST**, because the AWS plan has no `/api/health` route.
+  - The app sends `{"probe":true}` (gzipped, with the device key and `x-probe: 1`) to `/api/ingest`.
+  - The ingest Lambda checks the key first, then the schema. 400/422 therefore means
+    "reachable and key accepted", and the probe is rejected, never stored. 401/403 means the key
+    was rejected; 404 means a wrong URL.
+  - Plain `http://` is accepted only for local test servers, so the device key is never sent in cleartext.
+- **`clock.csv` rows are written from several queues** (periodic, lifecycle, `audio_start`), so
+  sort by `t_up` before use. `audio_start` rows are derived from the current anchor; they are not
+  separate clock reads.
+- **GPS/heading callbacks run on the main thread** (CLLocationManager delivers to the run loop that
+  created it). At ~1 Hz with a cheap append, this is negligible.
 
 ## Upload contract (spec §6)
 
@@ -141,7 +164,12 @@ xcodebuild -project SensorRecorder.xcodeproj -scheme SensorRecorder \
 ### Tools (`tools/`)
 
 - `quick_check.py <session_folder>`: dry-run verifier (spec §10). Stdlib only.
-- `mock_ingest_server.py`: local stand-in for the Azure ingest API, which validates every batch.
+- `mock_ingest_server.py`: local stand-in for the AWS ingest Lambda (same check order, strict schema,
+  200 for duplicates by default). Point the app's Settings at `http://<mac-ip>:8765`; the phone asks
+  for Local Network permission the first time.
+- `test_tools.py`: tests for both tools, including a cross-language contract test. A batch written by
+  the app's real encoder (`tools/fixtures/ingest_batch_v1.json.gz`, regenerated by the unit tests) must
+  be accepted by the mock backend.
   Point the app's Settings at `http://<mac-ip>:8080`.
 
 **Before the real drive, do the mandatory dry run (spec §10).** Record 5–10 min on the real

@@ -1,0 +1,57 @@
+name: ingest-ci
+
+on:
+  pull_request:
+    paths:
+      - "services/ingest/**"
+      - "src/mobile-ios/tools/mock_ingest_server.py"
+      - "src/mobile-ios/tools/fixtures/**"
+      - ".github/workflows/ingest-ci.yml"
+  push:
+    branches: [main]
+    paths:
+      - "services/ingest/**"
+      - "src/mobile-ios/tools/mock_ingest_server.py"
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: services/ingest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12" # same as the function app
+          cache: pip
+          cache-dependency-path: services/ingest/requirements.txt
+
+      - name: Install
+        run: pip install -r requirements.txt pytest
+
+      - name: Tests (contract parity with the mock server, handler, device keys)
+        run: pytest -q tests
+
+      - name: Function app loads and registers both routes
+        env:
+          EVENTHUB_FULLY_QUALIFIED_NAMESPACE: ci.servicebus.windows.net
+          EVENTHUB_NAME: ingest
+          STORAGE_BLOB_ENDPOINT: https://ci.blob.core.windows.net/
+          KEY_VAULT_URI: https://ci.vault.azure.net/
+        run: |
+          python - <<'EOF'
+          import function_app
+          routes = sorted(
+              b.route
+              for fn in function_app.app.get_functions()
+              for b in fn.get_bindings()
+              if getattr(b, "route", None)
+          )
+          print(routes)
+          assert routes == ["ingest", "ingest/sessions/{sessionId}"], routes
+          EOF

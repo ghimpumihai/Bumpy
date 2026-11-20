@@ -1,0 +1,6 @@
+# Installed by the remote build on deploy (Python 3.12, Flex Consumption).
+azure-functions>=1.21,<2
+azure-identity>=1.19,<2
+azure-eventhub>=5.12,<6
+azure-storage-blob>=12.23,<13
+azure-keyvault-secrets>=4.9,<5

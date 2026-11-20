@@ -1,0 +1,13 @@
+{
+  "IsEncrypted": false,
+  "Values": {
+    "FUNCTIONS_WORKER_RUNTIME": "python",
+    "AzureWebJobsStorage": "UseDevelopmentStorage=true",
+    "EVENTHUB_FULLY_QUALIFIED_NAMESPACE": "<from: .\\tf.ps1 output eventhub_namespace_fqdn>",
+    "EVENTHUB_NAME": "ingest",
+    "STORAGE_BLOB_ENDPOINT": "https://<storage_account_name>.blob.core.windows.net/",
+    "LAKE_CONTAINER": "lake",
+    "KEY_VAULT_URI": "https://<key_vault_name>.vault.azure.net/",
+    "DEVICE_KEYS_SECRET_NAME": "device-key-hashes"
+  }
+}

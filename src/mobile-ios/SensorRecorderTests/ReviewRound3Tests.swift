@@ -467,3 +467,42 @@ final class FullDatasetBatchTests: XCTestCase {
         }
     }
 }
+
+// MARK: - Alert policy (pure, exact)
+
+final class IssueTrackerTests: XCTestCase {
+    private func issue(_ key: String, _ level: HealthLevel) -> HealthIssue { .init(level: level, key: key, message: key) }
+
+    func testAlertsOnNewProblemOnceAndAgainAfterItResolved() {
+        var t = IssueTracker()
+        XCTAssertFalse(t.update([]).alert)
+        let first = t.update([issue("lowpower", .problem)])
+        XCTAssertTrue(first.alert)
+        XCTAssertEqual(first.appeared.map(\.key), ["lowpower"])
+        for _ in 0..<5 { XCTAssertEqual(t.update([issue("lowpower", .problem)]), .init(), "persisting: no re-alert, no log") }
+        let gone = t.update([])
+        XCTAssertEqual(gone.resolved, ["lowpower"])
+        XCTAssertFalse(gone.alert)
+        XCTAssertTrue(t.update([issue("lowpower", .problem)]).alert, "comes back: alerts again")
+    }
+
+    func testWarnDoesNotAlertButEscalationToProblemDoes() {
+        var t = IssueTracker()
+        let warn = t.update([issue("rate.gyro", .warn)])
+        XCTAssertFalse(warn.alert)
+        XCTAssertEqual(warn.appeared.count, 1, "a new WARN is logged")
+        let esc = t.update([issue("rate.gyro", .problem)])
+        XCTAssertTrue(esc.alert, "WARN → PROBLEM alerts")
+        let deesc = t.update([issue("rate.gyro", .warn)])
+        XCTAssertFalse(deesc.alert)
+        XCTAssertEqual(deesc.appeared.map(\.level), [.warn], "de-escalation is logged, not alerted")
+    }
+
+    func testAnUnrelatedProblemAlertsIndependently() {
+        var t = IssueTracker()
+        _ = t.update([issue("lowpower", .problem)])
+        let both = t.update([issue("lowpower", .problem), issue("stale.deviceMotion", .problem)])
+        XCTAssertTrue(both.alert)
+        XCTAssertEqual(both.appeared.map(\.key), ["stale.deviceMotion"])
+    }
+}

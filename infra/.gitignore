@@ -1,0 +1,7 @@
+.env
+**/.terraform/
+*.tfstate
+*.tfstate.*
+*.tfplan
+crash.log
+# Provider lock files are committed so CI and laptops use the same provider builds.

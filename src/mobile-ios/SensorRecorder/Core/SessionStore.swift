@@ -24,6 +24,15 @@ struct SessionStore: Sendable {
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
     }
 
+    /// Permanently deletes a session folder (operator action, GDPR retention). Only folders directly
+    /// inside `root` can be deleted.
+    func deleteSession(_ folder: URL) throws {
+        guard folder.standardizedFileURL.deletingLastPathComponent().path == root.standardizedFileURL.path else {
+            throw CocoaError(.fileWriteNoPermission, userInfo: [NSFilePathErrorKey: folder.path])
+        }
+        try FileManager.default.removeItem(at: folder)
+    }
+
     func makeSessionFolder(start: Date, id: UUID) throws -> URL {
         try ensureRoot()
         let url = root.appendingPathComponent(Self.folderName(start: start, id: id), isDirectory: true)
@@ -96,11 +105,18 @@ struct SessionStore: Sendable {
             let repairs = CSVRepair.repairTornLines(in: e.folder)
             meta.recovered = true
             meta.recoveredAtUtc = ISO8601.string(now)
-            let analysis = SessionAnalyzer.analyze(folder: e.folder)
-            meta.stats = analysis.asStats()
+            let incompleteAudio = SessionAnalyzer.unplayableAudioFiles(in: e.folder)
+            appendRecoveryNote(folder: e.folder, repairs: repairs, now: now, incompleteAudio: incompleteAudio)
+            let analysis = SessionAnalyzer.analyze(folder: e.folder) // after the note: sizes include it
+            var stats = analysis.asStats()
+            // Duration from the real session start (not from a stream's first row).
+            if meta.startUptimeSec > 0, let last = analysis.lastSampleUp, last > meta.startUptimeSec {
+                stats.durationSec = last - meta.startUptimeSec
+            }
+            stats.audioFilesIncomplete = incompleteAudio.isEmpty ? nil : incompleteAudio
+            meta.stats = stats
             do {
                 try meta.write(to: e.folder.appendingPathComponent(SessionFileName.metadata))
-                appendRecoveryNote(folder: e.folder, repairs: repairs, now: now)
                 recovered.append(e.folder)
             } catch {
                 appLogger.error("recovery of \(e.folder.lastPathComponent, privacy: .public) failed: \(error.localizedDescription, privacy: .public)")
@@ -109,11 +125,15 @@ struct SessionStore: Sendable {
         return recovered
     }
 
-    private func appendRecoveryNote(folder: URL, repairs: [String: Int], now: Date, unreadable: Bool = false) {
+    private func appendRecoveryNote(folder: URL, repairs: [String: Int], now: Date, unreadable: Bool = false,
+                                    incompleteAudio: [String] = []) {
         let url = folder.appendingPathComponent(SessionFileName.appLog)
         var text = unreadable
             ? "\(ISO8601.string(now)) [WARN] session.json missing/unreadable; CSV files repaired only\n"
             : "\(ISO8601.string(now)) [WARN] session recovered on next launch (app was terminated while recording)\n"
+        for f in incompleteAudio {
+            text += "\(ISO8601.string(now)) [WARN] recovery: \(f) has no index (was being recorded at the crash) and is not playable\n"
+        }
         for (file, bytes) in repairs.sorted(by: { $0.key < $1.key }) {
             text += "\(ISO8601.string(now)) [WARN] recovery: trimmed \(bytes) bytes of incomplete last line from \(file)\n"
         }

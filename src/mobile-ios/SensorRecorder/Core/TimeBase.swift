@@ -52,6 +52,7 @@ final class TimeBase: @unchecked Sendable {
     var currentAnchor: ClockAnchor { anchor.current }
 
     func uptimeNow() -> TimeInterval { clock.uptime() }
+    func nowUtcMs() -> Double { clock.nowUtcMs() }
 
     func utcMs(fromUptime up: TimeInterval) -> Double {
         let a = anchor.current

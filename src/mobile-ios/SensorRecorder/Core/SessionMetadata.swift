@@ -135,8 +135,10 @@ struct SessionMetadata: Codable, Equatable {
         var fileSizes: [String: Int64]
         var totalBytes: Int64
         var writeErrors: Int
-        /// Batches queued for live upload (0 when upload was off).
+        /// Batches queued for live upload (0 when upload was off). Key name kept for compatibility.
         var uploadBatchesCreated: Int
+        /// Recovered sessions: audio segments without an MP4 index (recording at the crash).
+        var audioFilesIncomplete: [String]? = nil
     }
 
     struct PreflightCheckResult: Codable, Equatable {

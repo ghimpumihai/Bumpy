@@ -15,7 +15,7 @@ struct SettingsView: View {
     var body: some View {
         Form {
             Section {
-                TextField("https://<api-id>.execute-api.<region>.amazonaws.com", text: $baseURL)
+                TextField("https://<function-app>.azurewebsites.net", text: $baseURL)
                     .keyboardType(.URL)
                     .textInputAutocapitalization(.never)
                     .autocorrectionDisabled()
@@ -28,8 +28,8 @@ struct SettingsView: View {
                     Text("UPLOAD OFF (local only)").font(.footnote.bold()).foregroundStyle(Theme.neutral)
                 } else if parsedURL == nil {
                     Text("Invalid URL: use https:// (http:// only for a local test server)").font(.footnote).foregroundStyle(Theme.problem)
-                } else {
-                    Text("POST \(parsedURL!.appendingPathComponent("api/ingest").absoluteString)")
+                } else if let url = parsedURL {
+                    Text("POST \(url.appendingPathComponent("api/ingest").absoluteString)")
                         .font(.caption.monospaced()).foregroundStyle(.secondary)
                 }
                 Button("Save") { save() }.accessibilityIdentifier("saveSettings")
@@ -47,7 +47,7 @@ struct SettingsView: View {
                 .disabled(parsedURL == nil || testing)
                 if let testResult { Text(testResult).font(.footnote) }
             } header: {
-                Text("AWS upload (optional)")
+                Text("Azure upload (live, when an API URL is set)")
             } footer: {
                 Text("Empty URL = upload disabled. Recording always works fully offline; batches are queued on disk and uploaded when possible. The key is stored in the Keychain.")
             }
@@ -75,16 +75,19 @@ struct SettingsView: View {
         .navigationBarTitleDisplayMode(.inline)
         .task {
             while !Task.isCancelled {
-                app.uploadQueue.refreshCounts()
-                status = app.uploadQueue.status
+                let queue = app.uploadQueue
+                status = await Task.detached(priority: .utility) { () -> UploadStatus in
+                    queue.refreshCounts() // directory listing: never on the main thread
+                    return queue.status
+                }.value
                 try? await Task.sleep(nanoseconds: 1_000_000_000)
             }
         }
         .confirmationDialog("Delete all queued upload batches? Session files on disk are NOT affected.",
                             isPresented: $confirmClear, titleVisibility: .visible) {
             Button("Clear queue", role: .destructive) {
-                for f in app.uploadQueue.pendingFiles() { try? FileManager.default.removeItem(at: f) }
-                app.uploadQueue.refreshCounts()
+                let queue = app.uploadQueue
+                Task.detached(priority: .userInitiated) { queue.clearPending() }
             }
         }
         .onDisappear { save() }

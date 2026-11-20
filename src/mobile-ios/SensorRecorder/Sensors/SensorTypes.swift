@@ -119,6 +119,8 @@ struct LocationCallbacks {
 }
 
 protocol LocationSource: AnyObject {
+    /// Non-nil when location permission was revoked or Precise Location turned off (read on main).
+    var degradedReason: String? { get }
     /// Starts continuous high-accuracy updates for recording (in addition to any preflight observers).
     func startRecording(_ callbacks: LocationCallbacks)
     func stopRecording()
@@ -135,6 +137,10 @@ protocol AltimeterSource: AnyObject {
     var isAbsoluteAvailable: Bool { get }
     func start(_ callbacks: AltimeterCallbacks)
     func stop()
+}
+
+extension LocationSource {
+    var degradedReason: String? { nil }
 }
 
 protocol ActivitySource: AnyObject {

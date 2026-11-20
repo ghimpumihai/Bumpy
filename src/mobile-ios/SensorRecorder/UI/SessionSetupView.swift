@@ -87,7 +87,7 @@ struct SessionSetupView: View {
                 Text("Audio")
             } footer: {
                 Text(model.setup.audioEnabled
-                     ? "Road noise is recorded locally (never uploaded). Tell everyone in the vehicle."
+                     ? "Road noise is recorded to the phone (never sent live; only in the session folder/export). Tell everyone in the vehicle."
                      : "Audio recording OFF: only the sound level (numbers) is measured; nothing from the microphone is stored. Default on bus and tram (other passengers, GDPR).")
             }
         }

@@ -44,25 +44,10 @@ struct DataVerdictRow: View {
     let metadata: SessionMetadata
 
     var body: some View {
-        let streams = metadata.stats?.streams ?? [:]
-        let gaps = streams.compactMap { key, s -> String? in
-            guard let id = StreamID(rawValue: key), s.maxGapSec > id.significantGap else { return nil }
-            return id.displayName
-        }.sorted()
-        let core: [StreamID] = [.deviceMotion, .accel, .gyro, .gps]
-        let missing = core.filter { (streams[$0.rawValue]?.samples ?? 0) == 0 }.map(\.displayName)
-        let ok = gaps.isEmpty && missing.isEmpty && (metadata.stats?.writeErrors ?? 0) == 0
-        let text: String = {
-            if ok { return "All streams OK" }
-            var parts: [String] = []
-            if !missing.isEmpty { parts.append("no data: " + missing.joined(separator: ", ")) }
-            if !gaps.isEmpty { parts.append("gaps: " + gaps.joined(separator: ", ")) }
-            if let e = metadata.stats?.writeErrors, e > 0 { parts.append("\(e) write errors") }
-            return parts.joined(separator: " · ")
-        }()
-        Label(text, systemImage: ok ? "checkmark.seal.fill" : "exclamationmark.octagon.fill")
+        let v = SessionVerdict(metadata: metadata)
+        Label(v.text, systemImage: v.ok ? "checkmark.seal.fill" : "exclamationmark.octagon.fill")
             .font(.headline)
-            .foregroundStyle(ok ? Theme.ok : Theme.problem)
+            .foregroundStyle(v.ok ? Theme.ok : Theme.problem)
             .accessibilityElement(children: .combine)
             .accessibilityIdentifier("dataVerdict")
     }
@@ -73,7 +58,9 @@ struct SessionDetailView: View {
     let folderName: String
     @Environment(AppModel.self) private var app
     @State private var entry: SessionStore.Entry?
-    @State private var analysis: SessionMetadata?
+    @State private var confirmDelete = false
+    @State private var deleteError: String?
+    @Environment(\.dismiss) private var dismiss
 
     var body: some View {
         let folder = app.store.root.appendingPathComponent(folderName, isDirectory: true)
@@ -94,6 +81,27 @@ struct SessionDetailView: View {
                 ProgressView()
             }
             ExportSection(folder: folder, sessionId: entry?.metadata?.sessionId)
+            Section {
+                Button("Delete session…", role: .destructive) { confirmDelete = true }
+                    .accessibilityIdentifier("deleteSession")
+                if let deleteError { Text(deleteError).font(.footnote).foregroundStyle(Theme.problem) }
+            } footer: {
+                Text("Deletes all files of this session from the phone (CSV, audio, photo) and its queued upload batches. Export first.")
+            }
+        }
+        .confirmationDialog("Delete this session permanently? This cannot be undone. Make sure it is exported.",
+                            isPresented: $confirmDelete, titleVisibility: .visible) {
+            Button("Delete permanently", role: .destructive) {
+                Task {
+                    do {
+                        try await app.deleteSession(folder: folder, sessionId: entry?.metadata?.sessionId)
+                        dismiss()
+                    } catch {
+                        deleteError = "Could not delete: \(error.localizedDescription)"
+                    }
+                }
+            }
+            .accessibilityIdentifier("confirmDeleteSession")
         }
         .navigationTitle(entry?.startedAt?.formatted(date: .abbreviated, time: .shortened) ?? folderName)
         .navigationBarTitleDisplayMode(.inline)
@@ -199,9 +207,12 @@ private struct FilesSection: View {
             }
         }
         .task {
-            let fm = FileManager.default
-            let names = (try? fm.contentsOfDirectory(atPath: folder.path)) ?? []
-            files = names.sorted().map { ($0, fm.fileSize(folder.appendingPathComponent($0))) }
+            let folder = self.folder
+            files = await Task.detached(priority: .userInitiated) { () -> [(String, Int64)] in
+                let fm = FileManager.default
+                let names = (try? fm.contentsOfDirectory(atPath: folder.path)) ?? []
+                return names.sorted().map { ($0, fm.fileSize(folder.appendingPathComponent($0))) }
+            }.value
         }
     }
 }
@@ -268,7 +279,7 @@ struct ExportSection: View {
         } header: {
             Text("Export")
         } footer: {
-            Text("Raw audio is never uploaded; it is only included in the exported folder.")
+            Text("Raw audio is never sent live; it is only in the session folder and the export. Exclude *.m4a when uploading folders to the cloud if audio must stay on the phone.")
         }
         .task {
             if let sessionId { queued = app.uploadQueue.pendingCount(sessionId: sessionId) }
@@ -302,29 +313,6 @@ struct ExportSection: View {
     }
 }
 
-
-enum FolderZipper {
-    /// Produces `<tmp>/<folder>.zip` using the system's built-in directory zipping.
-    static func zip(_ folder: URL) throws -> URL {
-        var coordError: NSError?
-        var output: URL?
-        var copyError: Error?
-        NSFileCoordinator().coordinate(readingItemAt: folder, options: [.forUploading], error: &coordError) { zipURL in
-            let dest = FileManager.default.temporaryDirectory.appendingPathComponent(folder.lastPathComponent + ".zip")
-            do {
-                try? FileManager.default.removeItem(at: dest)
-                try FileManager.default.copyItem(at: zipURL, to: dest)
-                output = dest
-            } catch {
-                copyError = error
-            }
-        }
-        if let coordError { throw coordError }
-        if let copyError { throw copyError }
-        guard let output else { throw CocoaError(.fileWriteUnknown) }
-        return output
-    }
-}
 
 /// Presents the system share sheet from the top-most view controller via UIKit.
 ///

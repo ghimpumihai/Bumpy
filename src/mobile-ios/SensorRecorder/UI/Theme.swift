@@ -29,6 +29,8 @@ enum Theme {
     static let scrim = Color.black.opacity(0.92)
     static let hairline = Color.white.opacity(0.08)
     static let plotBackground = Color.white.opacity(0.03)
+    static let plotZeroLine = Color.white.opacity(0.2)
+    static let mapLabelBackground = Color.black.opacity(0.6)
 
     static func color(_ level: HealthLevel) -> Color {
         switch level {

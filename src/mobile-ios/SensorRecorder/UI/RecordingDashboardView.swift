@@ -215,7 +215,7 @@ struct PlotView: View {
                 let mid = size.height / 2
                 var zero = Path()
                 zero.move(to: CGPoint(x: 0, y: mid)); zero.addLine(to: CGPoint(x: size.width, y: mid))
-                ctx.stroke(zero, with: .color(.white.opacity(0.2)), lineWidth: 1)
+                ctx.stroke(zero, with: .color(Theme.plotZeroLine), lineWidth: 1)
                 guard values.count > 1 else { return }
                 let cols = max(1, Int(size.width))
                 let perCol = Double(values.count) / Double(cols)
@@ -338,11 +338,11 @@ struct TrackMapView: View, Equatable {
             }
         }
         .onAppear { follow() }
-        .onChange(of: points.count) { _, _ in follow() }
+        .onChange(of: points.last) { _, _ in follow() } // count freezes at the buffer cap; last doesn't
         .mapStyle(.standard(emphasis: .muted, pointsOfInterest: .excludingAll))
         .overlay(alignment: .topLeading) {
             Text("Track · colored by speed").font(.caption2.bold()).padding(4)
-                .background(.black.opacity(0.6), in: RoundedRectangle(cornerRadius: 4)).padding(6)
+                .background(Theme.mapLabelBackground, in: RoundedRectangle(cornerRadius: 4)).padding(6)
         }
     }
 }
@@ -366,7 +366,7 @@ private struct EstimatesRow: View {
             VStack(alignment: .leading) {
                 Text("Last MISC").font(.caption2).foregroundStyle(.secondary)
                 Text(s.lastSickness.map(String.init) ?? "–").font(Theme.mono(15, weight: .bold))
-                    .foregroundStyle(s.lastSickness.map(MISC.color) ?? .white)
+                    .foregroundStyle(s.lastSickness.map(MISC.color) ?? Theme.onSurface)
             }
         }
         .padding(10)

@@ -1,0 +1,16 @@
+{
+  "abs_altitude" : "t_up,t_utc_ms,altitude_m,accuracy_m,precision_m",
+  "accel_raw" : "t_up,t_utc_ms,x,y,z",
+  "activity" : "t_up,t_utc_ms,stationary,walking,running,automotive,cycling,unknown,confidence,start_utc_ms",
+  "altimeter" : "t_up,t_utc_ms,rel_alt_m,pressure_kpa",
+  "audio_level" : "t_up,t_utc_ms,avg_dbfs,peak_dbfs",
+  "audio_segments" : "t_up,t_utc_ms,event,file",
+  "clock" : "t_up,t_utc_ms,source",
+  "device" : "t_up,t_utc_ms,battery_level,battery_state,thermal_state,low_power,free_disk_bytes,net_status,net_type",
+  "device_motion" : "t_up,t_utc_ms,ua_x,ua_y,ua_z,g_x,g_y,g_z,rr_x,rr_y,rr_z,q_w,q_x,q_y,q_z,roll,pitch,yaw",
+  "gyro_raw" : "t_up,t_utc_ms,x,y,z",
+  "heading" : "t_up,t_utc_ms,mag_heading,true_heading,heading_acc,x,y,z",
+  "labels" : "t_up,t_utc_ms,type,value,note",
+  "location" : "t_up,t_utc_ms,lat,lon,alt,ell_alt,h_acc,v_acc,speed,speed_acc,course,course_acc,is_simulated",
+  "mag_raw" : "t_up,t_utc_ms,x,y,z"
+}

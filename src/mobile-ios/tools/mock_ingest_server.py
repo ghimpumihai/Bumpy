@@ -1,35 +1,51 @@
 #!/usr/bin/env python3
-"""mock_ingest_server.py: stdlib stand-in for the AWS ingest backend (API Gateway + ingest Lambda,
+"""mock_ingest_server.py: stdlib stand-in for the Azure ingest function (
 decisions/02-infrastructure-plan.md §6/§7; app contract spec §6) for local testing.
 
 Usage:
-    python3 -I tools/mock_ingest_server.py [--port 8080] [--host 0.0.0.0] [--key KEY] [--out DIR]
+    python3 -I tools/mock_ingest_server.py [--port 8080] [--host 127.0.0.1] [--key KEY] [--out DIR]
                                            [--fail-every N] [--dup-status {200,409}]
 
-Then set the app's API base URL to http://<laptop-LAN-IP>:<port> (and the device key to KEY).
-Note: iOS App Transport Security blocks plain http unless the app allows it (or use a tunnel).
+Default: loopback only (Simulator). For a real phone on the same Wi-Fi:
+    --host 0.0.0.0 --key <throwaway-key>   (a key is required on the network; never your real one:
+                                            plain http on Wi-Fi is sniffable)
+then set the app's API base URL to http://<laptop-LAN-IP>:<port> and the device key to that key.
 --port 0 picks a free port; the first output line names the bound URL.
 
-Endpoint (the only route; anything else is 404 like API Gateway, including GET /api/health):
-  POST /api/ingest, checked in the same order as the Lambda:
+Routes (anything else is 404, including GET /api/health; a known path with another method is
+also 404, as an Azure Functions route restricted to one method answers):
+  POST /api/ingest                        one 2-second batch (spec §6)
+  PUT  /api/ingest/sessions/<sessionId>   session.json at Start and at Stop (spec §6.1);
+                                          <sessionId> = [A-Za-z0-9_-]{1,128}, no further segments
+
+Both are checked in the same order as the ingest function:
+    0. --fail-every N: every Nth request on either route gets 503 (tests the app's backoff)
     1. x-device-key (401 if --key is set and the header differs)
     2. Content-Encoding exactly "gzip" (400 otherwise, e.g. "x-gzip" or "gzip, br"),
        Content-Type application/json (400)
-    3. gunzip with a size cap (413 compressed > 20 MB; 400 inflated > 100 MB, truncated stream,
-       trailing data or more than one gzip member)
+    3. gunzip with size caps: 413 compressed > 20 MB or decompressed > 200 KB (the function's
+       body limit, 02 §6); 400 truncated stream, trailing data or more than one gzip member
     4. JSON parse (400; NaN / Infinity / out-of-range numbers rejected)
-    5. schema (400, reason in JSON "error"): schemaVersion int 1, batchSeq int >= 0,
-       t0Utc "YYYY-MM-DDTHH:MM:SS.mmmZ", exact units, columnar arrays of equal length,
-       location[].tUtcMs int, labels with explicit nulls, device object. A batch with 0 samples
-       is valid. The app's connectivity probe body {"probe":true} (header x-probe: 1) gets 400
-       with a reason naming the probe, i.e. "reachable, key accepted".
-    6. x-idempotency-key, when present, must equal "<sessionId>:<batchSeq>" (400)
-  201 new batch | --dup-status (default 200, as AWS: the backend dedupes later in the database)
-  for a repeated (sessionId, batchSeq) | 503 every Nth POST when --fail-every N (tests backoff).
+    5. schema (400, reason in JSON "error")
+       POST: schemaVersion int 1, batchSeq int >= 0, t0Utc "YYYY-MM-DDTHH:MM:SS.mmmZ", exact
+       units, columnar arrays of equal length, location[].tUtcMs int, labels with explicit nulls,
+       device object. A batch with 0 samples is valid. The app's connectivity probe body
+       {"probe":true} (header x-probe: 1) gets 400 with a reason naming the probe, i.e.
+       "reachable, key accepted".
+       PUT: a JSON object; sessionId string equal to the path id; startedAtUtc string;
+       startUptimeSec number; endedAtUtc string or null; recovered bool; vehicle, mount, people
+       objects; audioEnabled bool when present; batchCount int >= 0 when present. batchCount
+       present = the Stop copy, which also needs endedAtUtc non-null or recovered true.
+    6. x-idempotency-key, when present: POST "<sessionId>:<batchSeq>"; PUT "<sessionId>:meta-start"
+       (no batchCount) or "<sessionId>:meta-stop" (with batchCount) (400 otherwise)
+  201 first time a (sessionId, batchSeq) or (sessionId, start|stop) is seen | --dup-status
+  (default 200, as the backend: it dedupes later in the database) for a repeat.
 
 One log line per request. With --out DIR, accepted (unique) batches are appended as JSON lines to
-DIR/<sessionId>.jsonl. Binds with ThreadingHTTPServer. Ctrl-C / SIGTERM prints a summary (unique
-batches per session, rejects by reason) and exits 0.
+DIR/<sessionId>.jsonl and the latest metadata is written to DIR/sessions/<sessionId>.json (a late
+Start copy never overwrites a Stop copy). Binds with ThreadingHTTPServer. Ctrl-C / SIGTERM prints
+a summary (per session: unique batches, batchCount from the Stop copy, missing batchSeqs, whether
+the Start/Stop metadata arrived; rejects by reason) and exits 0.
 """
 
 import argparse
@@ -44,8 +60,12 @@ import threading
 import zlib
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-MAX_BODY = 20 * 1024 * 1024        # compressed
-MAX_INFLATED = 100 * 1024 * 1024   # decompressed (zip-bomb guard)
+MAX_BODY = 20 * 1024 * 1024        # compressed (413)
+MAX_INFLATED = 200 * 1024          # decompressed: the ingest function rejects bodies over 200 KB (413)
+
+INGEST_PATH = "/api/ingest"
+SESSIONS_PREFIX = "/api/ingest/sessions/"
+SESSION_ID_RE = re.compile(r"^[A-Za-z0-9_-]{1,128}$")
 
 REQUIRED_KEYS = ["schemaVersion", "sessionId", "deviceId", "batchSeq", "t0Utc", "t0Up", "units",
                  "deviceMotion", "accelRaw", "gyroRaw", "location", "altimeter", "audioLevel",
@@ -105,6 +125,15 @@ def validate(b):
         raise Invalid("t0Up must be a finite number")
     if b["units"] != EXPECTED_UNITS:
         raise Invalid(f"units must be {json.dumps(EXPECTED_UNITS)}, got {json.dumps(b['units'])}")
+    # Additive fields (app >= review round 3): optional, but typed when present.
+    for k in ("eventType", "source"):
+        if k in b and (not isinstance(b[k], str) or not b[k]):
+            raise Invalid(f"{k} must be a non-empty string when present")
+    if "t0UtcMs" in b and not is_int(b["t0UtcMs"]):
+        raise Invalid("t0UtcMs must be an integer (Unix ms) when present")
+    if "fieldUnits" in b and (not isinstance(b["fieldUnits"], dict)
+                              or not all(isinstance(k, str) and isinstance(v, str) for k, v in b["fieldUnits"].items())):
+        raise Invalid("fieldUnits must be an object of string -> string when present")
 
     for block, cols in COLUMNAR.items():
         blk = b[block]
@@ -129,6 +158,8 @@ def validate(b):
     for i, loc in enumerate(b["location"]):
         if not isinstance(loc, dict):
             raise Invalid(f"location[{i}] must be an object")
+        if "isSimulated" in loc and loc["isSimulated"] is not None and not isinstance(loc["isSimulated"], bool):
+            raise Invalid(f"location[{i}].isSimulated must be true/false/null when present")
         if not is_int(loc.get("tUtcMs")):
             raise Invalid(f"location[{i}].tUtcMs missing or not an integer (Unix ms), "
                           f"got {loc.get('tUtcMs')!r}")
@@ -160,6 +191,39 @@ def validate(b):
         raise Invalid("device must have battery (number), thermal (string), lowPower (bool)")
 
 
+def validate_session_meta(m, path_id):
+    """Validates a session.json body (spec §3.8/§6.1) for PUT /api/ingest/sessions/<path_id>.
+    Returns the phase: "stop" when batchCount is present, else "start". Raises Invalid(reason)."""
+    if not isinstance(m, dict):
+        raise Invalid("body is not a JSON object")
+    if not isinstance(m.get("sessionId"), str) or not m["sessionId"]:
+        raise Invalid("sessionId must be a non-empty string")
+    if m["sessionId"] != path_id:
+        raise Invalid(f"body sessionId {m['sessionId']!r} != path sessionId {path_id!r}")
+    if not isinstance(m.get("startedAtUtc"), str) or not m["startedAtUtc"]:
+        raise Invalid("startedAtUtc must be a non-empty string")
+    if not is_num(m.get("startUptimeSec")):
+        raise Invalid("startUptimeSec must be a finite number")
+    if "endedAtUtc" not in m:
+        raise Invalid("endedAtUtc missing (use explicit null while recording)")
+    if m["endedAtUtc"] is not None and (not isinstance(m["endedAtUtc"], str) or not m["endedAtUtc"]):
+        raise Invalid("endedAtUtc must be a non-empty string or null")
+    if not isinstance(m.get("recovered"), bool):
+        raise Invalid("recovered must be true/false")
+    for k in ("vehicle", "mount", "people"):
+        if not isinstance(m.get(k), dict):
+            raise Invalid(f"{k} must be an object")
+    if "audioEnabled" in m and not isinstance(m["audioEnabled"], bool):
+        raise Invalid("audioEnabled must be true/false when present")
+    if "batchCount" not in m:
+        return "start"
+    if not is_int(m["batchCount"]) or m["batchCount"] < 0:
+        raise Invalid(f"batchCount must be a non-negative integer, got {m['batchCount']!r}")
+    if m["endedAtUtc"] is None and m["recovered"] is not True:
+        raise Invalid("Stop copy (batchCount present) needs endedAtUtc set or recovered true")
+    return "stop"
+
+
 def counts(b):
     def n(block):
         v = b.get(block)
@@ -181,16 +245,20 @@ def _parse_float(s):
     return v
 
 
+class TooLarge(ValueError):
+    pass
+
+
 def gunzip_one_member(raw, limit):
     """Strict gzip decode: exactly one member, no trailing bytes, at most `limit` bytes out.
-    Raises ValueError(reason)."""
+    Raises TooLarge(reason) past the limit, ValueError(reason) for anything else."""
     d = zlib.decompressobj(16 + zlib.MAX_WBITS)
     try:
         out = d.decompress(raw, limit + 1)
     except zlib.error as e:
         raise ValueError(f"gzip decode failed: {e}")
     if len(out) > limit:
-        raise ValueError(f"decompressed body larger than {limit} bytes")
+        raise TooLarge(f"decompressed body larger than {limit} bytes")
     if not d.eof:
         raise ValueError("gzip decode failed: truncated gzip stream")
     if d.unused_data:
@@ -208,7 +276,9 @@ class State:
         self.dup_status = dup_status
         self.lock = threading.Lock()
         self.sessions = {}      # sessionId -> set(batchSeq) accepted
+        self.meta = {}          # sessionId -> {"start": bool, "stop": bool, "batchCount": int|None}
         self.duplicates = 0
+        self.meta_duplicates = 0
         self.rejects = {}       # "status category" -> [count, first reason]
         self.ingest_count = 0
 
@@ -218,17 +288,44 @@ class State:
             entry = self.rejects.setdefault(k, [0, reason])
             entry[0] += 1
 
+    @staticmethod
+    def _seq_list(seqs, limit=20):
+        s = ", ".join(str(x) for x in seqs[:limit])
+        return s + (f", ... ({len(seqs)} total)" if len(seqs) > limit else "")
+
     def summary(self):
         with self.lock:
             lines = ["", "== mock ingest summary =="]
             total = sum(len(s) for s in self.sessions.values())
             lines.append(f"unique batches: {total} in {len(self.sessions)} session(s); "
                          f"duplicates answered {self.dup_status}: {self.duplicates}")
-            for sid, seqs in sorted(self.sessions.items()):
-                lo, hi = min(seqs), max(seqs)
-                holes = (hi - lo + 1) - len(seqs)
-                lines.append(f"  {sid}: {len(seqs)} batches, batchSeq {lo}..{hi}"
-                             + (f", {holes} missing in between" if holes else ""))
+            n_start = sum(1 for m in self.meta.values() if m["start"])
+            n_stop = sum(1 for m in self.meta.values() if m["stop"])
+            lines.append(f"session metadata: {n_start} start, {n_stop} stop; "
+                         f"repeats answered {self.dup_status}: {self.meta_duplicates}")
+            for sid in sorted(set(self.sessions) | set(self.meta)):
+                seqs = self.sessions.get(sid, set())
+                meta = self.meta.get(sid, {"start": False, "stop": False, "batchCount": None})
+                count = meta["batchCount"]
+                parts = [f"{len(seqs)} batches"]
+                if seqs:
+                    parts[0] += f", batchSeq {min(seqs)}..{max(seqs)}"
+                if count is not None:
+                    missing = [i for i in range(count) if i not in seqs]
+                    parts.append(f"batchCount {count}")
+                    parts.append(f"missing {len(missing)}" + (f" [{self._seq_list(missing)}]" if missing else ""))
+                    extra = sorted(x for x in seqs if x >= count)
+                    if extra:
+                        parts.append(f"beyond batchCount [{self._seq_list(extra)}]")
+                else:
+                    parts.append("batchCount unknown")
+                    if seqs:
+                        holes = (max(seqs) - min(seqs) + 1) - len(seqs)
+                        if holes:
+                            parts.append(f"{holes} missing in between")
+                parts.append(f"meta start={'yes' if meta['start'] else 'no'} "
+                             f"stop={'yes' if meta['stop'] else 'no'}")
+                lines.append(f"  {sid}: " + ", ".join(parts))
             n_rej = sum(c for c, _ in self.rejects.values())
             lines.append(f"rejects: {n_rej}")
             for k, (c, first) in sorted(self.rejects.items()):
@@ -236,9 +333,14 @@ class State:
             return "\n".join(lines)
 
 
+def _safe_name(sid):
+    return re.sub(r"[^A-Za-z0-9._-]", "_", sid)[:128]
+
+
 class Handler(BaseHTTPRequestHandler):
     server_version = "MockIngest/1.0"
     protocol_version = "HTTP/1.1"
+    timeout = 15  # seconds per socket read: a slow/stalled client can't hold a thread forever
     state = None  # set in main
 
     def log_message(self, fmt, *args):  # silence default access log; we log our own lines
@@ -276,53 +378,114 @@ class Handler(BaseHTTPRequestHandler):
         return self.rfile.read(n), n
 
     def _not_found(self):
-        return self._send(404, {"message": "Not Found"})  # API Gateway's body for unknown routes
+        return self._send(404, {"message": "Not Found"})  # unknown routes
 
-    def do_GET(self):
-        self._not_found()
-
-    def do_PUT(self):
+    def _drain_and_not_found(self):
         self._drain_body()
         self._not_found()
 
-    def do_POST(self):
-        path = self.path.split("?", 1)[0]
-        raw, n = self._drain_body()
-        if path != "/api/ingest":
-            return self._not_found()
+    # Known paths with another method are 404 too (Azure Functions method-restricted routes).
+    do_GET = do_DELETE = do_PATCH = _drain_and_not_found
+
+    def _decode_json_body(self, raw, n):
+        """Steps 0-4 shared by both routes. Returns the parsed JSON, or None after sending the
+        rejection."""
         st = self.state
         with st.lock:
             st.ingest_count += 1
             nth = st.ingest_count
         if st.fail_every and nth % st.fail_every == 0:
-            return self._reject(503, "simulated outage", f"simulated outage (request #{nth})")
-        # 1. device key first (the Lambda authenticates before touching the body)
+            self._reject(503, "simulated outage", f"simulated outage (request #{nth})")
+            return None
+        # 1. device key first (the function authenticates before touching the body)
         if not self._key_ok():
-            return self._reject(401, "bad key", "bad x-device-key")
+            self._reject(401, "bad key", "bad x-device-key")
+            return None
         if raw is None:
             if n > MAX_BODY:
-                return self._reject(413, "too large", f"body larger than {MAX_BODY} bytes")
-            return self._reject(400, "content-length", "missing/invalid Content-Length")
-        probe = self.headers.get("x-probe") == "1"
-
+                self._reject(413, "too large", f"body larger than {MAX_BODY} bytes")
+            else:
+                self._reject(400, "content-length", "missing/invalid Content-Length")
+            return None
         # 2. headers
         enc = self.headers.get("Content-Encoding")
         if enc != "gzip":
-            return self._reject(400, "content-encoding",
-                                f"Content-Encoding must be exactly 'gzip', got {enc!r}")
+            self._reject(400, "content-encoding", f"Content-Encoding must be exactly 'gzip', got {enc!r}")
+            return None
         if not (self.headers.get("Content-Type") or "").lower().startswith("application/json"):
-            return self._reject(400, "content-type", "Content-Type must be application/json")
-        # 3. gunzip
+            self._reject(400, "content-type", "Content-Type must be application/json")
+            return None
+        # 3. gunzip (200 KB decompressed limit, as the ingest function)
         try:
             body = gunzip_one_member(raw, MAX_INFLATED)
+        except TooLarge as e:
+            self._reject(413, "too large", str(e))
+            return None
         except ValueError as e:
-            return self._reject(400, "gzip", str(e))
+            self._reject(400, "gzip", str(e))
+            return None
         # 4. JSON
         try:
-            b = json.loads(body.decode("utf-8"), parse_constant=_reject_constant,
-                           parse_float=_parse_float)
+            return json.loads(body.decode("utf-8"), parse_constant=_reject_constant,
+                              parse_float=_parse_float)
         except (UnicodeDecodeError, ValueError) as e:
-            return self._reject(400, "json", f"invalid JSON: {e}")
+            self._reject(400, "json", f"invalid JSON: {e}")
+            return None
+
+    def do_PUT(self):
+        path = self.path.split("?", 1)[0]
+        raw, n = self._drain_body()
+        path_id = path[len(SESSIONS_PREFIX):] if path.startswith(SESSIONS_PREFIX) else ""
+        if not SESSION_ID_RE.match(path_id):
+            return self._not_found()
+        st = self.state
+        m = self._decode_json_body(raw, n)
+        if m is None:
+            return
+        ids = f"sid={path_id[:8]}"
+        # 5. schema
+        try:
+            phase = validate_session_meta(m, path_id)
+        except Invalid as e:
+            return self._reject(400, "session schema", str(e), ids)
+        count = m.get("batchCount")
+        info = f"{ids} phase={phase} batchCount={count if count is not None else '-'}"
+        # 6. idempotency header: must name the same phase as the body
+        idem = self.headers.get("x-idempotency-key")
+        if idem is not None and idem != f"{path_id}:meta-{phase}":
+            return self._reject(400, "idempotency-key",
+                                f"x-idempotency-key {idem!r} != '{path_id}:meta-{phase}' "
+                                f"(batchCount {'present' if phase == 'stop' else 'absent'})", info)
+        with st.lock:
+            meta = st.meta.setdefault(path_id, {"start": False, "stop": False, "batchCount": None})
+            dup = meta[phase]
+            meta[phase] = True
+            if phase == "stop":
+                meta["batchCount"] = count
+            if dup:
+                st.meta_duplicates += 1
+            # Latest metadata, but a late (retried) Start copy never replaces the Stop copy.
+            if st.out and (phase == "stop" or not meta["stop"]):
+                folder = os.path.join(st.out, "sessions")
+                os.makedirs(folder, exist_ok=True)
+                with open(os.path.join(folder, f"{_safe_name(path_id)}.json"), "w", encoding="utf-8") as fh:
+                    json.dump(m, fh, indent=2, sort_keys=True)
+        reply = {"ok": True, "sessionId": path_id, "phase": phase}
+        if dup:
+            reply["duplicate"] = True
+            return self._send(st.dup_status, reply, info + " duplicate")
+        self._send(201, reply, info)
+
+    def do_POST(self):
+        path = self.path.split("?", 1)[0]
+        raw, n = self._drain_body()
+        if path != INGEST_PATH:
+            return self._not_found()
+        st = self.state
+        probe = self.headers.get("x-probe") == "1"
+        b = self._decode_json_body(raw, n)
+        if b is None:
+            return
 
         sid = b.get("sessionId") if isinstance(b, dict) else None
         seq = b.get("batchSeq") if isinstance(b, dict) else None
@@ -351,8 +514,7 @@ class Handler(BaseHTTPRequestHandler):
             else:
                 seqs.add(seq)
                 if st.out:
-                    safe = re.sub(r"[^A-Za-z0-9._-]", "_", sid)[:128]
-                    with open(os.path.join(st.out, f"{safe}.jsonl"), "a", encoding="utf-8") as fh:
+                    with open(os.path.join(st.out, f"{_safe_name(sid)}.jsonl"), "a", encoding="utf-8") as fh:
                         fh.write(json.dumps(b, separators=(",", ":")) + "\n")
         if dup:
             return self._send(st.dup_status, {"ok": True, "duplicate": True, "sessionId": sid,
@@ -365,16 +527,24 @@ def _sigterm(signum, frame):
 
 
 def main():
-    ap = argparse.ArgumentParser(description="Mock AWS POST /api/ingest server (stdlib only).")
+    ap = argparse.ArgumentParser(description="Mock ingest server: POST /api/ingest + PUT /api/ingest/sessions/{id} (stdlib only).")
     ap.add_argument("--port", type=int, default=8080, help="0 = pick a free port")
-    ap.add_argument("--host", default="0.0.0.0")
+    ap.add_argument("--host", default="127.0.0.1",
+                    help="bind address (default loopback). Use 0.0.0.0 to accept the phone over Wi-Fi; "
+                         "that requires --key (or --allow-any-key).")
+    ap.add_argument("--allow-any-key", action="store_true",
+                    help="accept any device key even when listening on the network (not recommended)")
     ap.add_argument("--key", default=None, help="require this x-device-key (default: accept any)")
-    ap.add_argument("--out", default=None, help="append accepted batches to DIR/<sessionId>.jsonl")
+    ap.add_argument("--out", default=None, help="append accepted batches to DIR/<sessionId>.jsonl; "
+                    "latest session metadata to DIR/sessions/<sessionId>.json")
     ap.add_argument("--fail-every", type=int, default=0, metavar="N",
-                    help="return 503 for every Nth POST /api/ingest")
+                    help="return 503 for every Nth ingest request (POST batch or PUT metadata)")
     ap.add_argument("--dup-status", type=int, choices=(200, 409), default=200,
-                    help="status for a repeated (sessionId, batchSeq); AWS answers 200 (default)")
+                    help="status for a repeated batch or metadata phase; the backend answers 200 (default)")
     a = ap.parse_args()
+    if a.host not in ("127.0.0.1", "localhost", "::1") and not a.key and not a.allow_any_key:
+        ap.error("listening on the network without --key lets anyone on the Wi-Fi inject data; "
+                 "pass --key <throwaway key> (or --allow-any-key)")
     if a.out:
         os.makedirs(a.out, exist_ok=True)
     state = State(a.key, a.out, a.fail_every if a.fail_every > 0 else 0, a.dup_status)

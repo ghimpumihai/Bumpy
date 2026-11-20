@@ -72,6 +72,7 @@ final class RecordingSession: @unchecked Sendable {
         var device: DeviceStatus = .unknown
         var inBackground = false
         var returnedFromBackgroundUp: TimeInterval?
+        var audioLastSoundUp: TimeInterval?
     }
 
     struct LabelState {
@@ -80,7 +81,6 @@ final class RecordingSession: @unchecked Sendable {
         var sicknessMissed = 0
         var activeSurface: SurfaceKind?
         var activeSegments: Set<SegmentKind> = []
-        var last: LoggedLabel?
         var lastSickness: (value: Int, date: Date)?
     }
 
@@ -102,14 +102,19 @@ final class RecordingSession: @unchecked Sendable {
     private let labelBox = Locked(LabelState())
     private let timerQueue = DispatchQueue(label: "sensorrecorder.session-timers", qos: .utility)
     private var timers: [DispatchSourceTimer] = []
-    private var lastBatchEndUp: TimeInterval
+    /// Window start of the next upload batch. Touched by the batch timer and by stop() (final
+    /// batch), so it is locked rather than relying on stop()'s timer-cancel ordering.
+    private let lastBatchEndUp: Locked<TimeInterval>
     private let stateBox = Locked((started: false, stopped: false))
     /// Set after the final close; later labels are refused instead of silently vanishing.
     private let writersClosed = Locked(false)
-    private let batchesQueued = Locked(0)
-    private var motionAvailability = MotionAvailability(deviceMotion: false, accel: false, gyro: false, mag: false)
+
 
     static let anchorInterval: TimeInterval = 10
+    /// Cached GPS fixes older than this before the session start are not recorded.
+    static let staleFixMargin: TimeInterval = 5
+    /// The ingest function rejects bodies over 200 KB (02 §6); warn a little before that.
+    static let maxBatchJSONBytes = 180 * 1024
     static let deviceInterval: TimeInterval = 5
     static let batchInterval: TimeInterval = 2
 
@@ -126,7 +131,7 @@ final class RecordingSession: @unchecked Sendable {
         timeBase = TimeBase(clock: deps.clock)
         let anchor = timeBase.refreshAnchor()
         startUp = anchor.up
-        lastBatchEndUp = anchor.up
+        lastBatchEndUp = Locked(anchor.up)
         startDate = Date(timeIntervalSince1970: anchor.utcMs / 1000)
         let folder = try store.makeSessionFolder(start: startDate, id: id)
         self.folder = folder
@@ -150,6 +155,7 @@ final class RecordingSession: @unchecked Sendable {
                 mount.photoFile = SessionFileName.mountPhoto
             } catch {
                 mount.photoFile = nil
+                appLogger.error("mount photo not saved: \(error.localizedDescription, privacy: .public)")
             }
         } else {
             mount.photoFile = nil
@@ -172,6 +178,7 @@ final class RecordingSession: @unchecked Sendable {
             throw error
         }
         writeClockRow(anchor, source: "start")
+        queueSessionMetadata(meta, phase: .start)
         writer.log(.info, "session \(id.uuidString) created: \(folder.lastPathComponent), app \(deps.appVersion), synthetic=\(deps.motion.isSynthetic)")
         writer.onWriteError = { [weak self] msg in
             self?.writer.log(.problem, msg)
@@ -236,6 +243,7 @@ final class RecordingSession: @unchecked Sendable {
         } catch {
             writer.log(.error, "writing final session.json failed: \(error.localizedDescription)")
         }
+        queueSessionMetadata(meta, phase: .stop, batchCount: accumulator.batchesCreated)
         writer.close()
         writersClosed.withLock { $0 = true }
         return meta
@@ -247,7 +255,6 @@ final class RecordingSession: @unchecked Sendable {
 
     private func startMotion() {
         let avail = deps.motion.availability
-        motionAvailability = avail
         monitors[.deviceMotion]?.setAvailable(avail.deviceMotion)
         monitors[.accel]?.setAvailable(avail.accel)
         monitors[.gyro]?.setAvailable(avail.gyro)
@@ -304,19 +311,32 @@ final class RecordingSession: @unchecked Sendable {
         }
         let tb = timeBase, w = writer, mon = monitors, acc = accumulator, latest = latestBox, track = track
         var cb = LocationCallbacks()
+        let sessionStartUp = startUp
         cb.location = { s in
             let arrival = tb.uptimeNow()
-            let tUp = tb.uptime(fromUtcMs: s.utcMs) // spec: for location, t_up is derived from the UTC timestamp
+            // Spec: location t_up is derived from the fix's UTC timestamp. Use the fix's *age* at
+            // arrival (wall-clock difference measured now) rather than the possibly 10 s old clock
+            // anchor, so a wall-clock step between anchors can't shift fixes by the step size.
+            let ageSec = max(0, (tb.nowUtcMs() - s.utcMs) / 1000)
+            let tUp = arrival - ageSec
+            // CoreLocation first delivers its cached last fix, which can be minutes old and from
+            // another place. Keep fixes up to `staleFixMargin` before start (real, just slightly
+            // early); log and drop older ones.
+            if tUp < sessionStartUp - Self.staleFixMargin {
+                w.log(.info, String(format: "ignored cached GPS fix %.1f s older than session start", sessionStartUp - tUp))
+                return
+            }
             w.append(.location, CSV.row([
                 CSV.f6(tUp), CSV.ms(s.utcMs),
                 CSV.f8(s.lat), CSV.f8(s.lon), CSV.f6(s.alt), CSV.f6(s.ellAlt),
                 CSV.f6(s.hAcc), CSV.f6(s.vAcc), CSV.f6(s.speed), CSV.f6(s.speedAcc),
                 CSV.f6(s.course), CSV.f6(s.courseAcc), CSV.bool(s.isSimulated),
             ]))
-            mon[.gps]?.record(t: tUp, arrival: arrival)
-            // GPS health uses the fix time (cached old fixes must not look fresh); invalid fixes don't count.
-            if s.hAcc >= 0 {
-                latest.withLock { $0.gps = s; $0.gpsFixUp = min(arrival, tUp) }
+            // Fixes from before the start (cached first delivery) are written but don't count for
+            // GPS rate/gap stats or freshness; invalid fixes (hAcc < 0) never count as a fix.
+            if tUp >= sessionStartUp {
+                mon[.gps]?.record(t: tUp, arrival: arrival)
+                if s.hAcc >= 0 { latest.withLock { $0.gps = s; $0.gpsFixUp = min(arrival, tUp) } }
             }
             track.add(s)
             acc.add(s)
@@ -388,7 +408,9 @@ final class RecordingSession: @unchecked Sendable {
         }
         let tb = timeBase, w = writer, mon = monitors, acc = accumulator
         var cb = AudioCallbacks()
+        let latestAudio = latestBox
         cb.level = { s in
+            if s.avgDbfs > HealthEvaluator.audioSilenceDbfs { latestAudio.withLock { $0.audioLastSoundUp = s.t } }
             w.append(.audioLevel, CSV.row([CSV.f6(s.t), CSV.ms(tb.utcMs(fromUptime: s.t)),
                                            CSV.f6(s.avgDbfs), CSV.f6(s.peakDbfs)]))
             mon[.audioLevel]?.record(t: s.t, arrival: s.t)
@@ -454,17 +476,52 @@ final class RecordingSession: @unchecked Sendable {
 
     private func makeBatch() {
         let end = timeBase.uptimeNow()
-        let start = lastBatchEndUp
-        lastBatchEndUp = end
-        // Always drain (keeps memory bounded); queue to disk only when upload is ON. With upload OFF
-        // nothing is written to upload_queue/ (the session files are the dataset; spec §6).
+        let start = lastBatchEndUp.withLock { v -> TimeInterval in
+            let s = v
+            v = end
+            return s
+        }
+        // Upload OFF: drop the window (memory stays bounded; the session files are the dataset) without
+        // consuming a batchSeq. Upload ON: build, check size, queue.
+        guard let q = deps.uploadQueue, q.isEnabled else {
+            accumulator.discard()
+            return
+        }
         let batch = accumulator.drain(t0Up: start, t0UtcMs: timeBase.utcMs(fromUptime: start), device: latestBox.current.device)
-        guard let q = deps.uploadQueue, q.isEnabled else { return }
         do {
-            try q.enqueue(batch: batch, createdUtcMs: Int64(timeBase.utcMs(fromUptime: end)))
-            batchesQueued.withLock { $0 += 1 }
+            let json = try batch.jsonData()
+            if json.count > Self.maxBatchJSONBytes {
+                // The ingest function rejects bodies > 200 KB (02 §6): the data is safe on disk; say so.
+                writer.log(.warn, "upload batch \(batch.batchSeq) is \(json.count / 1024) KB (> \(Self.maxBatchJSONBytes / 1024) KB): the backend may reject it")
+            }
+            try q.enqueue(gzippedBody: Gzip.compress(json), sessionId: batch.sessionId, seq: batch.batchSeq,
+                          createdUtcMs: Int64(timeBase.utcMs(fromUptime: end)))
         } catch {
             writer.log(.warn, "could not queue upload batch \(batch.batchSeq): \(error.localizedDescription)")
+        }
+    }
+
+    /// §6.1 body: session.json, plus `batchCount` in the Stop copy.
+    static func sessionMetadataBody(_ meta: SessionMetadata, batchCount: Int?) throws -> Data {
+        let json = try meta.jsonData()
+        guard let batchCount else { return json }
+        guard var obj = try JSONSerialization.jsonObject(with: json) as? [String: Any] else {
+            throw CocoaError(.coderInvalidValue)
+        }
+        obj["batchCount"] = batchCount
+        return try JSONSerialization.data(withJSONObject: obj, options: [.sortedKeys, .withoutEscapingSlashes])
+    }
+
+    /// Spec §6.1: the current session.json goes through the same queue as the batches (Start copy
+    /// before batch 0, Stop copy — with `batchCount` — after the last batch). Only while upload is ON.
+    private func queueSessionMetadata(_ meta: SessionMetadata, phase: UploadQueue.MetaPhase, batchCount: Int? = nil) {
+        guard let q = deps.uploadQueue, q.isEnabled else { return }
+        do {
+            let json = try Self.sessionMetadataBody(meta, batchCount: batchCount)
+            try q.enqueueSessionMetadata(json: json, sessionId: id.uuidString, phase: phase,
+                                         createdUtcMs: Int64(timeBase.utcMs(fromUptime: timeBase.uptimeNow())))
+        } catch {
+            writer.log(.warn, "could not queue session metadata (\(phase.rawValue)): \(error.localizedDescription)")
         }
     }
 
@@ -495,7 +552,6 @@ final class RecordingSession: @unchecked Sendable {
             s.count += 1
             if type == .sickness { s.sicknessRatings += 1; if let v = value.flatMap(Int.init) { s.lastSickness = (v, label.date) } }
             if type == .sicknessMissed { s.sicknessMissed += 1 }
-            if type != .sicknessPrompt { s.last = label }
         }
         return label
     }
@@ -560,6 +616,8 @@ final class RecordingSession: @unchecked Sendable {
         // "Audio recorder not recording" is a PROBLEM only when this session records audio;
         // with recording OFF (public transport) only the optional level meter runs.
         i.audioMeterExpected = deps.audio != nil
+        i.audioLastSoundUp = l.audioLastSoundUp
+        i.locationDegraded = deps.location?.degradedReason
         if let audio = deps.audio, audio.recordsAudio {
             i.audioExpected = true
             i.audioRecording = audio.isRecording
@@ -589,10 +647,10 @@ final class RecordingSession: @unchecked Sendable {
     }
 
     var audioBytes: Int64 { deps.audio?.bytesWritten ?? 0 }
-    var audioFormat: String { deps.audio?.formatDescription ?? "" }
     var audioLevel: AudioLevelSample? { deps.audio?.latestLevel }
     var audioRecording: Bool { deps.audio?.isRecording ?? false }
     var recordsAudio: Bool { deps.audio?.recordsAudio ?? false }
+    var hasAudioSource: Bool { deps.audio != nil }
     var uploadStatus: UploadStatus? { deps.uploadQueue?.status }
     var deviceStatus: DeviceStatus { deps.deviceStatus.currentStatus() }
 
@@ -624,6 +682,6 @@ final class RecordingSession: @unchecked Sendable {
         return .init(durationSec: endUp - startUp, streams: streams, labelsCount: l.count,
                      sicknessRatings: l.sicknessRatings, sicknessMissed: l.sicknessMissed,
                      audioFiles: audioFiles.sorted(), fileSizes: sizes, totalBytes: total,
-                     writeErrors: writer.writeErrors.count, uploadBatchesCreated: batchesQueued.current)
+                     writeErrors: writer.writeErrors.count, uploadBatchesCreated: accumulator.batchesCreated)
     }
 }

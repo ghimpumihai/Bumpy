@@ -53,9 +53,10 @@ enum Gzip {
             var dst = Data(count: capacity)
             let written = dst.withUnsafeMutableBytes { (d: UnsafeMutableRawBufferPointer) -> Int in
                 input.withUnsafeBytes { (s: UnsafeRawBufferPointer) -> Int in
-                    compression_encode_buffer(d.bindMemory(to: UInt8.self).baseAddress!, capacity,
-                                              s.bindMemory(to: UInt8.self).baseAddress!, input.count,
-                                              nil, COMPRESSION_ZLIB)
+                    // Non-empty buffers (checked above) always have a base address.
+                    guard let dp = d.bindMemory(to: UInt8.self).baseAddress,
+                          let sp = s.bindMemory(to: UInt8.self).baseAddress else { return 0 }
+                    return compression_encode_buffer(dp, capacity, sp, input.count, nil, COMPRESSION_ZLIB)
                 }
             }
             if written > 0 {
@@ -70,11 +71,12 @@ enum Gzip {
     private static func inflateRaw(_ input: Data, expectedSize: Int) throws -> Data {
         if expectedSize == 0 { return Data() }
         var dst = Data(count: expectedSize)
+        guard !input.isEmpty else { throw GzipError.corrupt }
         let written = dst.withUnsafeMutableBytes { (d: UnsafeMutableRawBufferPointer) -> Int in
             input.withUnsafeBytes { (s: UnsafeRawBufferPointer) -> Int in
-                compression_decode_buffer(d.bindMemory(to: UInt8.self).baseAddress!, expectedSize,
-                                          s.bindMemory(to: UInt8.self).baseAddress!, input.count,
-                                          nil, COMPRESSION_ZLIB)
+                guard let dp = d.bindMemory(to: UInt8.self).baseAddress,
+                      let sp = s.bindMemory(to: UInt8.self).baseAddress else { return 0 }
+                return compression_decode_buffer(dp, expectedSize, sp, input.count, nil, COMPRESSION_ZLIB)
             }
         }
         guard written == expectedSize else { throw GzipError.corrupt }

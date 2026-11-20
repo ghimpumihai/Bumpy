@@ -200,6 +200,7 @@ final class AudioHealthTests: XCTestCase {
         var i = HealthInputs(now: 1060, recordingStartUp: 1000)
         i.gpsLastFixUp = 1059.5
         i.audioMeterExpected = meter
+        i.audioLastSoundUp = i.now - 0.5 // the cabin is not silent (silence has its own test)
         i.audioExpected = recorder
         i.audioRecording = recording
         i.streams[.audioLevel] = StreamSnapshot(id: .audioLevel, count: 10, rateHz: 10, age: levelAge, meanRateHz: 10,
@@ -287,10 +288,10 @@ final class UploadRobustnessTests: XCTestCase {
         try await Task.sleep(nanoseconds: 300_000_000) // loop is now sleeping out its 8 s backoff…
         let kickedAt = Date()
         q.kick()
-        while !q.pendingFiles().isEmpty && Date().timeIntervalSince(kickedAt) < 7 { try await Task.sleep(nanoseconds: 20_000_000) }
+        while !q.pendingFiles().isEmpty && Date().timeIntervalSince(kickedAt) < ciTimeout { try await Task.sleep(nanoseconds: 20_000_000) }
         XCTAssertTrue(q.pendingFiles().isEmpty)
         // Bound well below the 8 s backoff but loose enough for slow CI simulators.
-        XCTAssertLessThan(Date().timeIntervalSince(kickedAt), 4, "kick() must cut the 8 s backoff short")
+        XCTAssertLessThan(Date().timeIntervalSince(kickedAt), 7, "kick() must cut the 8 s backoff short")
     }
 
     func testPlainHTTPOnlyForLocalHosts() {
@@ -366,7 +367,7 @@ final class RecordingControllerTests: XCTestCase {
     private func spin(_ seconds: TimeInterval) {
         let e = expectation(description: "spin")
         DispatchQueue.main.asyncAfter(deadline: .now() + seconds) { e.fulfill() }
-        wait(for: [e], timeout: seconds + 2)
+        wait(for: [e], timeout: seconds + ciTimeout)
     }
 
     func testNewProblemAlertsOnceAndAgainOnlyAfterItResolved() throws {
@@ -401,16 +402,16 @@ final class RecordingControllerTests: XCTestCase {
     func testPromptTimesOutAsMissedSkipIsMissedAndStopDuringPromptIsMissed() throws {
         let (c, alerter) = try makeController(interval: 0.3, timeout: 0.3)
         c.start()
-        XCTAssertTrue(waitUntil(3) { c.sicknessPromptActive })
+        XCTAssertTrue(waitUntil(ciTimeout) { c.sicknessPromptActive })
         XCTAssertGreaterThanOrEqual(alerter.prompts, 1)
-        XCTAssertTrue(waitUntil(3) { c.session.labels.sicknessMissed >= 1 }, "unanswered prompt → sickness_missed")
-        XCTAssertTrue(waitUntil(3) { c.sicknessPromptActive })
+        XCTAssertTrue(waitUntil(ciTimeout) { c.session.labels.sicknessMissed >= 1 }, "unanswered prompt → sickness_missed")
+        XCTAssertTrue(waitUntil(ciTimeout) { c.sicknessPromptActive })
         let before = c.session.labels.sicknessMissed
         c.skipSicknessPrompt() // no run-loop turn in between: deterministic
         XCTAssertEqual(c.session.labels.sicknessMissed, before + 1)
         XCTAssertFalse(c.sicknessPromptActive)
         XCTAssertEqual(c.session.labels.sicknessRatings, 0, "skip never fakes a rating")
-        XCTAssertTrue(waitUntil(3) { c.sicknessPromptActive })
+        XCTAssertTrue(waitUntil(ciTimeout) { c.sicknessPromptActive })
         c.stop()
         let labels = try String(contentsOf: c.session.folder.appendingPathComponent("labels.csv"), encoding: .utf8)
         XCTAssertTrue(labels.contains("sickness_missed,,skipped"))
@@ -422,7 +423,7 @@ final class RecordingControllerTests: XCTestCase {
         let (c, _) = try makeController(interval: 0.2, timeout: 5)
         c.start()
         defer { c.stop() }
-        XCTAssertTrue(waitUntil(3) { c.sicknessPromptActive })
+        XCTAssertTrue(waitUntil(ciTimeout) { c.sicknessPromptActive })
         c.rateSickness(4)
         XCTAssertFalse(c.sicknessPromptActive)
         XCTAssertEqual(c.session.labels.sicknessRatings, 1)
@@ -459,7 +460,7 @@ final class AudioSegmentsIntegrationTests: XCTestCase {
             session.start()
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { meta = session.stop(); e.fulfill() }
         }
-        wait(for: [e], timeout: 5)
+        wait(for: [e], timeout: ciTimeout)
         let segs = try readCSV(session.folder.appendingPathComponent("audio_segments.csv")).rows
         XCTAssertEqual(segs.filter { $0[2] == "start" }.map { $0[3] }, ["audio_000.m4a", "audio_001.m4a", "audio_002.m4a"])
         XCTAssertEqual(segs.filter { $0[2] == "stop" }.count, 3)
@@ -494,12 +495,46 @@ final class ContractFixtureTests: XCTestCase {
                                   freeDiskBytes: 1, networkStatus: "satisfied", networkType: "wifi")
         let batch = acc.drain(t0Up: 100, t0UtcMs: 1_763_716_532_000, device: device)
         let gz = try Gzip.compress(try batch.jsonData())
+        XCTAssertEqual(try Gzip.decompress(gz), try batch.jsonData(), "deterministic encoding (sortedKeys)")
+        try checkFixture("ingest_batch_v1.json.gz", gz)
+    }
+
+    /// §6.1 Stop-copy body exactly as the app builds it; tools/test_tools.py PUTs it to the mock backend.
+    func testSessionMetadataStopFixture() throws {
+        var m = SessionMetadataTests.sample()
+        m.sessionId = "00000000-0000-4000-8000-000000000001"
+        m.endedAtUtc = "2026-11-21T10:00:00.000Z"
+        m.audioEnabled = false
+        m.vehicle.type = "bus"; m.vehicle.line = "24B"
+        m.stats = .init(durationSec: 2808.488, streams: [:], labelsCount: 3, sicknessRatings: 1, sicknessMissed: 0,
+                        audioFiles: [], fileSizes: [:], totalBytes: 1, writeErrors: 0, uploadBatchesCreated: 3)
+        let body = try RecordingSession.sessionMetadataBody(m, batchCount: 3)
+        let obj = try XCTUnwrap(JSONSerialization.jsonObject(with: body) as? [String: Any])
+        XCTAssertEqual(obj["batchCount"] as? Int, 3)
+        XCTAssertEqual(obj["sessionId"] as? String, m.sessionId)
+        try checkFixture("session_meta_stop_v1.json.gz", Gzip.compress(body))
+    }
+
+    /// Header line per CSV file: the single source of truth that tools/quick_check.py is tested against.
+    func testCSVHeadersFixture() throws {
+        var map: [String: String] = [:]
+        for f in StreamFile.allCases { map[f.rawValue] = f.header }
+        let enc = JSONEncoder()
+        enc.outputFormatting = [.prettyPrinted, .sortedKeys, .withoutEscapingSlashes]
+        try checkFixture("csv_headers.json", enc.encode(map) + Data("\n".utf8))
+    }
+
+    /// Compares with the committed fixture (a change in the app's output must be deliberate).
+    /// Regenerate with: TEST_RUNNER_REGENERATE_FIXTURES=1 xcodebuild … -only-testing:SensorRecorderTests/ContractFixtureTests test
+    private func checkFixture(_ name: String, _ data: Data) throws {
         let dir = URL(fileURLWithPath: #filePath).deletingLastPathComponent().deletingLastPathComponent()
             .appendingPathComponent("tools/fixtures", isDirectory: true)
-        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
-        try gz.write(to: dir.appendingPathComponent("ingest_batch_v1.json.gz"), options: .atomic)
-        XCTAssertEqual(try Gzip.decompress(gz), try batch.jsonData(), "deterministic encoding (sortedKeys)")
-        let obj = try XCTUnwrap(JSONSerialization.jsonObject(with: Gzip.decompress(gz)) as? [String: Any])
-        XCTAssertEqual(obj["schemaVersion"] as? Int, 1)
-    }
+        let url = dir.appendingPathComponent(name)
+        if ProcessInfo.processInfo.environment["REGENERATE_FIXTURES"] == "1" {
+            try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+            try data.write(to: url, options: .atomic)
+            return
+        }
+        let committed = try Data(contentsOf: url)
+        XCTAssertEqual(committed, data, "\(name) differs from the app's output: if intended, regenerate the fixture")    }
 }

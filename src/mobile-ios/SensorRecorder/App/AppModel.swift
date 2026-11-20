@@ -36,6 +36,9 @@ final class AppModel {
     init() {
         let args = AppInfo.arguments
         store = SessionStore.default
+        #if DEBUG && targetEnvironment(simulator)
+        // UI tests only, and only on the Simulator: ⌘U with the drive iPhone selected (a Debug
+        // build) must never be able to delete recorded sessions.
         if args.contains("-uiTestingReset") {
             let docs = SessionStore.documentsDirectory
             for name in ["sessions", "upload_queue", "upload_failed"] {
@@ -43,6 +46,7 @@ final class AppModel {
             }
             UserDefaults.standard.removeObject(forKey: SetupDefaults.key)
         }
+        #endif
         try? store.ensureRoot()
         uploadQueue = UploadQueue(directory: UploadQueue.defaultDirectory, config: { AppSettings.uploadConfig })
         // Launch arguments `-sicknessInterval <s> -sicknessTimeout <s>` (NSArgumentDomain) override
@@ -89,6 +93,20 @@ final class AppModel {
                 self.isRecovering = false
             }
         }
+    }
+
+    /// Deletes a recorded session and its queued upload batches. Refuses the session being recorded.
+    func deleteSession(folder: URL, sessionId: String?) async throws {
+        if let active = recording?.session.folder, active.standardizedFileURL == folder.standardizedFileURL,
+           recording?.isFinished == false {
+            throw CocoaError(.fileWriteNoPermission)
+        }
+        let store = self.store, queue = uploadQueue
+        try await Task.detached(priority: .userInitiated) {
+            try store.deleteSession(folder)
+            if let sessionId { queue.clearPending(sessionId: sessionId) }
+        }.value
+        refreshSessions()
     }
 
     func refreshSessions() {

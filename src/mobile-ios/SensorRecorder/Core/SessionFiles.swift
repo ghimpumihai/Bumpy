@@ -96,7 +96,7 @@ final class BufferedFileWriter: @unchecked Sendable {
     private let pending = Locked(String())
     /// Bytes that failed to write last time (e.g. disk full). Retried first on the next flush.
     private var retryData = Data()
-    private let stats = Locked((bytes: Int64(0), lines: Int64(0)))
+    private let bytesOnDisk = Locked(Int64(0))
     private var closed = false
 
     /// Hard cap for data held in memory per file while the disk refuses writes (prevents OOM:
@@ -120,20 +120,26 @@ final class BufferedFileWriter: @unchecked Sendable {
             throw CocoaError(.fileWriteUnknown, userInfo: [NSFilePathErrorKey: url.path])
         }
         handle = try (sink ?? { try FileHandleSink(url: $0) })(url)
-        stats.withLock { $0.bytes = Int64(initial.count) }
+        bytesOnDisk.withLock { $0 = Int64(initial.count) }
     }
 
+    /// Lines offered after close() are refused (counted), never silently buffered forever.
+    private let closedFlag = Locked(false)
+    private(set) var droppedAfterClose = Locked(0)
+
     func append(line: String) {
+        guard !closedFlag.current else {
+            droppedAfterClose.withLock { $0 += 1 }
+            return
+        }
         pending.withLock {
             $0.append(line)
             $0.append("\n")
         }
-        stats.withLock { $0.lines += 1 }
     }
 
     /// Bytes on disk so far (excluding what is still buffered).
-    var bytesWritten: Int64 { stats.current.bytes }
-    var linesAppended: Int64 { stats.current.lines }
+    var bytesWritten: Int64 { bytesOnDisk.current }
 
     /// Writes everything buffered so far. Throws on I/O errors; the unwritten data is kept for retry.
     func flush() throws {
@@ -152,14 +158,14 @@ final class BufferedFileWriter: @unchecked Sendable {
             try handle.write(data)
             retryData.removeAll(keepingCapacity: true)
             diskEndsWithNewline = data.last == UInt8(ascii: "\n")
-            stats.withLock { $0.bytes += Int64(data.count) }
+            bytesOnDisk.withLock { $0 += Int64(data.count) }
         } catch {
             // A failed write may still have written a prefix: never write those bytes twice.
             let after = (try? handle.offset()) ?? before
             let written = after > before ? Int(min(UInt64(data.count), after - before)) : 0
             if written > 0 {
                 diskEndsWithNewline = data[data.startIndex + written - 1] == UInt8(ascii: "\n")
-                stats.withLock { $0.bytes += Int64(written) }
+                bytesOnDisk.withLock { $0 += Int64(written) }
             }
             var rest = Data(data.dropFirst(written))
             if rest.count > maxRetryBytes {
@@ -187,6 +193,7 @@ final class BufferedFileWriter: @unchecked Sendable {
 
     func close() throws {
         guard !closed else { return }
+        closedFlag.withLock { $0 = true }
         defer { closed = true; try? handle.close() }
         try flush()
         try handle.synchronize()
@@ -247,14 +254,7 @@ final class SessionWriter: @unchecked Sendable {
 
     var writeErrors: (count: Int, last: String?, lastAtUp: TimeInterval?) { errorState.current }
 
-    func bytesWritten(_ file: StreamFile) -> Int64 { writers[file]?.bytesWritten ?? 0 }
     var totalCSVBytes: Int64 { writers.values.reduce(0) { $0 + $1.bytesWritten } + logWriter.bytesWritten }
-    func fileBytes() -> [String: Int64] {
-        var out: [String: Int64] = [:]
-        for (k, w) in writers { out[k.fileName] = w.bytesWritten }
-        out[SessionFileName.appLog] = logWriter.bytesWritten
-        return out
-    }
 
     private func flushAll(sync: Bool) {
         dispatchPrecondition(condition: .onQueue(queue))
@@ -277,9 +277,10 @@ final class SessionWriter: @unchecked Sendable {
         onWriteError?(msg)
     }
 
-    /// Synchronous flush of everything buffered so far (used before rewriting session.json etc.).
+    /// Synchronous flush of everything buffered so far (used before computing final stats).
+    /// No fsync here: close() follows and fsyncs every file once.
     func flushNow() {
-        queue.sync { flushAll(sync: true) }
+        queue.sync { flushAll(sync: false) }
     }
 
     /// Final flush + fsync + close. Idempotent.

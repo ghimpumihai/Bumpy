@@ -116,7 +116,7 @@ final class RecordingSessionIntegrationTests: XCTestCase {
             session.addLabel(.sickness, value: "3", note: "prompt")
             started.fulfill()
         }
-        wait(for: [started], timeout: 2)
+        wait(for: [started], timeout: ciTimeout)
         Thread.sleep(forTimeInterval: 3.2)
 
         // Health inputs while running: every motion stream is available and delivering
@@ -137,7 +137,7 @@ final class RecordingSessionIntegrationTests: XCTestCase {
             session.stop() // idempotent
             stopped.fulfill()
         }
-        wait(for: [stopped], timeout: 5)
+        wait(for: [stopped], timeout: ciTimeout)
 
         let folder = session.folder
         let meta = try XCTUnwrap(finalMeta)
@@ -205,9 +205,20 @@ final class RecordingSessionIntegrationTests: XCTestCase {
         XCTAssertEqual(stats.labelsCount, 9)
         XCTAssertEqual(stats.sicknessRatings, 1)
 
-        // Upload batches queued on disk, decodable, sequential
-        let files = uploadQueue.pendingFiles()
+        // Upload queue, in send order: Start metadata, batches 0..n-1, Stop metadata with batchCount = n (§6.1)
+        let all = uploadQueue.pendingFiles()
+        let kinds = all.compactMap { UploadQueue.parseItem(fileName: $0.lastPathComponent)?.item }
+        XCTAssertEqual(kinds.first, .sessionMeta(phase: .start), "Start copy is sent before batch 0")
+        XCTAssertEqual(kinds.last, .sessionMeta(phase: .stop), "Stop copy is sent after the last batch")
+        let files = all.filter { UploadQueue.parse(fileName: $0.lastPathComponent) != nil }
         XCTAssertEqual(files.count, stats.uploadBatchesCreated)
+        let stopMeta = try XCTUnwrap(JSONSerialization.jsonObject(with: Gzip.decompress(Data(contentsOf: all.last!))) as? [String: Any])
+        XCTAssertEqual(stopMeta["batchCount"] as? Int, files.count)
+        XCTAssertEqual(stopMeta["sessionId"] as? String, session.id.uuidString)
+        XCTAssertNotNil(stopMeta["endedAtUtc"] as? String)
+        let startMeta = try XCTUnwrap(JSONSerialization.jsonObject(with: Gzip.decompress(Data(contentsOf: all.first!))) as? [String: Any])
+        XCTAssertTrue(startMeta["endedAtUtc"] is NSNull)
+        XCTAssertNil(startMeta["batchCount"])
         var seqs: [Int] = []
         var totalDM = 0
         for f in files {
@@ -240,13 +251,13 @@ final class RecordingSessionIntegrationTests: XCTestCase {
         let session = try RecordingSession(store: SessionStore(root: root), setup: SessionSetup(), preflight: nil, deps: deps)
         let e = expectation(description: "start")
         DispatchQueue.main.async { session.start(); e.fulfill() }
-        wait(for: [e], timeout: 2)
+        wait(for: [e], timeout: ciTimeout)
         Thread.sleep(forTimeInterval: 0.5)
         let issues = HealthEvaluator.evaluate(session.healthInputs(now: ProcessInfo.processInfo.systemUptime))
         XCTAssertTrue(issues.contains { $0.key == "audio.off" && $0.level == .problem })
         let e2 = expectation(description: "stop")
         DispatchQueue.main.async { session.stop(); e2.fulfill() }
-        wait(for: [e2], timeout: 5)
+        wait(for: [e2], timeout: ciTimeout)
         let log = try String(contentsOf: session.folder.appendingPathComponent("app_log.txt"), encoding: .utf8)
         XCTAssertTrue(log.contains("[PROBLEM] audio recording FAILED to start"))
     }

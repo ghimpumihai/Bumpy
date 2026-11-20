@@ -40,7 +40,7 @@ Sessions → **New session** → setup (pre-filled with your last values, plus a
 | `session.json` | metadata (spec §3.8). Rewritten at start, at stop (with `stats`), and on recovery |
 | `clock.csv` | `t_up,t_utc_ms,source`. Anchors at `start`, every 10 s (`periodic`), `background`/`foreground`, `stop`, plus one `audio_start` per audio segment |
 | `device_motion.csv`, `accel_raw.csv`, `gyro_raw.csv`, `mag_raw.csv` | CoreMotion at 100 Hz (mag 50 Hz), native units |
-| `location.csv`, `heading.csv` | CoreLocation; `t_up` derived from the fix's UTC timestamp |
+| `location.csv`, `heading.csv` | CoreLocation. `t_up` is derived from the fix's UTC timestamp (its age at arrival). iOS's cached first fix is kept if it is at most 5 s older than the start, so `location.csv` can begin slightly before `startedAtUtc`. Older cached fixes are dropped (logged), and GPS stats count only fixes from the start. |
 | `altimeter.csv`, `abs_altitude.csv` | CMAltimeter relative (kPa, m) and absolute altitude |
 | `activity.csv` | CMMotionActivity (+ `start_utc_ms`) |
 | `audio_000.m4a`, `audio_001.m4a`, … | AAC 48 kHz mono 64 kbps, in 5-minute segments |
@@ -93,7 +93,9 @@ Label `type` values: `pothole`, `speed_bump`, `phone_moved`, `surface_start/surf
   - The ingest function checks the key first, then the schema. 400/422 therefore means
     "reachable and key accepted", and the probe is rejected, never stored. 401/403 means the key
     was rejected; 404 means a wrong URL.
-  - Plain `http://` is accepted only for local test servers, so the device key is never sent in cleartext.
+  - Plain `http://` is accepted only for local test servers (loopback, RFC 1918 IPs, `.local`), and
+    redirects are never followed. On Wi-Fi, such a key *is* sniffable, so use a throwaway key for the
+    mock server, never the real one. The real backend must be `https://`.
 - **`clock.csv` rows are written from several queues** (periodic, lifecycle, `audio_start`), so
   sort by `t_up` before use. `audio_start` rows are derived from the current anchor; they are not
   separate clock reads.
@@ -103,17 +105,57 @@ Label `type` values: `pothole`, `speed_bump`, `phone_moved`, `surface_start/surf
 ## Upload contract (spec §6)
 
 `POST {API}/api/ingest` with headers `Content-Type: application/json`, `Content-Encoding: gzip`,
-`x-device-key`, `x-idempotency-key: <sessionId>:<batchSeq>`. The body is exactly the spec §6
-JSON (schemaVersion 1, columnar arrays, `t` relative to `t0Up`, values rounded to 6 decimals).
-One request at a time, oldest first, backoff 1 → 30 s, 2xx/409 = done. The API URL and key are
-entered in **Settings** at runtime (key in the Keychain); nothing secret is in the repo.
+`x-device-key`, `x-idempotency-key: <sessionId>:<batchSeq>`.
+
+The body is the spec §6 JSON: schemaVersion 1, columnar arrays, `t` relative to `t0Up`, values
+rounded to 6 decimals. For the hackathon rule ("JSON payload with device ID, event type, value,
+unit, and UTC timestamp") it adds these optional, additive fields:
+- `eventType: "sensor_batch"` and `source: "live"`;
+- `t0UtcMs`, so a sample's UTC time is `t0UtcMs + t[i]·1000`;
+- `fieldUnits`, the unit of every field (the §6 `units` map is unchanged);
+- `location[].isSimulated`.
+
+Backend: please don't use pydantic `extra="forbid"` or a fixed `units` literal.
+
+**Session metadata (spec §6.1):** `PUT {API}/api/ingest/sessions/{sessionId}`, with the gzipped
+`session.json`.
+- It is sent at Start, and at Stop with an added `batchCount`.
+- It goes through the same disk queue, so the Start copy is sent before batch 0 and the Stop copy
+  after the last batch. Queue files are named `<createdMs>_<sessionId>_meta-start|stop.json.gz`, next
+  to `<createdMs>_<sessionId>_<seq>.json.gz` for batches.
+- The idempotency key is `<sessionId>:meta-start|stop`.
+- `batchSeq` is assigned only to batches actually queued, so `batchCount` tells the backend exactly
+  which `0…batchCount-1` to expect. Windows recorded while upload was OFF don't consume a number.
+- Batches are about 30–50 KB of JSON; a warning is logged above 180 KB (the function's limit is 200 KB).
+
+One request at a time, oldest first, with backoff 1 → 30 s; 2xx/409 means done.
+- **404 / 401 / 403** are retried; they mean a config error.
+- **Redirects** are refused.
+- **A batch that keeps failing on the server** moves to the back of the queue.
+
+The API URL and key are entered in **Settings** at runtime (key in the Keychain); nothing secret is
+in the repo.
+
+## Privacy
+
+- Audio (`audio_*.m4a`) is never sent live. It is in the session folder and the export, so
+  `tools/upload` should exclude `*.m4a` if audio must stay on the phone. On bus/tram, audio
+  recording is OFF by default (level meter only).
+- GPS traces and `people.raterName` are personal data. Use pseudonyms such as "R1" for raters.
+  Sessions live in Documents: they are visible in the Files app and included in device backups.
+- **Delete session** (session detail) removes the folder and its queued upload batches. The
+  device ID is per phone (Keychain, this-device-only).
 
 ## Robustness
 
 - Writes are buffered and flushed every 0.5 s (fsync every ~10 s) on a background queue; a crash
   loses < 1 s. Files are append-only.
-- On launch, sessions without `endedAtUtc` are marked `"recovered": true`; a torn last CSV
-  line is trimmed and stats are rebuilt from the files.
+- On launch, sessions without `endedAtUtc` are marked `"recovered": true`, a torn last CSV line is
+  trimmed, and stats are rebuilt from the files, with the duration measured from the session start.
+- The audio segment being recorded at a crash has no MP4 index and isn't playable. It is listed in
+  `stats.audioFilesIncomplete` and in `app_log.txt`.
+- The UI-test data reset (`-uiTestingReset`) exists only in Simulator Debug builds, so it can never
+  wipe sessions on the phone.
 - Screen never locks while recording; Stop needs a 2 s hold; there is no pause.
 - Background modes `location` + `audio` keep recording alive if the app is backgrounded (WARN).
 - Every warning rule of spec §7 is implemented in `Core/HealthEvaluator.swift`. New PROBLEMs
@@ -166,12 +208,15 @@ xcodebuild -project SensorRecorder.xcodeproj -scheme SensorRecorder \
 
 - `quick_check.py <session_folder>`: dry-run verifier (spec §10). Stdlib only.
 - `mock_ingest_server.py`: local stand-in for the Azure ingest function (same check order, strict schema,
-  200 for duplicates by default). Point the app's Settings at `http://<mac-ip>:8765`; the phone asks
-  for Local Network permission the first time.
-- `test_tools.py`: tests for both tools, including a cross-language contract test. A batch written by
-  the app's real encoder (`tools/fixtures/ingest_batch_v1.json.gz`, regenerated by the unit tests) must
-  be accepted by the mock backend.
-  Point the app's Settings at `http://<mac-ip>:8080`.
+  200 for duplicates by default). It listens on loopback by default (Simulator). For the phone, run it
+  with `--host 0.0.0.0 --key <throwaway>` and set the app's URL to `http://<mac-ip>:<port>`; the phone
+  asks for Local Network permission the first time.
+- `test_tools.py`: tests for both tools. It includes cross-language contract tests:
+  - a batch written by the app's real encoder (`tools/fixtures/ingest_batch_v1.json.gz`) must be
+    accepted by the mock backend;
+  - the CSV headers in `tools/fixtures/csv_headers.json` must match `quick_check.py`.
+- The Swift tests compare against both fixtures and never rewrite them. After a deliberate format
+  change, regenerate with `TEST_RUNNER_REGENERATE_FIXTURES=1 xcodebuild … -only-testing:SensorRecorderTests/ContractFixtureTests test`.
 
 **Before the real drive, do the mandatory dry run (spec §10).** Record 5–10 min on the real
 phone, export it, and run `python3 tools/quick_check.py <folder>`.

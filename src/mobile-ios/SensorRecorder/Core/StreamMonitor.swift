@@ -40,7 +40,7 @@ enum StreamID: String, CaseIterable, Sendable, Codable {
         switch self {
         case .deviceMotion, .accel, .gyro, .mag, .audioLevel: return 1
         case .gps: return 3
-        case .device: return 3 * RecordingSession.deviceInterval
+        case .device: return 3 / (StreamID.device.expectedHz ?? 0.2) // 3 missed polls
         case .heading, .barometer, .absAltitude, .activity: return .infinity
         }
     }
@@ -93,7 +93,7 @@ struct GapTracker: Equatable {
                 }
             }
         }
-        if last == nil || t > last! { last = t }
+        if let l = last { if t > l { last = t } } else { last = t }
     }
 
     var meanRateHz: Double {
@@ -190,6 +190,9 @@ enum SessionAnalyzer {
         var audioFiles: [String] = []
         var totalBytes: Int64 = 0
 
+        /// Latest sample timestamp (t_up) over all streams.
+        var lastSampleUp: Double? { streams.values.compactMap(\.last).max() }
+
         var durationSec: Double {
             let spans = streams.values.compactMap { t -> (Double, Double)? in
                 guard let f = t.first, let l = t.last else { return nil }
@@ -211,6 +214,36 @@ enum SessionAnalyzer {
                          audioFiles: audioFiles, fileSizes: fileSizes, totalBytes: totalBytes,
                          writeErrors: 0, uploadBatchesCreated: 0)
         }
+    }
+
+    /// MP4/M4A files whose top-level boxes contain no `moov` (index). AVAudioRecorder writes it on
+    /// stop(), so the segment being recorded when the app died is unplayable. Pure Foundation.
+    static func unplayableAudioFiles(in folder: URL) -> [String] {
+        let fm = FileManager.default
+        let names = ((try? fm.contentsOfDirectory(atPath: folder.path)) ?? []).filter { $0.hasSuffix(".m4a") }.sorted()
+        return names.filter { !hasMoovBox(folder.appendingPathComponent($0)) }
+    }
+
+    static func hasMoovBox(_ url: URL) -> Bool {
+        guard let h = try? FileHandle(forReadingFrom: url) else { return false }
+        defer { try? h.close() }
+        guard let end = try? h.seekToEnd() else { return false }
+        var offset: UInt64 = 0
+        while offset + 8 <= end {
+            guard (try? h.seek(toOffset: offset)) != nil, let hdr = try? h.read(upToCount: 16), hdr.count >= 8 else { return false }
+            let b = [UInt8](hdr)
+            var size = UInt64(b[0]) << 24 | UInt64(b[1]) << 16 | UInt64(b[2]) << 8 | UInt64(b[3])
+            let type = String(decoding: b[4..<8], as: UTF8.self)
+            if type == "moov" { return true }
+            if size == 1, b.count >= 16 { // 64-bit largesize
+                size = b[8..<16].reduce(0) { $0 << 8 | UInt64($1) }
+            } else if size == 0 { // box extends to end of file
+                return false
+            }
+            guard size >= 8 else { return false }
+            offset += size
+        }
+        return false
     }
 
     static func analyze(folder: URL) -> Result {

@@ -26,9 +26,17 @@ final class IngestBatchTests: XCTestCase {
         XCTAssertEqual(acc.batchesCreated, 2)
 
         let obj = try XCTUnwrap(JSONSerialization.jsonObject(with: b.jsonData()) as? [String: Any])
-        XCTAssertEqual(Set(obj.keys), ["schemaVersion", "sessionId", "deviceId", "batchSeq", "t0Utc", "t0Up", "units",
-                                       "deviceMotion", "accelRaw", "gyroRaw", "location", "altimeter", "audioLevel",
-                                       "labels", "device"])
+        // Spec §6 keys (all must stay) + additive hackathon-rule keys.
+        let specKeys: Set<String> = ["schemaVersion", "sessionId", "deviceId", "batchSeq", "t0Utc", "t0Up", "units",
+                                     "deviceMotion", "accelRaw", "gyroRaw", "location", "altimeter", "audioLevel",
+                                     "labels", "device"]
+        XCTAssertEqual(Set(obj.keys), specKeys.union(["eventType", "source", "t0UtcMs", "fieldUnits"]))
+        XCTAssertEqual(obj["eventType"] as? String, "sensor_batch")
+        XCTAssertEqual(obj["source"] as? String, "live")
+        XCTAssertEqual((obj["t0UtcMs"] as? NSNumber)?.int64Value, 1_763_716_532_000)
+        let fieldUnits = try XCTUnwrap(obj["fieldUnits"] as? [String: String])
+        XCTAssertEqual(fieldUnits["location.lat"], "deg")
+        XCTAssertEqual(fieldUnits["audioLevel.avgDbfs"], "dBFS")
         XCTAssertEqual(obj["schemaVersion"] as? Int, 1)
         XCTAssertEqual(obj["t0Utc"] as? String, "2025-11-21T09:15:32.000Z")
         XCTAssertEqual(obj["units"] as? [String: String], ["accel": "g", "gyro": "rad/s", "speed": "m/s", "pressure": "kPa"])
@@ -40,7 +48,8 @@ final class IngestBatchTests: XCTestCase {
         XCTAssertEqual(dm["t"]?[1] ?? 0, 0.01, accuracy: 1e-9)
         XCTAssertEqual(dm["ua_x"]?.first, 0.012346) // rounded to 6 decimals
         let loc = try XCTUnwrap((obj["location"] as? [[String: Any]])?.first)
-        XCTAssertEqual(Set(loc.keys), ["tUtcMs", "lat", "lon", "alt", "hAcc", "speed", "speedAcc", "course"])
+        XCTAssertEqual(Set(loc.keys), ["tUtcMs", "lat", "lon", "alt", "hAcc", "speed", "speedAcc", "course", "isSimulated"])
+        XCTAssertEqual(loc["isSimulated"] as? Bool, false)
         XCTAssertEqual(loc["tUtcMs"] as? Int64, 1_763_716_532_120)
         XCTAssertEqual(loc["lat"] as? Double, 46.77121235)
         let label = try XCTUnwrap((obj["labels"] as? [[String: Any]])?.first)
@@ -179,7 +188,7 @@ final class UploadQueueTests: XCTestCase {
         queue.start()
         defer { queue.stop() }
         queue.kick()
-        let deadline = Date().addingTimeInterval(5)
+        let deadline = Date().addingTimeInterval(ciTimeout)
         while !queue.pendingFiles().isEmpty && Date() < deadline { try await Task.sleep(nanoseconds: 50_000_000) }
         XCTAssertTrue(queue.pendingFiles().isEmpty)
         XCTAssertEqual(transport.requests.count, 6)

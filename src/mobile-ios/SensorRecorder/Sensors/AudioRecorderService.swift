@@ -140,7 +140,10 @@ final class AudioRecorderService: NSObject, AudioSource, AVAudioRecorderDelegate
     static func configure(_ session: AVAudioSession) throws {
         try session.setCategory(.playAndRecord, mode: .measurement, options: [.defaultToSpeaker, .mixWithOthers])
         try? session.setPreferredSampleRate(48_000)
-        try? session.setAllowHapticsAndSystemSoundsDuringRecording(true)
+        do { try session.setAllowHapticsAndSystemSoundsDuringRecording(true) } catch {
+            // Without this the sickness prompt / PROBLEM alerts are silent: make it visible.
+            appLogger.error("allowHapticsAndSystemSoundsDuringRecording failed: \(error.localizedDescription, privacy: .public)")
+        }
     }
 
     // MARK: - Segments
@@ -315,7 +318,7 @@ final class AudioRecorderService: NSObject, AudioSource, AVAudioRecorderDelegate
 enum AudioSegmentPolicy {
     enum Action: Equatable { case none, rotate, restart }
 
-    static let restartEvery: TimeInterval = 5
+    static let restartEvery: TimeInterval = AudioSegmentPolicyConstants.restartEvery
 
     static func decide(now: TimeInterval, isRecording: Bool, segmentStartedUp: TimeInterval, wantRecording: Bool,
                        interrupted: Bool, interruptedAtUp: TimeInterval, lastRestartAttemptUp: TimeInterval) -> Action {

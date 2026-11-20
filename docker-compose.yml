@@ -9,8 +9,9 @@ services:
   db:
     image: postgis/postgis:17-3.5
     environment:
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD first}
-      POSTGRES_DB: roadride
+      # Pass-through: taken from your shell; the container refuses to start without it.
+      - POSTGRES_PASSWORD
+      - POSTGRES_DB=roadride
     ports:
       - "127.0.0.1:5433:5432"
     healthcheck:

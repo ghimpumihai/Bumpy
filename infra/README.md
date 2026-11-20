@@ -30,7 +30,7 @@ Contracts the service code must follow (set as environment variables by Terrafor
 | Service | Port / trigger | Logs in as | Notes |
 |---|---|---|---|
 | ingest function | `POST /api/ingest`, `PUT /api/ingest/sessions/{id}` | `AZURE_CLIENT_ID` (ingest identity) | reads the secret `DEVICE_KEYS_SECRET_NAME` from `KEY_VAULT_URI`: JSON `{deviceId: sha256hex(key)}` |
-| read API | listens on **port 80** | PG user `reader` | allow the origins in `CORS_ALLOWED_ORIGINS` |
+| read API | listens on **port 8000** (non-root) | PG user `reader` | allow the origins in `CORS_ALLOWED_ORIGINS` |
 | processor | no ingress, `RUN_MODE=stream` | PG user `writer` | |
 | finalize job | Service Bus queue `session-ready`, `RUN_MODE=finalize` | PG user `writer` | renew the message lock while working |
 | aggregate job | manual, `RUN_MODE=aggregate` | PG user `writer` | |

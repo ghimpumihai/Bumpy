@@ -1,15 +1,16 @@
 name: deploy-services
 
-# Builds the processor image, runs the migrate job and waits for it, then updates the stream
-# processor (plan §13). Migrations always run before the processor sees new code.
+# Builds the processor and read API images, runs the migrate job and waits for it, then updates the
+# stream processor and the read API (plan §13). Migrations always run before new code sees the database.
 # Needs the `prod` environment and the repo variables AZURE_CLIENT_ID_DEPLOY, AZURE_TENANT_ID,
-# AZURE_SUBSCRIPTION_ID, plus ACR_NAME and RESOURCE_GROUP (from `.\infra\tf.ps1 output`).
+# AZURE_SUBSCRIPTION_ID, ACR_NAME and RESOURCE_GROUP.
 
 on:
   push:
     branches: [main]
     paths:
       - "services/processor/**"
+      - "services/read-api/**"
       - "db/**"
       - ".github/workflows/deploy-services.yml"
   workflow_dispatch:
@@ -25,6 +26,8 @@ concurrency:
 env:
   MIGRATE_JOB: caj-roadride-migrate
   PROCESSOR_APP: ca-roadride-processor
+  READ_API_APP: ca-roadride-read-api
+  READ_API_PORT: "8000" # also infra/modules/compute target_port
 
 jobs:
   deploy:
@@ -39,21 +42,26 @@ jobs:
           tenant-id: ${{ vars.AZURE_TENANT_ID }}
           subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
 
-      - name: Build and push the image
+      - name: Build and push the images
         id: image
         env:
           ACR_NAME: ${{ vars.ACR_NAME }}
         run: |
           az acr login --name "$ACR_NAME"
-          image="$ACR_NAME.azurecr.io/processor:${GITHUB_SHA::12}"
-          docker build -f services/processor/Dockerfile -t "$image" .
-          docker push "$image"
-          echo "ref=$image" >> "$GITHUB_OUTPUT"
+          tag="${GITHUB_SHA::12}"
+          processor="$ACR_NAME.azurecr.io/processor:$tag"
+          read_api="$ACR_NAME.azurecr.io/read-api:$tag"
+          docker build -f services/processor/Dockerfile -t "$processor" .
+          docker build -t "$read_api" services/read-api
+          docker push "$processor"
+          docker push "$read_api"
+          echo "processor=$processor" >> "$GITHUB_OUTPUT"
+          echo "read_api=$read_api" >> "$GITHUB_OUTPUT"
 
       - name: Run the migrate job and wait for it
         env:
           RG: ${{ vars.RESOURCE_GROUP }}
-          IMAGE: ${{ steps.image.outputs.ref }}
+          IMAGE: ${{ steps.image.outputs.processor }}
         run: |
           az config set extension.use_dynamic_install=yes_without_prompt >/dev/null
           az containerapp job update -n "$MIGRATE_JOB" -g "$RG" --image "$IMAGE" --output none
@@ -75,5 +83,23 @@ jobs:
       - name: Update the stream processor
         env:
           RG: ${{ vars.RESOURCE_GROUP }}
-          IMAGE: ${{ steps.image.outputs.ref }}
+          IMAGE: ${{ steps.image.outputs.processor }}
         run: az containerapp update -n "$PROCESSOR_APP" -g "$RG" --image "$IMAGE" --output none
+
+      - name: Update the read API
+        env:
+          RG: ${{ vars.RESOURCE_GROUP }}
+          IMAGE: ${{ steps.image.outputs.read_api }}
+        run: |
+          # The port is in Terraform too; setting it here keeps image and ingress in step whichever runs first.
+          az containerapp ingress update -n "$READ_API_APP" -g "$RG" --target-port "$READ_API_PORT" --output none
+          az containerapp update -n "$READ_API_APP" -g "$RG" --image "$IMAGE" --output none
+          fqdn=$(az containerapp show -n "$READ_API_APP" -g "$RG" --query properties.configuration.ingress.fqdn -o tsv)
+          for i in $(seq 1 30); do
+            code=$(curl -s -o /dev/null -w '%{http_code}' "https://$fqdn/api/overview" || true)
+            echo "GET /api/overview -> $code"
+            [ "$code" = "200" ] && exit 0
+            sleep 10
+          done
+          echo "::error::read API did not answer 200 on /api/overview"
+          exit 1

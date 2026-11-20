@@ -9,6 +9,8 @@ struct IngestBatch: Encodable, Equatable {
         var g_x: [Double] = [], g_y: [Double] = [], g_z: [Double] = []
         var rr_x: [Double] = [], rr_y: [Double] = [], rr_z: [Double] = []
         var q_w: [Double] = [], q_x: [Double] = [], q_y: [Double] = [], q_z: [Double] = []
+        // Additive (02 D32: batches carry the full dataset): attitude angles as in device_motion.csv.
+        var roll: [Double] = [], pitch: [Double] = [], yaw: [Double] = []
     }
 
     struct XYZ: Encodable, Equatable {
@@ -22,8 +24,12 @@ struct IngestBatch: Encodable, Equatable {
         var hAcc: Double, speed: Double, speedAcc: Double, course: Double
         /// iOS `sourceInformation.isSimulatedBySoftware`; null when iOS doesn't say.
         var isSimulated: Bool?
+        // Additive (full dataset, same as location.csv): ellipsoidal altitude, accuracies.
+        var ellAlt: Double = 0, vAcc: Double = 0, courseAcc: Double = 0
 
-        enum CodingKeys: String, CodingKey { case tUtcMs, lat, lon, alt, hAcc, speed, speedAcc, course, isSimulated }
+        enum CodingKeys: String, CodingKey {
+            case tUtcMs, lat, lon, alt, hAcc, speed, speedAcc, course, isSimulated, ellAlt, vAcc, courseAcc
+        }
         func encode(to encoder: Encoder) throws {
             var c = encoder.container(keyedBy: CodingKeys.self)
             try c.encode(tUtcMs, forKey: .tUtcMs)
@@ -31,7 +37,29 @@ struct IngestBatch: Encodable, Equatable {
             try c.encode(hAcc, forKey: .hAcc); try c.encode(speed, forKey: .speed)
             try c.encode(speedAcc, forKey: .speedAcc); try c.encode(course, forKey: .course)
             try c.encode(isSimulated, forKey: .isSimulated) // explicit null
+            try c.encode(ellAlt, forKey: .ellAlt); try c.encode(vAcc, forKey: .vAcc)
+            try c.encode(courseAcc, forKey: .courseAcc)
         }
+    }
+
+    /// Compass heading (L2), Date-based like location.
+    struct Heading: Encodable, Equatable {
+        var tUtcMs: Int64
+        var magHeading: Double, trueHeading: Double, headingAcc: Double
+        var x: Double, y: Double, z: Double
+    }
+
+    struct AbsAltitude: Encodable, Equatable {
+        var t: [Double] = []
+        var altitudeM: [Double] = [], accuracyM: [Double] = [], precisionM: [Double] = []
+    }
+
+    /// CMMotionActivity changes (A1): the backend's bus/stop segmentation uses these.
+    struct Activity: Encodable, Equatable {
+        var t: Double
+        var stationary: Bool, walking: Bool, running: Bool, automotive: Bool, cycling: Bool, unknown: Bool
+        var confidence: Int
+        var startUtcMs: Int64
     }
 
     struct Altimeter: Encodable, Equatable {
@@ -66,6 +94,11 @@ struct IngestBatch: Encodable, Equatable {
         var battery: Double
         var thermal: String
         var lowPower: Bool
+        // Additive (full dataset, same as device.csv).
+        var batteryState: String = "unknown"
+        var freeDiskBytes: Int64 = -1
+        var netStatus: String = "unknown"
+        var netType: String = "none"
     }
 
     var schemaVersion = 1
@@ -93,7 +126,14 @@ struct IngestBatch: Encodable, Equatable {
         "location.speedAcc": "m/s", "location.course": "deg (-1 = invalid)",
         "altimeter.relAltM": "m", "altimeter.pressureKpa": "kPa",
         "audioLevel.avgDbfs": "dBFS", "audioLevel.peakDbfs": "dBFS",
-        "device.battery": "fraction 0-1 (-1 = unknown)",
+        "device.battery": "fraction 0-1 (-1 = unknown)", "device.freeDiskBytes": "bytes",
+        "deviceMotion.roll": "rad", "deviceMotion.pitch": "rad", "deviceMotion.yaw": "rad",
+        "magRaw": "µT", "heading.magHeading": "deg", "heading.trueHeading": "deg (-1 = invalid)",
+        "heading.headingAcc": "deg (-1 = invalid)", "heading.xyz": "µT", "heading.tUtcMs": "ms since Unix epoch (UTC)",
+        "absAltitude.altitudeM": "m", "absAltitude.accuracyM": "m", "absAltitude.precisionM": "m",
+        "activity.t": "s (relative to t0Up)", "activity.confidence": "0 low, 1 medium, 2 high",
+        "activity.startUtcMs": "ms since Unix epoch (UTC)",
+        "location.ellAlt": "m", "location.vAcc": "m (-1 = invalid)", "location.courseAcc": "deg (-1 = invalid)",
     ]
     var deviceMotion = DeviceMotion()
     var accelRaw = XYZ()
@@ -103,6 +143,11 @@ struct IngestBatch: Encodable, Equatable {
     var audioLevel = AudioLevel()
     var labels: [Label] = []
     var device: Device
+    // Additive streams (02 D32: "each batch holds every sensor at full rate; only raw audio stays").
+    var magRaw = XYZ()
+    var heading: [Heading] = []
+    var absAltitude = AbsAltitude()
+    var activity: [Activity] = []
 
     var sampleCount: Int {
         deviceMotion.t.count + accelRaw.t.count + gyroRaw.t.count + location.count
@@ -132,6 +177,10 @@ final class BatchAccumulator: @unchecked Sendable {
         var alt: [AltimeterSample] = []
         var audio: [AudioLevelSample] = []
         var labels: [(t: Double, type: String, value: String?, note: String?)] = []
+        var mag: [Vec3Sample] = []
+        var heading: [HeadingSample] = []
+        var absAlt: [AbsoluteAltitudeSample] = []
+        var activity: [ActivitySample] = []
     }
 
     private let pending = Locked(Pending())
@@ -150,6 +199,10 @@ final class BatchAccumulator: @unchecked Sendable {
     func add(_ s: LocationSample) { pending.withLock { $0.location.append(s) } }
     func add(_ s: AltimeterSample) { pending.withLock { $0.alt.append(s) } }
     func add(_ s: AudioLevelSample) { pending.withLock { $0.audio.append(s) } }
+    func addMag(_ s: Vec3Sample) { pending.withLock { $0.mag.append(s) } }
+    func add(_ s: HeadingSample) { pending.withLock { $0.heading.append(s) } }
+    func add(_ s: AbsoluteAltitudeSample) { pending.withLock { $0.absAlt.append(s) } }
+    func add(_ s: ActivitySample) { pending.withLock { $0.activity.append(s) } }
     func addLabel(t: Double, type: String, value: String?, note: String?) {
         pending.withLock { $0.labels.append((t, type, value, note)) }
     }
@@ -182,7 +235,9 @@ final class BatchAccumulator: @unchecked Sendable {
                             t0Utc: ISO8601.string(Date(timeIntervalSince1970: t0UtcMs / 1000)),
                             t0Up: round6(t0Up), t0UtcMs: t0UtcMs.isFinite ? Int64(t0UtcMs.rounded()) : 0,
                             device: .init(battery: Double(device.batteryLevel),
-                                          thermal: device.thermal.rawValue, lowPower: device.lowPowerMode))
+                                          thermal: device.thermal.rawValue, lowPower: device.lowPowerMode,
+                                          batteryState: device.batteryState, freeDiskBytes: device.freeDiskBytes,
+                                          netStatus: device.networkStatus, netType: device.networkType))
         var dm = IngestBatch.DeviceMotion()
         dm.t.reserveCapacity(p.dm.count)
         for s in p.dm {
@@ -192,6 +247,7 @@ final class BatchAccumulator: @unchecked Sendable {
             dm.rr_x.append(round6(s.rotationRate.x)); dm.rr_y.append(round6(s.rotationRate.y)); dm.rr_z.append(round6(s.rotationRate.z))
             dm.q_w.append(round6(s.quaternion.w)); dm.q_x.append(round6(s.quaternion.x))
             dm.q_y.append(round6(s.quaternion.y)); dm.q_z.append(round6(s.quaternion.z))
+            dm.roll.append(round6(s.roll)); dm.pitch.append(round6(s.pitch)); dm.yaw.append(round6(s.yaw))
         }
         b.deviceMotion = dm
         b.accelRaw = Self.xyz(p.accel, rel)
@@ -199,7 +255,23 @@ final class BatchAccumulator: @unchecked Sendable {
         b.location = p.location.map {
             .init(tUtcMs: Int64($0.utcMs.rounded()), lat: round8($0.lat), lon: round8($0.lon), alt: round6($0.alt),
                   hAcc: round6($0.hAcc), speed: round6($0.speed), speedAcc: round6($0.speedAcc), course: round6($0.course),
-                  isSimulated: $0.isSimulated)
+                  isSimulated: $0.isSimulated, ellAlt: round6($0.ellAlt), vAcc: round6($0.vAcc), courseAcc: round6($0.courseAcc))
+        }
+        b.magRaw = Self.xyz(p.mag, rel)
+        b.heading = p.heading.map {
+            .init(tUtcMs: Int64($0.utcMs.rounded()), magHeading: round6($0.magneticHeading), trueHeading: round6($0.trueHeading),
+                  headingAcc: round6($0.accuracy), x: round6($0.raw.x), y: round6($0.raw.y), z: round6($0.raw.z))
+        }
+        var abs = IngestBatch.AbsAltitude()
+        for s in p.absAlt {
+            abs.t.append(rel(s.t)); abs.altitudeM.append(round6(s.altitudeM))
+            abs.accuracyM.append(round6(s.accuracyM)); abs.precisionM.append(round6(s.precisionM))
+        }
+        b.absAltitude = abs
+        b.activity = p.activity.map {
+            .init(t: rel($0.t), stationary: $0.stationary, walking: $0.walking, running: $0.running, automotive: $0.automotive,
+                  cycling: $0.cycling, unknown: $0.unknown, confidence: $0.confidence,
+                  startUtcMs: $0.startUtcMs.isFinite ? Int64($0.startUtcMs.rounded()) : 0)
         }
         var alt = IngestBatch.Altimeter()
         for s in p.alt {

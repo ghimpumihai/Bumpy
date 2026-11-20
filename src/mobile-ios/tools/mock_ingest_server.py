@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """mock_ingest_server.py: stdlib stand-in for the Azure ingest function (
-decisions/02-infrastructure-plan.md §6/§7; app contract spec §6) for local testing.
+decisions/02-infrastructure-plan.md §5; app contract spec §6, §6.1) for local testing.
 
 Usage:
     python3 -I tools/mock_ingest_server.py [--port 8080] [--host 127.0.0.1] [--key KEY] [--out DIR]
@@ -24,7 +24,7 @@ Both are checked in the same order as the ingest function:
     2. Content-Encoding exactly "gzip" (400 otherwise, e.g. "x-gzip" or "gzip, br"),
        Content-Type application/json (400)
     3. gunzip with size caps: 413 compressed > 20 MB or decompressed > 200 KB (the function's
-       body limit, 02 §6); 400 truncated stream, trailing data or more than one gzip member
+       body limit, 02 §5); 400 truncated stream, trailing data or more than one gzip member
     4. JSON parse (400; NaN / Infinity / out-of-range numbers rejected)
     5. schema (400, reason in JSON "error")
        POST: schemaVersion int 1, batchSeq int >= 0, t0Utc "YYYY-MM-DDTHH:MM:SS.mmmZ", exact
@@ -81,6 +81,10 @@ COLUMNAR = {
     "audioLevel": ["avgDbfs", "peakDbfs"],
 }
 LOCATION_KEYS = ["lat", "lon", "alt", "hAcc", "speed", "speedAcc", "course"]
+# Additive full-dataset blocks (02 D32): optional, validated when present.
+OPTIONAL_COLUMNAR = {"magRaw": ["x", "y", "z"], "absAltitude": ["altitudeM", "accuracyM", "precisionM"]}
+HEADING_NUM = ["magHeading", "trueHeading", "headingAcc", "x", "y", "z"]
+ACTIVITY_BOOL = ["stationary", "walking", "running", "automotive", "cycling", "unknown"]
 # ISO8601.string in the app: ISO8601DateFormatter [.withInternetDateTime, .withFractionalSeconds]
 T0_UTC_RE = re.compile(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$")
 
@@ -152,6 +156,34 @@ def validate(b):
                 raise Invalid(f"{block}.{c} has length {len(arr)} but {block}.t has {n}")
             if not all(is_num(v) for v in arr):
                 raise Invalid(f"{block}.{c} contains non-numeric values")
+
+    for block, cols in OPTIONAL_COLUMNAR.items():
+        if block not in b:
+            continue
+        blk = b[block]
+        if not isinstance(blk, dict) or not isinstance(blk.get("t"), list):
+            raise Invalid(f"{block} must be an object with a t array")
+        n = len(blk["t"])
+        for c in ["t"] + cols:
+            if c not in blk:
+                raise Invalid(f"{block}.{c} missing")
+        for c, arr in blk.items():
+            if not isinstance(arr, list) or len(arr) != n or not all(is_num(v) for v in arr):
+                raise Invalid(f"{block}.{c} must be a numeric array of length {n}")
+    if "heading" in b:
+        if not isinstance(b["heading"], list):
+            raise Invalid("heading must be an array")
+        for i, h in enumerate(b["heading"]):
+            if not isinstance(h, dict) or not is_int(h.get("tUtcMs")) or not all(is_num(h.get(k)) for k in HEADING_NUM):
+                raise Invalid(f"heading[{i}] needs int tUtcMs and numeric {', '.join(HEADING_NUM)}")
+    if "activity" in b:
+        if not isinstance(b["activity"], list):
+            raise Invalid("activity must be an array")
+        for i, a in enumerate(b["activity"]):
+            if (not isinstance(a, dict) or not is_num(a.get("t")) or not is_int(a.get("startUtcMs"))
+                    or not all(isinstance(a.get(k), bool) for k in ACTIVITY_BOOL)
+                    or a.get("confidence") not in (0, 1, 2) or isinstance(a.get("confidence"), bool)):
+                raise Invalid(f"activity[{i}] needs numeric t, int startUtcMs, booleans {', '.join(ACTIVITY_BOOL)}, confidence 0|1|2")
 
     if not isinstance(b["location"], list):
         raise Invalid("location must be an array")

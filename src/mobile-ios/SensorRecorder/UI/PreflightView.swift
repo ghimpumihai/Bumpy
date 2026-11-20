@@ -133,7 +133,7 @@ private struct CheckRow: View {
             VStack(alignment: .leading, spacing: 2) {
                 HStack {
                     Text(check.title).font(.body.weight(.medium))
-                    if !check.required { Text("optional").font(.caption2).foregroundStyle(.secondary) }
+                    if !check.required && check.id != "upload" { Text("optional").font(.caption2).foregroundStyle(.secondary) }
                 }
                 if !check.detail.isEmpty {
                     Text(check.detail).font(.caption.monospacedDigit()).foregroundStyle(.secondary)

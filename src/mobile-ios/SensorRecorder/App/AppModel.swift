@@ -185,7 +185,9 @@ enum SetupDefaults {
     static func load() -> SessionSetup {
         guard let data = UserDefaults.standard.data(forKey: key),
               let s = try? JSONDecoder().decode(Stored.self, from: data) else { return SessionSetup() }
-        var setup = SessionSetup(vehicle: s.vehicle, audioEnabled: s.audioEnabled ?? !s.vehicle.isPublicTransport,
+        // Bus/tram always start with audio OFF (spec §3.5, GDPR), whatever the last trip used.
+        let audio = s.vehicle.isPublicTransport ? false : (s.audioEnabled ?? true)
+        var setup = SessionSetup(vehicle: s.vehicle, audioEnabled: audio,
                                  mount: s.mount, people: s.people, conditions: s.conditions)
         setup.mount.photoFile = nil
         return setup

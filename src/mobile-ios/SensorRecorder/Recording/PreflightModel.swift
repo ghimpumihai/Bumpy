@@ -92,7 +92,7 @@ final class PreflightModel {
             Check(id: "dev.battery", title: "Battery ≥ 50 % or charging", required: true),
             Check(id: "dev.thermal", title: "Thermal nominal / fair", required: true),
             Check(id: "dev.disk", title: "Free disk ≥ 2 GB", required: true),
-            Check(id: "upload", title: "Upload test (optional)", required: false),
+            Check(id: "upload", title: "Upload test (warning only)", required: false),
         ]
     }
 

@@ -106,7 +106,7 @@ struct HelpView: View {
         List {
             Section("Before driving") {
                 step(1, "Phone charged and plugged into the car charger. Low Power Mode OFF, Do Not Disturb ON.")
-                step(2, "Mount the phone rigidly: taped or clamped flat on the center console, screen up, top of phone toward the vehicle front. Avoid wobbly air-vent mounts. Never move it during the drive. If it moves, press PHONE MOVED.")
+                step(2, "Mount the phone rigidly: taped or clamped flat on the center console, screen up, top of phone toward the vehicle front. Avoid wobbly air-vent mounts, which add their own vibration. Never move it during the drive; if it moves, press PHONE MOVED.")
                 step(3, "Fill in the session setup and take the mount photo.")
                 step(4, "Run the preflight; everything must be green.")
                 step(5, "Start recording, then press SYNC TAP and knock firmly 3 times on the phone/mount.")
@@ -118,14 +118,14 @@ struct HelpView: View {
                 bullet("Winding road / roundabouts / curves (lateral sway, the main sickness driver)")
                 bullet("Stop-and-go traffic (longitudinal sway)")
                 bullet("Some faster road segment if possible")
-                bullet("Drive one rough segment twice at different speeds (e.g. 20 and 40 km/h)")
+                bullet("If possible, drive one rough segment twice at different speeds (e.g. 20 and 40 km/h). This lets us prove the speed normalization works.")
                 bullet("Sickness ratings every 2 min from a rear passenger (the app prompts).")
                 bullet("The operator is a passenger, never the driver.")
             }
             Section("After the drive") {
                 step(1, "30 s stationary with the engine idling, then SYNC TAP + 3 knocks, then hold to Stop.")
                 step(2, "Check the summary screen for red rows.")
-                step(3, "Immediately export the session folder (AirDrop to a laptop, plus Files → iCloud Drive). Keep two copies before doing anything else.")
+                step(3, "Immediately export the session folder (AirDrop to a laptop, plus Files → iCloud Drive or another copy). Keep two copies before doing anything else.")
             }
             Section("Dry run first") {
                 Text("Do a 5–10 minute test (walk or drive around the block), export it and run tools/quick_check.py on a laptop: motion ~100 Hz with max gap < 0.1 s, GPS ~1 Hz with sane coordinates, labels present, audio plays, t_utc_ms is the correct real time.")

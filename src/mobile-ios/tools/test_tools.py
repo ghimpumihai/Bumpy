@@ -862,6 +862,22 @@ class MockIngestServerTests(unittest.TestCase):
         status, payload = self.srv.request("POST", "/api/ingest", raw, headers)
         self.assertEqual(status, 201, f"app-encoded batch rejected by the mock backend: {payload}")
 
+    def test_full_dataset_blocks_validated_when_present(self):
+        b = make_batch(seq=0)
+        b["magRaw"] = {"t": [0.0, 0.02], "x": [1.0, 2.0], "y": [0.0, 0.0], "z": [-40.0, -40.0]}
+        b["absAltitude"] = {"t": [0.5], "altitudeM": [352.0], "accuracyM": [3.5], "precisionM": [0.4]}
+        b["heading"] = [{"tUtcMs": 1763716532100, "magHeading": 91.0, "trueHeading": 95.0, "headingAcc": 10.0,
+                         "x": 1.0, "y": 2.0, "z": 3.0}]
+        b["activity"] = [{"t": 0.6, "stationary": False, "walking": False, "running": False, "automotive": True,
+                          "cycling": False, "unknown": False, "confidence": 2, "startUtcMs": 1763716500000}]
+        self.assertEqual(self.srv.ingest(b)[0], 201)
+        bad = make_batch(seq=1)
+        bad["magRaw"] = {"t": [0.0, 0.02], "x": [1.0], "y": [0.0, 0.0], "z": [0.0, 0.0]}
+        self.assertEqual(self.srv.ingest(bad)[0], 400)
+        bad2 = make_batch(seq=2)
+        bad2["activity"] = [{"t": 0.6, "automotive": "yes", "confidence": 5, "startUtcMs": 1}]
+        self.assertEqual(self.srv.ingest(bad2)[0], 400)
+
     def test_contract_session_metadata_fixture_from_swift(self):
         """§6.1 Stop copy built by the app's own code (RecordingSession.sessionMetadataBody)."""
         path = os.path.join(os.path.dirname(FIXTURE), "session_meta_stop_v1.json.gz")

@@ -113,7 +113,7 @@ final class RecordingSession: @unchecked Sendable {
     static let anchorInterval: TimeInterval = 10
     /// Cached GPS fixes older than this before the session start are not recorded.
     static let staleFixMargin: TimeInterval = 5
-    /// The ingest function rejects bodies over 200 KB (02 §6); warn a little before that.
+    /// The ingest function rejects bodies over 200 KB (02 §5); warn a little before that.
     static let maxBatchJSONBytes = 180 * 1024
     static let deviceInterval: TimeInterval = 5
     static let batchInterval: TimeInterval = 2
@@ -294,6 +294,7 @@ final class RecordingSession: @unchecked Sendable {
             let arrival = tb.uptimeNow()
             w.append(.magRaw, Self.xyzRow(s, tb))
             mon[.mag]?.record(t: s.t, arrival: arrival)
+            acc.addMag(s)
         }
         cb.error = { msg in w.log(.error, msg) }
         deps.motion.start(cb)
@@ -349,6 +350,7 @@ final class RecordingSession: @unchecked Sendable {
                 CSV.f6(s.accuracy), CSV.f6(s.raw.x), CSV.f6(s.raw.y), CSV.f6(s.raw.z),
             ]))
             mon[.heading]?.record(t: tUp, arrival: arrival)
+            acc.add(s)
         }
         cb.error = { msg in w.log(.warn, msg) }
         loc.startRecording(cb)
@@ -377,6 +379,7 @@ final class RecordingSession: @unchecked Sendable {
             w.append(.absAltitude, CSV.row([CSV.f6(s.t), CSV.ms(tb.utcMs(fromUptime: s.t)),
                                             CSV.f6(s.altitudeM), CSV.f6(s.accuracyM), CSV.f6(s.precisionM)]))
             mon[.absAltitude]?.record(t: s.t, arrival: arrival)
+            acc.add(s)
         }
         cb.error = { msg in w.log(.warn, msg) }
         alt.start(cb)
@@ -387,7 +390,7 @@ final class RecordingSession: @unchecked Sendable {
             monitors[.activity]?.setAvailable(false)
             return
         }
-        let tb = timeBase, w = writer, mon = monitors, latest = latestBox
+        let tb = timeBase, w = writer, mon = monitors, latest = latestBox, acc = accumulator
         act.start { s in
             let arrival = tb.uptimeNow()
             w.append(.activity, CSV.row([
@@ -398,6 +401,7 @@ final class RecordingSession: @unchecked Sendable {
             ]))
             mon[.activity]?.record(t: s.t, arrival: arrival)
             latest.withLock { $0.activity = s }
+            acc.add(s)
         }
     }
 
@@ -456,7 +460,7 @@ final class RecordingSession: @unchecked Sendable {
         let now = timeBase.uptimeNow()
         writer.append(.device, CSV.row([
             CSV.f6(now), CSV.ms(timeBase.utcMs(fromUptime: now)),
-            s.batteryLevel < 0 ? "-1" : CSV.fixed(Double(s.batteryLevel), decimals: 2),
+            s.batteryLevel < 0 ? "-1" : CSV.f6(Double(s.batteryLevel)), // §4: 6 decimals everywhere
             s.batteryState, s.thermal.rawValue, CSV.bool(s.lowPowerMode),
             String(s.freeDiskBytes), s.networkStatus, s.networkType,
         ]))
@@ -481,7 +485,7 @@ final class RecordingSession: @unchecked Sendable {
             v = end
             return s
         }
-        // Upload OFF: drop the window (memory stays bounded; the session files are the dataset) without
+        // Upload OFF: drop the window (memory stays bounded; the session folder keeps everything) without
         // consuming a batchSeq. Upload ON: build, check size, queue.
         guard let q = deps.uploadQueue, q.isEnabled else {
             accumulator.discard()
@@ -491,7 +495,7 @@ final class RecordingSession: @unchecked Sendable {
         do {
             let json = try batch.jsonData()
             if json.count > Self.maxBatchJSONBytes {
-                // The ingest function rejects bodies > 200 KB (02 §6): the data is safe on disk; say so.
+                // The ingest function rejects bodies > 200 KB (02 §5): the data is safe on disk; say so.
                 writer.log(.warn, "upload batch \(batch.batchSeq) is \(json.count / 1024) KB (> \(Self.maxBatchJSONBytes / 1024) KB): the backend may reject it")
             }
             try q.enqueue(gzippedBody: Gzip.compress(json), sessionId: batch.sessionId, seq: batch.batchSeq,
@@ -501,14 +505,19 @@ final class RecordingSession: @unchecked Sendable {
         }
     }
 
-    /// §6.1 body: session.json, plus `batchCount` in the Stop copy.
+    /// §6.1 body: session.json, plus `batchCount` in the Stop copy, plus `source: "live"` (the
+    /// replay tool rewrites it, 02 §5). The rater's name is personal data and stays on the phone:
+    /// it is removed from the cloud copy (the local session.json keeps it).
     static func sessionMetadataBody(_ meta: SessionMetadata, batchCount: Int?) throws -> Data {
-        let json = try meta.jsonData()
-        guard let batchCount else { return json }
-        guard var obj = try JSONSerialization.jsonObject(with: json) as? [String: Any] else {
+        guard var obj = try JSONSerialization.jsonObject(with: meta.jsonData()) as? [String: Any] else {
             throw CocoaError(.coderInvalidValue)
         }
-        obj["batchCount"] = batchCount
+        if var people = obj["people"] as? [String: Any] {
+            people.removeValue(forKey: "raterName")
+            obj["people"] = people
+        }
+        obj["source"] = "live"
+        if let batchCount { obj["batchCount"] = batchCount }
         return try JSONSerialization.data(withJSONObject: obj, options: [.sortedKeys, .withoutEscapingSlashes])
     }
 

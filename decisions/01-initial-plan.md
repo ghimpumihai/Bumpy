@@ -3,13 +3,13 @@
 > **Audience:** a Claude Code instance (and the teammate driving it) building the iPhone data-collection app on macOS.
 > This file is the complete context. Read it fully before writing code.
 >
-> **Status (2026-11-20):** updated for **AWS** (this plan was first written for Azure). The backend architecture and the reasons behind each choice are in [02-infrastructure-plan.md](02-infrastructure-plan.md). Changes for the app: the upload target in §6 is now the AWS API, and §3.5 and §3.8 gained public-transport fields (audio switch, posture, handheld, line).
+> **Status (2026-11-20):** the backend is on **Azure** (it moved to AWS and back the same day; nothing in the app contract changed). The backend architecture and the reasons behind each choice are in [02-infrastructure-plan.md](02-infrastructure-plan.md). Changes for the app: the upload target in §6 is the Azure ingest function, and §3.5 and §3.8 gained public-transport fields (audio switch, posture, handheld, line).
 
 ---
 
 ## 0. TL;DR for the builder
 
-Build a **native iOS app (Swift + SwiftUI)** that records **every useful sensor on an iPhone 14 Pro at the highest practical rate**, **writes everything to local files first**, optionally **streams batches to the AWS backend**, and shows a **live dashboard proving every stream is healthy**.
+Build a **native iOS app (Swift + SwiftUI)** that records **every useful sensor on an iPhone 14 Pro at the highest practical rate**, **writes everything to local files first**, optionally **streams batches to the Azure backend**, and shows a **live dashboard proving every stream is healthy**.
 
 We get **ONE test drive** to collect the data. There is no second chance:
 
@@ -24,7 +24,7 @@ We get **ONE test drive** to collect the data. There is no second chance:
 
 ### Hackathon
 - **Codelap Hackathon 2026**, "Data-Driven Infrastructure Engineering" challenge (Porsche Engineering, Cluj-Napoca).
-- **Challenge:** build an end-to-end system: **Capture** (phone) → **Transmit** (securely to the cloud; we use **AWS**, which the organizers accept) → **Process** → **Store** (database) → **Visualize** (web dashboard).
+- **Challenge:** build an end-to-end system: **Capture** (phone) → **Transmit** (securely to the cloud; we use **Azure**) → **Process** → **Store** (database) → **Visualize** (web dashboard).
 - **Also required:** Infrastructure as Code plus CI/CD pipelines, and a public Git repo with regular, meaningful commits.
 - **Judging:** presentation and demo, relevance and impact, technical execution, innovation and creativity.
 - The guidance says *"A small, reliable stream of real data is more valuable than a complex integration that cannot be demonstrated."*
@@ -259,9 +259,9 @@ Use the same numeric precision everywhere: 6 decimals for sensor values, 8 decim
 
 ---
 
-## 6. Live upload to AWS (secondary; must never block recording)
+## 6. Live upload to Azure (secondary; must never block recording)
 
-The API base URL points at the AWS API Gateway endpoint (see [02-infrastructure-plan.md](02-infrastructure-plan.md)). The backend answers `200` for both new and repeated batches; the app should still treat `409` as success, as below. After a drive, the session folder is uploaded to S3 from a laptop, so live upload is optional for most sessions.
+The API base URL points at the Azure ingest function app (see [02-infrastructure-plan.md](02-infrastructure-plan.md)); the function serves `/api/ingest`. The backend answers `200` for both new and repeated batches; the app should still treat `409` as success, as below. After a drive, the session folder is uploaded to Blob Storage from a laptop, so live upload is optional for most sessions.
 
 The backend may not be ready during the drive. The app must work **fully offline**; upload is a bonus.
 
@@ -475,7 +475,7 @@ Pass criteria: motion streams ~100 Hz with max gap < 0.1 s; GPS ~1 Hz with sane 
 4. Preflight checklist + session setup + summary + export.
 5. Audio recording + level meter, barometer, activity, device health.
 6. Live plots + mini map.
-7. Live upload queue to AWS.
+7. Live upload queue to Azure.
 8. P2 extras (magnetometer, heading, absolute altitude, on-device roughness/MSDV estimates).
 
 ---

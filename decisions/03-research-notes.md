@@ -1,8 +1,31 @@
 # Research notes
 
-> Collected 2026-11-20 by research agents (web search, mostly official AWS, HashiCorp and GitHub docs). Prices are us-east-1 unless noted. **Unverified** marks facts that came from one secondary source or from memory. These notes support [02-infrastructure-plan.md](02-infrastructure-plan.md).
+> Collected 2026-11-20 by research agents (web search, mostly official AWS, Microsoft, HashiCorp and GitHub docs). **Unverified** marks facts that came from one secondary source or from memory. These notes support [02-infrastructure-plan.md](02-infrastructure-plan.md).
+>
+> The plan moved to Azure on 2026-11-20 (D21). The Azure facts come first; the AWS sections below are kept as background for decisions D1–D20. Signal processing and dashboard notes apply to both.
 
-## Streaming
+## Azure account and free offers
+
+- **Free account:** $200 credit valid for 30 days, plus 12 months of selected free services and a set of always-free services. A spending limit is on by default: when the credit is used up, services are disabled rather than billed. After 30 days, the account must be upgraded to pay-as-you-go to keep resources running; 12-month free services continue.
+- **PostgreSQL Flexible Server:** 750 hours per month of Burstable `B1ms`, 32 GB storage and 32 GB backup storage, free for 12 months. New customers only; the 12 months start when the account is created. The portal still shows an "estimated cost" while creating it.
+- **Azure for Students:** credit without a card for eligible students; amount and limits **unverified** for 2026.
+- **AWS for comparison:** the new AWS Free plan does not include Kinesis Data Streams or Firehose; they need the Paid plan.
+
+Sources: [Azure free account](https://azure.microsoft.com/en-us/pricing/purchase-options/azure-account?cid=msft_learn), [Azure free services](https://azure.microsoft.com/en-gb/pricing/free-services/), [PostgreSQL on the free account](https://learn.microsoft.com/azure/postgresql/flexible-server/how-to-deploy-on-azure-free-account), [AWS services on the new sign-up](https://docs.aws.amazon.com/accounts/latest/reference/supported-services-sign-up-new.md), [AWS Free Tier FAQs](https://aws.amazon.com/free/faqs/).
+
+## Azure services
+
+- **Event Hubs Basic:** 1 consumer group per event hub, 256 KB maximum message, 1 day maximum retention, 100 connections per namespace, no Capture. Price about $0.015 per throughput-unit hour plus about $0.028 per million events (**unverified**, check the calculator). Capture is a paid add-on on Standard, billed per throughput-unit hour, and writes Avro.
+- **Functions Flex Consumption:** monthly free grant of 100,000 GB-s and 250,000 executions per subscription, on the on-demand meters of pay-as-you-go subscriptions; always-ready instances have no free grant; the plan's storage account is billed separately. Supports VNet integration. Whether the Functions host decompresses a `Content-Encoding: gzip` request body is **unverified**; the ingest code handles gzip itself and must be tested with a real request.
+- **Container Apps:** monthly free grant of 180,000 vCPU-seconds, 360,000 GiB-seconds and 2 million requests per subscription (from memory, **unverified** for 2026). Jobs can be event-triggered by KEDA scalers, including Service Bus with a managed identity.
+- **Container Registry:** listed as free for 12 months (one Standard registry) on the free account, from one search result (**unverified**); Basic is about $5 per month.
+- **Service Bus Basic:** queues only (no topics, no sessions), about $0.05 per million operations; dead-letter queue and max delivery count included. Lock duration up to 5 minutes, so long jobs must renew the lock.
+- **Default outbound access:** new VNets no longer give subnets outbound internet by default; Terraform's `default_outbound_access_enabled` on each subnet keeps it on. How the Container Apps environment and Flex Consumption VNet integration get outbound in this case is **unverified**; test on day 1.
+- **PostgreSQL extensions:** must be allow-listed in `azure.extensions` before `CREATE EXTENSION`. Entra users are created with `pgaadauth_create_principal_with_oid`, which only an Entra admin can run.
+
+Sources: [Event Hubs quotas](https://learn.microsoft.com/en-us/azure/event-hubs/event-hubs-quotas), [Event Hubs tiers](https://learn.microsoft.com/en-us/azure/event-hubs/compare-tiers), [Event Hubs pricing](https://azure.microsoft.com/en-us/pricing/details/event-hubs/), [Flex Consumption plan](https://learn.microsoft.com/azure/azure-functions/flex-consumption-plan), [Functions pricing](https://azure.microsoft.com/pricing/details/functions/).
+
+## AWS streaming (background for D1–D20)
 
 | Option | Price (us-east-1) | Notes |
 |---|---|---|
@@ -32,7 +55,7 @@ Sources: [MSK pricing](https://aws.amazon.com/msk/pricing/), [MSK limits](https:
 
 Sources: [AWS Free Tier](https://aws.amazon.com/free/), [Lambda quotas](https://docs.aws.amazon.com/lambda/latest/dg/gettingstarted-limits.html), [re:Post on concurrency 10](https://repost.aws/questions/QUto8jBkZtQfSL-Qr3XEHybg/what-can-i-do-about-lambda-concurrency-being-set-to-10-in-new-accounts-even-though-default-is-1000).
 
-## Ingest and storage
+## AWS ingest and storage
 
 - **API Gateway HTTP API:** $1.00 per million requests. No API keys or usage plans (those are REST-only). Supports Lambda authorizers, JWT and mutual TLS (needs a custom domain). Whether HTTP API decompresses a gzip request body is **unverified**; the ingest code handles base64 and gzip itself and must be tested with a real request.
 - **Lambda:** 6 MB synchronous payload limit. $0.20 per million requests plus compute; free tier of 1M requests and 400k GB-s per month.
@@ -60,6 +83,7 @@ Sources: [API Gateway pricing](https://aws.amazon.com/api-gateway/pricing/), [HT
   Repos created after 2026-07-15 may use immutable IDs in `sub`; check the real claim if matching fails.
 - Standard GitHub-hosted runners, including macOS, are free for public repos.
 - LocalStack merged Community and Pro in March 2026 and now requires an auth token.
+- Azure equivalents (from memory, check the docs while building): `azurerm` backend with `use_azuread_auth = true` and `use_oidc = true` (blob leases lock the state); `azure/login@v2` with a federated credential on a user-assigned managed identity, trusted on the same `sub` claims as above.
 
 Sources: [Terraform S3 backend](https://developer.hashicorp.com/terraform/language/v1.15.x/settings/backends/s3), [GitHub OIDC in AWS](https://docs.github.com/en/actions/how-tos/secure-your-work/security-harden-deployments/oidc-in-aws), [configure-aws-credentials](https://github.com/aws-actions/configure-aws-credentials/releases), [LocalStack licensing](https://docs.localstack.cloud/aws/licensing/).
 

@@ -22,7 +22,7 @@ jobs:
       postgis:
         image: postgis/postgis:17-3.5 # same PostgreSQL major as Azure
         env:
-          POSTGRES_HOST_AUTH_METHOD: trust # throwaway test database, no password to store
+          POSTGRES_PASSWORD: ${{ secrets.POSTGRES_PASSWORD }}
         ports: ["5432:5432"]
         options: >-
           --health-cmd "pg_isready -U postgres"
@@ -31,6 +31,7 @@ jobs:
       PGHOST: localhost
       PGPORT: "5432"
       PGUSER: postgres
+      PGPASSWORD: ${{ secrets.POSTGRES_PASSWORD }} # repo secret; not passed to PRs from forks
     defaults:
       run:
         working-directory: services/processor

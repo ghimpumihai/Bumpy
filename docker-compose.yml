@@ -1,15 +1,15 @@
 # Local PostGIS for development and tests (plan §15). Same major versions as Azure (PostgreSQL 17).
-# Trust login with no password, reachable only from this machine (127.0.0.1).
-#   docker compose up -d db
+# The password comes from your environment (or a gitignored .env next to this file), never the repo:
+#   $env:POSTGRES_PASSWORD='<pick one>'; docker compose up -d db
 # Then, from services/processor:
-#   $env:PGHOST='localhost'; $env:PGPORT='5433'; $env:PGUSER='postgres'; $env:PGDATABASE='roadride'
+#   $env:PGHOST='localhost'; $env:PGPORT='5433'; $env:PGUSER='postgres'; $env:PGPASSWORD=$env:POSTGRES_PASSWORD; $env:PGDATABASE='roadride'
 #   $env:RUN_MODE='migrate'; python -m roadride
-#   python -m pytest -q tests      # integration tests run when PGHOST is set
+#   python -m pytest -q tests      # integration tests run when PGHOST and PGPASSWORD are set
 services:
   db:
     image: postgis/postgis:17-3.5
     environment:
-      POSTGRES_HOST_AUTH_METHOD: trust
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD first}
       POSTGRES_DB: roadride
     ports:
       - "127.0.0.1:5433:5432"

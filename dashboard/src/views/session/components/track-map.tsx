@@ -4,7 +4,8 @@ import { GeoJsonLayer, type SourceLayer } from "@/components/map/geojson-layer";
 import { MapCanvas } from "@/components/map/map-canvas";
 import { MapLegend } from "@/components/map/map-legend";
 import { useThemeColors } from "@/hooks/use-theme-colors";
-import { boundsOf, type Position } from "@/utils/geo";
+import type { Position } from "@/types/common";
+import { boundsOf } from "@/utils/geo";
 import { stepColorExpression } from "@/utils/scale";
 
 import { SPEED_BANDS, TRACK_EVENTS_SOURCE_ID, TRACK_LINE_WIDTH_PX, TRACK_SOURCE_ID } from "../utils/constants";

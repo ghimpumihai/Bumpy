@@ -49,3 +49,6 @@ export interface LngLat {
   lon: number;
   lat: number;
 }
+
+/** `[lon, lat]` in degrees, GeoJSON order. */
+export type Position = [number, number];

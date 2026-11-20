@@ -1,5 +1,5 @@
 import { Link, useRouteContext } from "@tanstack/react-router";
-import { Activity, Gauge, Map as MapIcon, type LucideIcon } from "lucide-react";
+import { Activity, BookOpen, Gauge, ListChecks, Map as MapIcon, Radio, type LucideIcon } from "lucide-react";
 import type { ReactNode } from "react";
 
 import { ThemeToggle } from "@/components/theme-toggle";
@@ -7,7 +7,7 @@ import { DataSourceSettings } from "@/features/data-source-settings";
 import { cn } from "@/lib/utils";
 
 interface NavItem {
-  to: "/" | "/sessions";
+  to: "/" | "/sessions" | "/live" | "/quality" | "/method";
   label: string;
   icon: LucideIcon;
 }
@@ -15,10 +15,13 @@ interface NavItem {
 const NAV_ITEMS: NavItem[] = [
   { to: "/", label: "Map", icon: MapIcon },
   { to: "/sessions", label: "Sessions", icon: Activity },
+  { to: "/live", label: "Live", icon: Radio },
+  { to: "/quality", label: "Data quality", icon: ListChecks },
+  { to: "/method", label: "Method", icon: BookOpen },
 ];
 
 const linkClass =
-  "horizontal gap-1.5 rounded-md px-2.5 py-1.5 text-sm font-medium text-muted-foreground transition-colors hover:bg-background-hover hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2";
+  "horizontal gap-1.5 whitespace-nowrap rounded-md px-2.5 py-1.5 text-sm font-medium text-muted-foreground transition-colors hover:bg-background-hover hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2";
 
 export function AppLayout({ children }: { children: ReactNode }) {
   const { dataSource } = useRouteContext({ from: "__root__" });

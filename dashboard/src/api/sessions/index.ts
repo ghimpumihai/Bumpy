@@ -2,22 +2,17 @@ import { useQuery } from "@tanstack/react-query";
 
 import { api } from "@/config/api-client";
 import { LIVE_SESSION_POLL_INTERVAL_MS, STATIC_STALE_TIME_MS } from "@/constants";
-import type { SessionSource, VehicleType } from "@/types/common";
 import type {
   RoadEventCollection,
   SessionDetail,
   SessionLabelsResponse,
+  SessionListFilters,
   SessionListResponse,
   SessionSeries,
   SessionTrack,
 } from "@/types/sessions";
 
 export const SESSIONS_QUERY_KEY = "sessions";
-
-export interface SessionListFilters {
-  source?: SessionSource;
-  vehicle?: VehicleType;
-}
 
 const sessionPath = (sessionId: string, part = "") => `/api/sessions/${encodeURIComponent(sessionId)}${part}`;
 

@@ -1,10 +1,6 @@
 import type { FeatureCollection, LineString } from "geojson";
 
-import type { SessionTrack } from "@/types/sessions";
-
-export interface TrackPieceProperties {
-  speedKmh: number | null;
-}
+import type { SessionTrack, TrackPieceProperties } from "@/types/sessions";
 
 /** Splits the track into 2-point pieces so each can be coloured by its speed. */
 export function trackPieces(track: SessionTrack): FeatureCollection<LineString, TrackPieceProperties> {

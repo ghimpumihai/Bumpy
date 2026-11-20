@@ -12,7 +12,7 @@ module.exports = {
       name: "no-mock-in-production-code",
       severity: "error",
       comment: "Only the API client may load the mock backend (lazily), so API users never download it.",
-      from: { pathNot: ["^src/mock/", "^src/config/api-client\\.ts$"] },
+      from: { pathNot: ["^src/mock/", "^src/config/api-client\\.ts$", "/__tests__/"] },
       to: { path: "^src/mock/" },
     },
   ],

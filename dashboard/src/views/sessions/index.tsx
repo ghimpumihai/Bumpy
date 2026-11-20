@@ -1,9 +1,10 @@
 import { useNavigate, useSearch } from "@tanstack/react-router";
 
-import { sessionsApi, type SessionListFilters } from "@/api/sessions";
+import { sessionsApi } from "@/api/sessions";
 import { QueryState } from "@/components/query-state";
 import { Card, CardContent } from "@/components/ui/card";
 import { Skeleton } from "@/components/ui/skeleton";
+import type { SessionListFilters } from "@/types/sessions";
 
 import { SessionFilters } from "./components/session-filters";
 import { SessionsTable } from "./components/sessions-table";

@@ -10,3 +10,16 @@ export interface ChartSeries {
   axis?: "left" | "right";
   unit?: string;
 }
+
+/** A session's series plus sparse markers aligned onto the same time axis. */
+export interface SessionChartData {
+  times: number[];
+  aVert: number[];
+  potholes: (number | null)[];
+  speedBumps: (number | null)[];
+  aLat: number[];
+  aLon: number[];
+  speedKmh: (number | null)[];
+  msdv: number[];
+  ratings: (number | null)[];
+}

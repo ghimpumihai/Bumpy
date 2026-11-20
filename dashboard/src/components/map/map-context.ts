@@ -1,11 +1,6 @@
-import type { Map as MapLibreMap } from "maplibre-gl";
 import { createContext, useContext } from "react";
 
-export interface MapState {
-  map: MapLibreMap;
-  /** Increments whenever a style finished loading; a new style drops every source and layer. */
-  styleGeneration: number;
-}
+import type { MapState } from "@/types/map";
 
 export const MapContext = createContext<MapState | null>(null);
 

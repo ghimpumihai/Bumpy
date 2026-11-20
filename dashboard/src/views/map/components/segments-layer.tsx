@@ -2,6 +2,7 @@ import type { MapGeoJSONFeature } from "maplibre-gl";
 
 import { GeoJsonLayer, type SourceLayer } from "@/components/map/geojson-layer";
 import { useThemeColors } from "@/hooks/use-theme-colors";
+import type { MetricScale } from "@/types/map";
 import type { SegmentCollection } from "@/types/segments";
 import { stepColorExpression } from "@/utils/scale";
 
@@ -16,7 +17,6 @@ import {
   SELECTED_OUTLINE_WIDTH_PX,
   SELECTED_SEGMENT_LAYER_ID,
 } from "../utils/constants";
-import type { MetricScale } from "../utils/metric";
 
 const COLOR_VARS = ["--scale-1", "--scale-2", "--scale-3", "--scale-4", "--scale-5", "--scale-none", "--event-pothole", "--foreground", "--card"] as const;
 

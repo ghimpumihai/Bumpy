@@ -7,7 +7,8 @@ import { EventsLayer } from "@/components/map/events-layer";
 import { MapCanvas } from "@/components/map/map-canvas";
 import { MapLegend } from "@/components/map/map-legend";
 import { QueryState } from "@/components/query-state";
-import { boundsOf, type Position } from "@/utils/geo";
+import type { Position } from "@/types/common";
+import { boundsOf } from "@/utils/geo";
 
 import { MapControls } from "./components/map-controls";
 import { OverviewStrip } from "./components/overview-strip";
@@ -48,7 +49,7 @@ export function MapView() {
           <MapControls search={search} onChange={update} />
           {segments.error && <QueryState isPending={false} error={segments.error} onRetry={() => void segments.refetch()}>{null}</QueryState>}
         </div>
-        <div className="pointer-events-auto sm:mr-12">
+        <div className="pointer-events-auto hidden sm:mr-12 sm:block">
           <OverviewStrip />
         </div>
       </div>

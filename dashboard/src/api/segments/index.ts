@@ -25,6 +25,8 @@ const useSegment = (h3: string | undefined) =>
     queryFn: () => getSegment(h3 ?? ""),
     enabled: Boolean(h3),
     staleTime: STATIC_STALE_TIME_MS,
+    // Keeps the last segment on screen while the panel animates closed or switches segment.
+    placeholderData: keepPreviousData,
   });
 
 export const segmentsApi = { getSegments, getSegment, useSegments, useSegment };

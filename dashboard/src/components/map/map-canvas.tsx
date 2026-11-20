@@ -2,8 +2,10 @@ import type { StyleSpecification } from "maplibre-gl";
 import { useEffect, useRef, useState, type ReactNode } from "react";
 
 import {
+  BASEMAP_STYLE_TIMEOUT_MS,
   DEFAULT_MAP_CENTER,
   DEFAULT_MAP_ZOOM,
+  FIT_BOUNDS_DURATION_MS,
   FIT_BOUNDS_MAX_ZOOM,
   FIT_BOUNDS_PADDING_PX,
   MAP_STYLE_URL,
@@ -12,18 +14,21 @@ import { MapLibreMap, NavigationControl, ScaleControl } from "@/lib/maplibre";
 import { cn } from "@/lib/utils";
 import type { MapState } from "@/types/map";
 import type { Position } from "@/types/common";
+import { readCssColor } from "@/utils/css-color";
 
 import { MapContext } from "./map-context";
 
 /**
- * Used when the OpenFreeMap tiles cannot be loaded (bad Wi-Fi in the presentation room, plan 02 §17):
- * our own data layers still render on a plain background.
+ * Used when the OpenFreeMap style cannot be loaded (bad Wi-Fi in the presentation room, plan 02 §17):
+ * our own data layers still render on a plain, theme-coloured background.
  */
-const FALLBACK_STYLE: StyleSpecification = {
-  version: 8,
-  sources: {},
-  layers: [{ id: "background", type: "background", paint: { "background-color": "#eef0f2" } }],
-};
+function fallbackStyle(): StyleSpecification {
+  return {
+    version: 8,
+    sources: {},
+    layers: [{ id: "background", type: "background", paint: { "background-color": readCssColor("--muted") } }],
+  };
+}
 
 const isNetworkError = (error: unknown) =>
   error instanceof Error && (error.name === "AJAXError" || /fetch|network|load/i.test(error.message));
@@ -57,20 +62,31 @@ export function MapCanvas({ ariaLabel, className, bounds, boundsKey, children }:
     instance.addControl(new ScaleControl({ unit: "metric" }), "bottom-right");
 
     let styleReady = false;
+    const switchToFallback = () => {
+      if (styleReady) return;
+      styleReady = true;
+      setBasemapFailed(true);
+      instance.setStyle(fallbackStyle());
+    };
     // `style.load` (style parsed) instead of `load` (every tile and sprite fetched): our data must not
     // wait for the base map on a slow network.
     instance.on("style.load", () => {
       styleReady = true;
+      window.clearTimeout(styleTimeout);
       setState((previous) => ({ map: instance, styleGeneration: (previous?.styleGeneration ?? 0) + 1 }));
     });
-    // The style itself could not be fetched: the base map is unreachable, so draw on a plain background.
+    // The style could not be fetched, or the request hangs (a network that accepts but stalls).
+    const styleTimeout = window.setTimeout(switchToFallback, BASEMAP_STYLE_TIMEOUT_MS);
     instance.on("error", (event) => {
-      if (styleReady || !isNetworkError(event.error)) return;
-      styleReady = true;
-      setBasemapFailed(true);
-      instance.setStyle(FALLBACK_STYLE);
+      if (!styleReady && isNetworkError(event.error)) {
+        switchToFallback();
+        return;
+      }
+      // With a listener attached MapLibre no longer logs errors itself (bad expressions, failed tiles).
+      console.error(event.error);
     });
     return () => {
+      window.clearTimeout(styleTimeout);
       setState(null);
       instance.remove();
     };
@@ -78,7 +94,7 @@ export function MapCanvas({ ariaLabel, className, bounds, boundsKey, children }:
 
   useEffect(() => {
     if (!map || !bounds) return;
-    map.fitBounds(bounds, { padding: FIT_BOUNDS_PADDING_PX, maxZoom: FIT_BOUNDS_MAX_ZOOM, duration: 600 });
+    map.fitBounds(bounds, { padding: FIT_BOUNDS_PADDING_PX, maxZoom: FIT_BOUNDS_MAX_ZOOM, duration: FIT_BOUNDS_DURATION_MS });
     // boundsKey decides when to re-fit, so live updates don't fight the user's panning.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [map, boundsKey]);

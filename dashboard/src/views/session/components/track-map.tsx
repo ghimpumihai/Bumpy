@@ -1,4 +1,5 @@
 import { sessionsApi } from "@/api/sessions";
+import { ErrorAlert } from "@/components/error-alert";
 import { EventsLayer } from "@/components/map/events-layer";
 import { GeoJsonLayer, type SourceLayer } from "@/components/map/geojson-layer";
 import { MapCanvas } from "@/components/map/map-canvas";
@@ -45,6 +46,15 @@ export function TrackMap({ sessionId, isLive }: TrackMapProps) {
         {track.data && <GeoJsonLayer id={TRACK_SOURCE_ID} data={trackPieces(track.data)} layers={layers} />}
         {events.data && <EventsLayer id={TRACK_EVENTS_SOURCE_ID} data={events.data} />}
       </MapCanvas>
+      {(track.error || events.error) && (
+        <div className="absolute inset-x-3 top-3 max-w-md">
+          {track.error ? (
+            <ErrorAlert title="The track" error={track.error} onRetry={() => void track.refetch()} />
+          ) : (
+            <ErrorAlert title="The detected events" error={events.error} onRetry={() => void events.refetch()} />
+          )}
+        </div>
+      )}
       <MapLegend
         className="absolute bottom-8 left-3"
         title="Speed"

@@ -1,5 +1,6 @@
 import type { FeatureCollection, LineString } from "geojson";
 
+import { MS_TO_KMH } from "@/constants/units";
 import type { SessionTrack, TrackPieceProperties } from "@/types/sessions";
 
 /** Splits the track into 2-point pieces so each can be coloured by its speed. */
@@ -12,7 +13,7 @@ export function trackPieces(track: SessionTrack): FeatureCollection<LineString, 
     features.push({
       type: "Feature" as const,
       geometry: { type: "LineString" as const, coordinates: [coordinates[i - 1], coordinates[i]] },
-      properties: { speedKmh: speed === null ? null : speed * 3.6 },
+      properties: { speedKmh: speed === null ? null : speed * MS_TO_KMH },
     });
   }
   return { type: "FeatureCollection", features };

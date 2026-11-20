@@ -1,4 +1,5 @@
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
+import { PLACEHOLDER } from "@/constants";
 import type { SessionDetail } from "@/types/sessions";
 import { formatDateTime } from "@/utils/format-date-time";
 
@@ -11,7 +12,7 @@ export function ContextCard({ session }: { session: SessionDetail }) {
     { label: "Rater", value: `${session.people.raterSeat}, ${session.people.raterPosture}` },
     { label: "Passengers", value: String(session.people.passengerCount) },
     { label: "Audio recording", value: session.audioEnabled ? "on" : "off (public transport)" },
-    { label: "Device", value: session.deviceId ?? "—" },
+    { label: "Device", value: session.deviceId ?? PLACEHOLDER },
     { label: "Processed", value: `${formatDateTime(session.processedAt)}${session.processorVersion ? ` · ${session.processorVersion}` : ""}` },
   ];
   return (

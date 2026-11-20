@@ -12,7 +12,7 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@
 import { readDataSourceOverride, writeDataSourceOverride } from "@/config/runtime-config";
 import { DataSourceMode, type DataSource } from "@/types/config";
 
-import { dataSourceFormSchema, type DataSourceFormValues } from "./schema";
+import { dataSourceFormSchema, type DataSourceFormInput, type DataSourceFormValues } from "./schema";
 
 const MODE_LABELS: Record<DataSourceMode, string> = {
   auto: "Automatic (API from config.json, else mock data)",
@@ -28,10 +28,9 @@ interface DataSourceSettingsProps {
 export function DataSourceSettings({ dataSource }: DataSourceSettingsProps) {
   const [open, setOpen] = useState(false);
   const saved = readDataSourceOverride();
-  const form = useForm<DataSourceFormValues>({
+  const form = useForm<DataSourceFormInput, unknown, DataSourceFormValues>({
     resolver: zodResolver(dataSourceFormSchema),
     defaultValues: { mode: saved?.mode ?? DataSourceMode.AUTO, apiBase: saved?.apiBase ?? "" },
-    shouldUnregister: true,
   });
   const mode = useWatch({ control: form.control, name: "mode" });
 
@@ -90,8 +89,7 @@ export function DataSourceSettings({ dataSource }: DataSourceSettingsProps) {
               )}
             />
           </div>
-          {mode !== DataSourceMode.MOCK && (
-            <div className="vertical gap-2">
+          <div className="vertical gap-2" hidden={mode === DataSourceMode.MOCK}>
               <Label htmlFor="data-source-url">API base URL {mode === DataSourceMode.AUTO && "(optional override)"}</Label>
               <Input
                 id="data-source-url"
@@ -104,8 +102,7 @@ export function DataSourceSettings({ dataSource }: DataSourceSettingsProps) {
               <p id="data-source-url-error" className="text-xs text-destructive" aria-live="polite">
                 {form.formState.errors.apiBase?.message}
               </p>
-            </div>
-          )}
+          </div>
         </form>
         <DialogFooter className="gap-2 sm:justify-between">
           <Button type="button" variant="ghost" leftIcon={<RotateCcw />} onClick={() => apply(null)}>

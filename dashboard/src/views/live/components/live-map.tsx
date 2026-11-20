@@ -5,7 +5,16 @@ import type { LiveDevice } from "@/types/live";
 import type { Position } from "@/types/common";
 import { boundsOf } from "@/utils/geo";
 
-import { LIVE_DEVICES_SOURCE_ID, LIVE_MARKER_RADIUS_PX, LIVE_TRACK_WIDTH_PX, LIVE_TRACKS_SOURCE_ID } from "../utils/constants";
+import {
+  LIVE_DEVICES_SOURCE_ID,
+  LIVE_HALO_OPACITY,
+  LIVE_HALO_SCALE,
+  LIVE_MARKER_RADIUS_PX,
+  LIVE_MARKER_STROKE_PX,
+  LIVE_TRACK_OPACITY,
+  LIVE_TRACK_WIDTH_PX,
+  LIVE_TRACKS_SOURCE_ID,
+} from "../utils/constants";
 import { livePositions, liveTracks } from "../utils/geojson";
 
 const COLOR_VARS = ["--live", "--info", "--card", "--track"] as const;
@@ -22,14 +31,14 @@ export function LiveMap({ devices }: { devices: LiveDevice[] }) {
       id: `${LIVE_TRACKS_SOURCE_ID}-line`,
       type: "line",
       layout: { "line-cap": "round", "line-join": "round" },
-      paint: { "line-color": colors["--track"], "line-width": LIVE_TRACK_WIDTH_PX, "line-opacity": 0.7 },
+      paint: { "line-color": colors["--track"], "line-width": LIVE_TRACK_WIDTH_PX, "line-opacity": LIVE_TRACK_OPACITY },
     },
   ];
   const deviceLayers: SourceLayer[] = [
     {
       id: `${LIVE_DEVICES_SOURCE_ID}-halo`,
       type: "circle",
-      paint: { "circle-radius": LIVE_MARKER_RADIUS_PX * 2, "circle-color": colors["--live"], "circle-opacity": 0.18 },
+      paint: { "circle-radius": LIVE_MARKER_RADIUS_PX * LIVE_HALO_SCALE, "circle-color": colors["--live"], "circle-opacity": LIVE_HALO_OPACITY },
     },
     {
       id: `${LIVE_DEVICES_SOURCE_ID}-dot`,
@@ -39,7 +48,7 @@ export function LiveMap({ devices }: { devices: LiveDevice[] }) {
         // Replays are blue, real phones red, matching their badges.
         "circle-color": ["match", ["get", "source"], "replay", colors["--info"], colors["--live"]],
         "circle-stroke-color": colors["--card"],
-        "circle-stroke-width": 2,
+        "circle-stroke-width": LIVE_MARKER_STROKE_PX,
       },
     },
   ];

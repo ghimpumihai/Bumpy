@@ -1,9 +1,9 @@
 import { GeoJsonLayer, type SourceLayer } from "@/components/map/geojson-layer";
+import { EVENT_DOT } from "@/constants/map";
 import { useThemeColors } from "@/hooks/use-theme-colors";
 import type { RoadEventCollection } from "@/types/sessions";
 
 const COLOR_VARS = ["--event-pothole", "--event-speed-bump", "--event-rail-joint", "--card"] as const;
-const EVENT_RADIUS_PX = 4.5;
 
 interface EventsLayerProps {
   id: string;
@@ -20,7 +20,15 @@ export function EventsLayer({ id, data, beforeId }: EventsLayerProps) {
       id: `${id}-circle`,
       type: "circle",
       paint: {
-        "circle-radius": ["interpolate", ["linear"], ["zoom"], 12, EVENT_RADIUS_PX * 0.6, 16, EVENT_RADIUS_PX * 1.4],
+        "circle-radius": [
+          "interpolate",
+          ["linear"],
+          ["zoom"],
+          EVENT_DOT.minZoom,
+          EVENT_DOT.radiusPx * EVENT_DOT.minZoomScale,
+          EVENT_DOT.maxZoom,
+          EVENT_DOT.radiusPx * EVENT_DOT.maxZoomScale,
+        ],
         "circle-color": [
           "match",
           ["get", "type"],
@@ -31,8 +39,8 @@ export function EventsLayer({ id, data, beforeId }: EventsLayerProps) {
           colors["--event-rail-joint"],
         ],
         "circle-stroke-color": colors["--card"],
-        "circle-stroke-width": 1.2,
-        "circle-opacity": ["interpolate", ["linear"], ["get", "confidence"], 0, 0.45, 1, 1],
+        "circle-stroke-width": EVENT_DOT.strokePx,
+        "circle-opacity": ["interpolate", ["linear"], ["get", "confidence"], 0, EVENT_DOT.minOpacity, 1, 1],
       },
     },
   ];

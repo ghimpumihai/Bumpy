@@ -5,7 +5,7 @@ import type { ExclusionReason, QualityRow, SessionDetail, SessionQuality, Sessio
 import { aggregate, type AggregationResult } from "./aggregate";
 import { SESSION_SPECS, type SessionSpec } from "./catalog";
 import { unitHash } from "./random";
-import { detectionMetrics, SERIES_HZ, simulateSession, type SimulatedSession } from "./simulate";
+import { detectionMetrics, PRIVACY_TRIM_M, SERIES_HZ, simulateSession, type SimulatedSession } from "./simulate";
 
 const PROCESSOR_VERSION = "mock-1";
 /** Live sessions started this long before the page loaded, so the live view has a track straight away. */
@@ -65,6 +65,22 @@ function isIncluded(spec: SessionSpec): boolean {
   return spec.source === "upload" && spec.quality !== "bad";
 }
 
+/** Whether a live session is still being recorded (its simulation has samples left). */
+export function isStillLive(sim: SimulatedSession, nowMs: number = Date.now()): boolean {
+  return sim.spec.live && lastSampleIndex(sim, nowMs) < sim.t.length - 1;
+}
+
+/** Same rule as the read API: the first and last 200 m of a finished trip never leave the database. */
+export function inPrivacyZone(sim: SimulatedSession, sampleIndex: number, nowMs: number = Date.now()): boolean {
+  const s = sim.s[sampleIndex];
+  return s < PRIVACY_TRIM_M || (!isStillLive(sim, nowMs) && s > sim.totalDistanceM - PRIVACY_TRIM_M);
+}
+
+/** When the backend finished processing a session (after its upload). */
+export function processedAt(sim: SimulatedSession, nowMs: number = Date.now()): number | null {
+  return isStillLive(sim, nowMs) ? null : sim.t[lastSampleIndex(sim, nowMs)] + PROCESSING_DELAY_MS;
+}
+
 /** Index of the newest sample that exists "now" (live sessions grow in real time). */
 export function lastSampleIndex(sim: SimulatedSession, nowMs: number = Date.now()): number {
   const total = sim.t.length - 1;
@@ -72,9 +88,10 @@ export function lastSampleIndex(sim: SimulatedSession, nowMs: number = Date.now(
   return Math.max(0, Math.min(total, Math.floor(((nowMs - sim.startMs) / MS_PER_SECOND) * SERIES_HZ)));
 }
 
-function eventCounts(sim: SimulatedSession, last: number): Record<RoadEventType, number> {
+/** Counts only events the API publishes (outside the privacy zone), so counts match the dots on the map. */
+function eventCounts(sim: SimulatedSession, last: number, nowMs: number): Record<RoadEventType, number> {
   const counts: Record<RoadEventType, number> = { pothole: 0, speed_bump: 0, rail_joint: 0 };
-  for (const event of sim.events) if (event.sampleIndex <= last) counts[event.type]++;
+  for (const event of sim.events) if (event.sampleIndex <= last && !inPrivacyZone(sim, event.sampleIndex, nowMs)) counts[event.type]++;
   return counts;
 }
 
@@ -87,6 +104,7 @@ function validFraction(spec: SessionSpec): number {
 export function sessionSummary(sim: SimulatedSession, nowMs: number = Date.now()): SessionSummary {
   const { spec } = sim;
   const last = lastSampleIndex(sim, nowMs);
+  const live = isStillLive(sim, nowMs);
   const msdv = sim.msdv[last];
   return {
     sessionId: spec.sessionId,
@@ -99,10 +117,10 @@ export function sessionSummary(sim: SimulatedSession, nowMs: number = Date.now()
     people: spec.people,
     audioEnabled: spec.audioEnabled,
     startedAt: new Date(sim.t[0]).toISOString(),
-    endedAt: spec.live ? null : new Date(sim.t[last]).toISOString(),
+    endedAt: live ? null : new Date(sim.t[last]).toISOString(),
     durationS: (sim.t[last] - sim.t[0]) / MS_PER_SECOND,
     distanceM: sim.s[last],
-    status: spec.live ? "live" : "complete",
+    status: live ? "live" : "complete",
     qualityStatus: spec.quality,
     validFraction: validFraction(spec),
     includeInAgg: isIncluded(spec),
@@ -111,7 +129,7 @@ export function sessionSummary(sim: SimulatedSession, nowMs: number = Date.now()
     sicknessExperimental: isSicknessExperimental(spec),
     msdvZ: msdv,
     msiPct: msdv / 3,
-    eventCounts: eventCounts(sim, last),
+    eventCounts: eventCounts(sim, last, nowMs),
     ratingsCount: sim.ratings.filter((r) => r.sampleIndex <= last).length,
   };
 }
@@ -198,6 +216,7 @@ function spearman(xs: number[], ys: number[]): number | null {
 
 export function sessionDetail(sim: SimulatedSession, nowMs: number = Date.now()): SessionDetail {
   const last = lastSampleIndex(sim, nowMs);
+  const processed = processedAt(sim, nowMs);
   const summary = sessionSummary(sim, nowMs);
   const ratings = sim.ratings.filter((r) => r.sampleIndex <= last).map(({ tUtc, value, msdvSoFar }) => ({ tUtc, value, msdvSoFar }));
   return {
@@ -213,7 +232,7 @@ export function sessionDetail(sim: SimulatedSession, nowMs: number = Date.now())
         ratings.map((r) => r.value),
       ),
     },
-    processedAt: sim.spec.live ? null : new Date(sim.t[last] + PROCESSING_DELAY_MS).toISOString(),
+    processedAt: processed === null ? null : new Date(processed).toISOString(),
     processorVersion: PROCESSOR_VERSION,
   };
 }

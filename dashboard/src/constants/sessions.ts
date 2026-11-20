@@ -51,5 +51,7 @@ export const STREAM_LABELS: Record<string, string> = {
 
 /** Measured rate below this share of the expected rate is flagged (spec §7: < 90 Hz of 100 Hz). */
 export const STREAM_RATE_WARN_RATIO = 0.9;
-/** Gaps longer than 1 s are listed in red (spec §7, session summary). */
+/** Gaps longer than 1 s are listed in red (spec §7, session summary)… */
 export const STREAM_GAP_PROBLEM_S = 1;
+/** …but a slow stream (1 Hz GPS, 0.2 Hz device health) only has a gap once this many samples are missing. */
+export const STREAM_GAP_MISSED_SAMPLES = 3;

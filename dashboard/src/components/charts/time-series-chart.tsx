@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useRef } from "react";
 import uPlot, { type AlignedData, type Options } from "uplot";
 
+import { MS_PER_SECOND } from "@/constants/units";
 import { useThemeColors } from "@/hooks/use-theme-colors";
 import { cn } from "@/lib/utils";
 import { formatTime } from "@/utils/format-date-time";
@@ -33,7 +34,7 @@ export function TimeSeriesChart({ title, times, series, height = 180, syncKey, c
   const axisColors = useThemeColors(AXIS_COLOR_VARS);
   const seriesColors = useThemeColors(CHART_COLOR_VARS);
 
-  const data = useMemo<AlignedData>(() => [times.map((t) => t / 1000), ...series.map((s) => s.values)], [times, series]);
+  const data = useMemo<AlignedData>(() => [times.map((t) => t / MS_PER_SECOND), ...series.map((s) => s.values)], [times, series]);
   const hasRightAxis = series.some((s) => s.axis === "right");
   const structureKey = JSON.stringify([series.map((s) => [s.label, s.colorVar, s.pointsOnly, s.axis, s.unit]), axisColors, seriesColors, height, syncKey]);
 
@@ -50,7 +51,7 @@ export function TimeSeriesChart({ title, times, series, height = 180, syncKey, c
       legend: { show: true, live: true },
       scales: { x: { time: true }, y: {}, ...(hasRightAxis ? { y2: {} } : {}) },
       axes: [
-        { ...axis, values: (_plot, splits) => splits.map((seconds) => formatTime(seconds * 1000)), size: 40 },
+        { ...axis, values: (_plot, splits) => splits.map((seconds) => formatTime(seconds * MS_PER_SECOND)), size: 40 },
         { ...axis, label: unitOf("left"), size: 56 },
         ...(hasRightAxis ? [{ ...axis, scale: "y2", side: 1 as const, label: unitOf("right"), size: 56, grid: { show: false } }] : []),
       ],
@@ -82,8 +83,15 @@ export function TimeSeriesChart({ title, times, series, height = 180, syncKey, c
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [structureKey]);
 
+  // New data (live polling) must not undo the user's zoom: keep the scales while zoomed in.
   useEffect(() => {
-    plotRef.current?.setData(data);
+    const plot = plotRef.current;
+    if (!plot) return;
+    const shown = plot.data[0];
+    const { min, max } = plot.scales.x;
+    const zoomed =
+      shown.length > 1 && min !== undefined && max !== undefined && (min > shown[0] || max < shown[shown.length - 1]);
+    plot.setData(data, !zoomed);
   }, [data]);
 
   return (

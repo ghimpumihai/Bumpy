@@ -5,16 +5,28 @@ import { env } from "@/config/env";
 import { DATA_SOURCE_STORAGE_KEY, MOCK_QUERY_PARAM, RUNTIME_CONFIG_PATH } from "@/constants";
 import { DataSourceMode, type DataSource } from "@/types/config";
 
-/** `/config.json`, written next to the site by Terraform so one build works in every environment. */
+const httpUrlOrEmpty = z.union([z.url({ protocol: /^https?$/ }), z.literal("")]);
+
+/** `/config.json`, written next to the site at deploy time so one build works in every environment. */
 const runtimeConfigSchema = z.object({
-  apiBase: z.union([z.url(), z.literal("")]).default(""),
+  apiBase: httpUrlOrEmpty.default(""),
 });
 
 /** Override saved by the settings dialog (per browser). */
 export const dataSourceOverrideSchema = z.object({
   mode: z.enum(Object.values(DataSourceMode)),
-  apiBase: z.union([z.url(), z.literal("")]),
+  apiBase: httpUrlOrEmpty,
 });
+
+/** The API was chosen explicitly but no API URL is known: fail visibly instead of showing mock data. */
+export class MissingApiBaseError extends Error {
+  constructor() {
+    super(
+      "The read API was selected (?mock=0, the settings dialog or VITE_DATA_SOURCE=api) but no API URL is configured: config.json has an empty apiBase.",
+    );
+    this.name = "MissingApiBaseError";
+  }
+}
 export type DataSourceOverride = z.infer<typeof dataSourceOverrideSchema>;
 
 export function readDataSourceOverride(): DataSourceOverride | null {
@@ -49,7 +61,10 @@ async function fetchRuntimeApiBase(): Promise<string> {
 
 const stripTrailingSlash = (url: string) => url.replace(/\/+$/, "");
 
-/** Precedence: `?mock=` → settings override → `VITE_DATA_SOURCE` → API if a base URL is known, else mock. */
+/**
+ * Precedence: `?mock=` → settings override → `VITE_DATA_SOURCE` → API if a base URL is known, else mock.
+ * Throws `MissingApiBaseError` when the API is required explicitly but has no URL.
+ */
 export async function resolveDataSource(search: string = window.location.search): Promise<DataSource> {
   const override = readDataSourceOverride();
   const queryValue = new URLSearchParams(search).get(MOCK_QUERY_PARAM);
@@ -59,5 +74,6 @@ export async function resolveDataSource(search: string = window.location.search)
 
   const apiBase = override?.apiBase || env.VITE_API_BASE || (await fetchRuntimeApiBase());
   if (apiBase) return { kind: "api", apiBase: stripTrailingSlash(apiBase) };
+  if (mode === DataSourceMode.API) throw new MissingApiBaseError();
   return { kind: "mock" };
 }

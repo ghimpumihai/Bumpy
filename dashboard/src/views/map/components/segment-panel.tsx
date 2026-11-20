@@ -33,7 +33,7 @@ export function SegmentPanel({ h3, onClose }: SegmentPanelProps) {
       <SheetContent className="w-full overflow-y-auto sm:max-w-xl">
         <SheetHeader>
           <SheetTitle>Road segment</SheetTitle>
-          <SheetDescription className="font-mono text-xs">{h3}</SheetDescription>
+          <SheetDescription className="font-mono text-xs">{h3 ?? detail?.h3}</SheetDescription>
         </SheetHeader>
         <div className="vertical gap-6 px-4 pb-6">
           <QueryState isPending={query.isPending} error={query.error} onRetry={() => void query.refetch()}>

@@ -9,9 +9,9 @@ import type { QualityRow } from "@/types/sessions";
 import { formatDateTime, formatDuration } from "@/utils/format-date-time";
 import { formatFraction, formatHz, formatMeters, formatNumber, formatSeconds } from "@/utils/format-number";
 
+import { MOTION_EXPECTED_HZ } from "../utils/constants";
 import { longestMotionGap, totalInvalidSeconds, worstMotionRate } from "../utils/summary";
 
-const MOTION_EXPECTED_HZ = 100;
 
 export function QualityTable({ rows }: { rows: QualityRow[] }) {
   return (

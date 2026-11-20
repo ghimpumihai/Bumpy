@@ -1,12 +1,13 @@
 import { overviewApi } from "@/api/overview";
+import { ErrorAlert } from "@/components/error-alert";
 import { Skeleton } from "@/components/ui/skeleton";
 import { formatDateTime } from "@/utils/format-date-time";
 import { formatNumber } from "@/utils/format-number";
 
 /** Headline numbers of the aggregated dataset. */
 export function OverviewStrip() {
-  const { data, isPending, error } = overviewApi.useOverview();
-  if (error) return null;
+  const { data, isPending, error, refetch } = overviewApi.useOverview();
+  if (error) return <ErrorAlert title="The overview" error={error} onRetry={() => void refetch()} className="max-w-sm" />;
   if (isPending) return <Skeleton className="h-14 w-72" />;
   const items = [
     { label: "Sessions on the map", value: `${data.sessions.includedInAgg} / ${data.sessions.total}` },

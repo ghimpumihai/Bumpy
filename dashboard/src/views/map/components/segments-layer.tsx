@@ -13,6 +13,8 @@ import {
   SEGMENT_FILL_OPACITY,
   SEGMENT_INTERACTIVE_LAYERS,
   SEGMENT_OUTLINE_LAYER_ID,
+  SEGMENT_OUTLINE_OPACITY,
+  SEGMENT_OUTLINE_WIDTH_PX,
   SEGMENTS_SOURCE_ID,
   SELECTED_OUTLINE_WIDTH_PX,
   SELECTED_SEGMENT_LAYER_ID,
@@ -39,7 +41,7 @@ export function SegmentsLayer({ data, scale, selectedH3, onSelect }: SegmentsLay
         "fill-opacity": SEGMENT_FILL_OPACITY,
       },
     },
-    { id: SEGMENT_OUTLINE_LAYER_ID, type: "line", paint: { "line-color": colors["--card"], "line-width": 0.5, "line-opacity": 0.7 } },
+    { id: SEGMENT_OUTLINE_LAYER_ID, type: "line", paint: { "line-color": colors["--card"], "line-width": SEGMENT_OUTLINE_WIDTH_PX, "line-opacity": SEGMENT_OUTLINE_OPACITY } },
     {
       id: CONFIRMED_POTHOLE_LAYER_ID,
       type: "line",

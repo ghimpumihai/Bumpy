@@ -14,6 +14,20 @@ export const DEFAULT_MAP_CENTER: [number, number] = [23.5935, 46.7675];
 export const DEFAULT_MAP_ZOOM = 13.2;
 export const FIT_BOUNDS_PADDING_PX = 48;
 export const FIT_BOUNDS_MAX_ZOOM = 16;
+export const FIT_BOUNDS_DURATION_MS = 600;
+
+/** Event dots grow from city zoom to street zoom; low-confidence detections are drawn fainter. */
+export const EVENT_DOT = {
+  radiusPx: 4.5,
+  minZoom: 12,
+  maxZoom: 16,
+  minZoomScale: 0.6,
+  maxZoomScale: 1.4,
+  strokePx: 1.2,
+  minOpacity: 0.45,
+} as const;
+/** Switch to the plain fallback style if the base-map style hasn't loaded by then. */
+export const BASEMAP_STYLE_TIMEOUT_MS = 8000;
 
 /**
  * Roughness bands use the ISO 2631-1 comfort scale for vertical RMS acceleration (m/s²), which

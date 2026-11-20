@@ -239,8 +239,13 @@ export interface SessionListFilters {
   vehicle?: VehicleType;
 }
 
-/** `ok` | `warn` (rate below 90 % of expected) | `problem` (gaps over 1 s), as on the phone's summary screen. */
-export type StreamStatus = "ok" | "warn" | "problem";
+/** Health of one recorded stream, as on the phone's summary screen (also used for live-data freshness). */
+export const StreamStatus = {
+  OK: "ok",
+  WARN: "warn",
+  PROBLEM: "problem",
+} as const;
+export type StreamStatus = (typeof StreamStatus)[keyof typeof StreamStatus];
 
 /** Properties of one coloured piece of a session track. */
 export interface TrackPieceProperties {

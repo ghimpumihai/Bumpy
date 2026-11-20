@@ -5,9 +5,9 @@ import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/com
 import { Skeleton } from "@/components/ui/skeleton";
 import type { SessionDetail } from "@/types/sessions";
 
+import { CHART_HEIGHT_PX } from "../utils/constants";
 import { buildChartData } from "../utils/series";
 
-const CHART_HEIGHT_PX = 170;
 
 /** The road band, the sickness band and their context on one synchronized time axis. */
 export function SessionCharts({ session }: { session: SessionDetail }) {

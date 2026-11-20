@@ -1,7 +1,7 @@
 import { cellToBoundary, cellToLatLng, isValidCell } from "h3-js";
 
-import { MS_PER_SECOND, METERS_PER_KM } from "@/constants/units";
-import { RoadEventType, SessionSource } from "@/types/common";
+import { MS_PER_SECOND, MS_TO_KMH, METERS_PER_KM, SECONDS_PER_HOUR } from "@/constants/units";
+import { RoadEventType, SessionSource, VehicleType } from "@/types/common";
 import type { LiveDevice, LiveResponse } from "@/types/live";
 import type { Overview } from "@/types/overview";
 import type { SegmentCollection, SegmentDetail, VehicleFilter } from "@/types/segments";
@@ -15,7 +15,18 @@ import type {
   SessionTrack,
 } from "@/types/sessions";
 
-import { getDataset, isIncluded, lastSampleIndex, qualityRow, sessionDetail, sessionSummary } from "./dataset";
+import { bearingDeg } from "@/utils/geo";
+
+import {
+  getDataset,
+  inPrivacyZone,
+  isIncluded,
+  lastSampleIndex,
+  processedAt,
+  qualityRow,
+  sessionDetail,
+  sessionSummary,
+} from "./dataset";
 import { PRIVACY_TRIM_M, SERIES_HZ, type SimulatedSession } from "./simulate";
 
 export class MockHttpError extends Error {
@@ -46,6 +57,16 @@ function findSession(id: string): SimulatedSession {
   return sim;
 }
 
+/** An optional query parameter that must be one of `allowed` (the real API answers 400 otherwise). */
+function enumParam<T extends string>(query: URLSearchParams, name: string, allowed: readonly T[]): T | null {
+  const value = query.get(name);
+  if (value === null || value === "") return null;
+  if (!(allowed as readonly string[]).includes(value)) {
+    throw new MockHttpError(400, `${name} must be one of ${allowed.join(", ")}`);
+  }
+  return value as T;
+}
+
 function vehicleFilterOf(query: URLSearchParams): VehicleFilter {
   const value = query.get("vehicle") ?? VehicleFilters.ALL;
   if (!(Object.values(VehicleFilters) as string[]).includes(value)) {
@@ -54,10 +75,6 @@ function vehicleFilterOf(query: URLSearchParams): VehicleFilter {
   return value as VehicleFilter;
 }
 
-function inPrivacyZone(sim: SimulatedSession, sampleIndex: number): boolean {
-  const s = sim.s[sampleIndex];
-  return s < PRIVACY_TRIM_M || (!sim.spec.live && s > sim.totalDistanceM - PRIVACY_TRIM_M);
-}
 
 function eventsOf(sims: SimulatedSession[], type: string | null): RoadEventCollection {
   const features = sims.flatMap((sim) => {
@@ -72,7 +89,7 @@ function eventsOf(sims: SimulatedSession[], type: string | null): RoadEventColle
           sessionId: sim.spec.sessionId,
           type: e.type,
           tUtc: new Date(e.tMs).toISOString(),
-          speedKmh: round(e.speedMs * 3.6, 1),
+          speedKmh: round(e.speedMs * MS_TO_KMH, 1),
           magnitude: round(e.magnitude, 3),
           confidence: round(e.confidence, 2),
           matchedLabel: e.matchedLabel,
@@ -89,7 +106,10 @@ function overview(): Overview {
   const summaries = all.map((sim) => sessionSummary(sim));
   const included = all.filter((sim) => isIncluded(sim.spec));
   const allSegments = [...aggregation.segments.values()].map((perFilter) => perFilter.get("all"));
-  const lastProcessed = summaries.filter((s) => s.status === "complete").map((s) => Date.parse(s.endedAt ?? s.startedAt));
+  const lastProcessed = all.flatMap((sim) => {
+    const at = processedAt(sim);
+    return at === null ? [] : [at];
+  });
   return {
     sessions: {
       total: summaries.length,
@@ -135,7 +155,7 @@ function segmentDetail(h3: string): SegmentDetail {
           sessionId: sim.spec.sessionId,
           vehicleType: sim.spec.vehicle.type,
           tStart: new Date(obs.tStartMs).toISOString(),
-          speedKmh: round(obs.meanSpeedMs * 3.6, 1),
+          speedKmh: round(obs.meanSpeedMs * MS_TO_KMH, 1),
           roughnessRms: obs.roughnessRms === null ? null : round(obs.roughnessRms, 4),
           awRms: round(obs.awRms, 4),
           potholeCount: obs.potholeCount,
@@ -195,6 +215,7 @@ function live(): LiveResponse {
   const devices: LiveDevice[] = [...getDataset().sims.values()]
     .filter((sim) => sim.spec.live)
     .flatMap((sim) => {
+      // A finished live trip disappears from the live view a minute after its last batch.
       const last = lastSampleIndex(sim, now);
       if (now - sim.t[last] > LIVE_WINDOW_S * MS_PER_SECOND) return [];
       const window = ROUGHNESS_NOW_WINDOW_S * SERIES_HZ;
@@ -204,9 +225,8 @@ function live(): LiveResponse {
       for (let k = Math.max(0, last - LIVE_TRACK_S * SERIES_HZ); k <= last; k += SERIES_HZ / TRACK_HZ) {
         if (!inPrivacyZone(sim, k)) trackPoints.push([round(sim.lon[k]), round(sim.lat[k])]);
       }
-      const hoursRunning = (sim.t[last] - sim.t[0]) / MS_PER_SECOND / 3600;
+      const hoursRunning = (sim.t[last] - sim.t[0]) / MS_PER_SECOND / SECONDS_PER_HOUR;
       const prev = Math.max(0, last - SERIES_HZ);
-      const course = (Math.atan2(sim.lon[last] - sim.lon[prev], sim.lat[last] - sim.lat[prev]) * 180) / Math.PI;
       return [
         {
           deviceId: sim.spec.deviceId,
@@ -217,7 +237,7 @@ function live(): LiveResponse {
           lat: round(sim.lat[last]),
           lon: round(sim.lon[last]),
           speedMs: round(sim.speed[last], 2),
-          courseDeg: round((course + 360) % 360, 1),
+          courseDeg: round(bearingDeg([sim.lon[prev], sim.lat[prev]], [sim.lon[last], sim.lat[last]]), 1),
           hAccM: 4.2,
           roughnessNow: round(Math.sqrt(sumSquares / (window + 1)), 3),
           msdvSoFar: round(sim.msdv[last], 3),
@@ -231,8 +251,8 @@ function live(): LiveResponse {
 }
 
 function sessionList(query: URLSearchParams): SessionListResponse {
-  const source = query.get("source");
-  const vehicle = query.get("vehicle");
+  const source = enumParam(query, "source", Object.values(SessionSource));
+  const vehicle = enumParam(query, "vehicle", Object.values(VehicleType));
   const sessions = [...getDataset().sims.values()]
     .map((sim) => sessionSummary(sim))
     .filter((s) => (!source || s.source === source) && (!vehicle || s.vehicle.type === vehicle))
@@ -250,7 +270,7 @@ function allEvents(query: URLSearchParams): RoadEventCollection {
   const sims = [...getDataset().sims.values()].filter(
     (sim) => isIncluded(sim.spec) && (filter === VehicleFilters.ALL || sim.spec.vehicle.type === filter),
   );
-  return eventsOf(sims, query.get("type"));
+  return eventsOf(sims, enumParam(query, "type", Object.values(RoadEventType)));
 }
 
 /** Route table: the same paths the read API Lambda serves (dashboard/API.md). */

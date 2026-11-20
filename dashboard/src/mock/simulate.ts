@@ -232,15 +232,19 @@ export function simulateSession(spec: SessionSpec, startMs: number): SimulatedSe
     const f = b.t > a.t ? Math.min(1, (t - a.t) / (b.t - a.t)) : 0;
     const s = a.s + (b.s - a.s) * f;
     const v = a.s === b.s ? 0 : a.v + (b.v - a.v) * f;
+    // Cell and features come from the nearest grid point; the position is interpolated between the
+    // grid points on either side.
     const sample = sampleAt(s);
-    const next = route.samples[Math.min(lapSamples - 1, (Math.floor(s / ROUTE_STEP_M) % lapSamples) + 1)];
+    const baseIndex = Math.floor(s / ROUTE_STEP_M) % lapSamples;
+    const base = route.samples[baseIndex];
+    const next = route.samples[Math.min(lapSamples - 1, baseIndex + 1)];
     const within = (s % ROUTE_STEP_M) / ROUTE_STEP_M;
     const truth = world.cells.get(sample.cell);
 
     sim.t[k] = startMs + t * MS_PER_SECOND;
     sim.s[k] = s;
-    sim.lon[k] = sample.position[0] + (next.position[0] - sample.position[0]) * within;
-    sim.lat[k] = sample.position[1] + (next.position[1] - sample.position[1]) * within;
+    sim.lon[k] = base.position[0] + (next.position[0] - base.position[0]) * within;
+    sim.lat[k] = base.position[1] + (next.position[1] - base.position[1]) * within;
     sim.speed[k] = Math.max(0, v + random.gaussian() * 0.08 * Math.min(1, v));
     roughRms[k] = roughnessRms(truth?.roughness ?? 0.4, v, dyn, spec);
     sim.aVert[k] = random.gaussian() * roughRms[k];

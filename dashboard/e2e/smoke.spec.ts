@@ -52,8 +52,9 @@ test("live view lists the streaming phone and the replay", async ({ page }) => {
   const errors = trackErrors(page);
   await page.goto("/live");
   const panel = page.getByRole("complementary", { name: "Streaming devices" });
-  await expect(panel.getByText("Replay")).toBeVisible();
-  await expect(panel.getByText("Live", { exact: true })).toBeVisible();
+  // Badges, matched exactly: the panel's description also mentions "replays" and "live".
+  await expect(panel.locator('[data-slot="badge"]', { hasText: /^Replay$/ })).toBeVisible();
+  await expect(panel.locator('[data-slot="badge"]', { hasText: /^Live$/ })).toBeVisible();
   await expect(panel.getByText(/updated \d+ s ago/).first()).toBeVisible();
   expect(errors).toEqual([]);
 });
@@ -76,4 +77,28 @@ test("session page draws the synchronized charts", async ({ page }) => {
   await expect(page.locator(".uplot")).toHaveCount(4);
   await expect(page.getByText("Prediction vs. passenger ratings")).toBeVisible();
   expect(errors).toEqual([]);
+});
+
+test("the data-source dialog saves a choice and reloads with it", async ({ page }) => {
+  await page.goto("/sessions");
+  await page.getByRole("button", { name: /data source settings/ }).click();
+  const dialog = page.getByRole("dialog", { name: "Data source" });
+  // Pick the API with a half-typed URL first, then switch to mock: saving must still work.
+  await dialog.getByRole("combobox", { name: "Source" }).click();
+  await page.getByRole("option", { name: /Read API at this URL/ }).click();
+  await dialog.getByLabel(/API base URL/).fill("http://half-typ");
+  await dialog.getByRole("combobox", { name: "Source" }).click();
+  await page.getByRole("option", { name: /Mock data/ }).click();
+  await Promise.all([page.waitForEvent("load"), dialog.getByRole("button", { name: "Save and reload" }).click()]);
+  const saved = await page.evaluate(() => window.localStorage.getItem("dashboard.data-source"));
+  expect(JSON.parse(saved ?? "null")).toEqual({ mode: "mock", apiBase: "" });
+  await expect(page.getByRole("button", { name: /Mock data: data source settings/ })).toBeVisible();
+});
+
+test("forcing the API without an API URL explains the problem instead of showing mock data", async ({ page }, testInfo) => {
+  test.skip(testInfo.project.name === "api", "the API-mode site has an API URL in config.json");
+  await page.goto("/sessions?mock=0");
+  await expect(page.getByRole("alert")).toContainText("no API URL is configured");
+  await page.getByRole("button", { name: "Reset data source and reload" }).click();
+  await expect(page.getByRole("heading", { name: "Sessions" })).toBeVisible();
 });

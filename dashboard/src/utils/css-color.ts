@@ -5,7 +5,8 @@
 export function readCssColor(variable: string, element: Element = document.documentElement): string {
   const value = getComputedStyle(element).getPropertyValue(variable).trim();
   if (!value) return "";
-  // Normalize any CSS colour (oklch, color-mix, …) to rgb() through the browser.
+  // Let the browser resolve var()/color-mix() to a concrete colour (it may stay in oklch(), which
+  // MapLibre and canvas both accept).
   const probe = document.createElement("span");
   probe.style.color = value;
   probe.style.display = "none";

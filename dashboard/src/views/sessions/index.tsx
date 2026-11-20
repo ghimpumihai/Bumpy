@@ -9,8 +9,8 @@ import type { SessionListFilters } from "@/types/sessions";
 import { SessionFilters } from "./components/session-filters";
 import { SessionsTable } from "./components/sessions-table";
 import { ANY_FILTER, type SessionsSearch } from "./schema";
+import { TABLE_SKELETON_ROWS } from "./utils/constants";
 
-const TABLE_SKELETON_ROWS = 6;
 
 function toFilters(search: SessionsSearch): SessionListFilters {
   return {

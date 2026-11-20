@@ -6,19 +6,28 @@ import { VehicleLabel } from "@/components/status/vehicle-label";
 import { Badge } from "@/components/ui/badge";
 import { Card, CardContent } from "@/components/ui/card";
 import type { LiveDevice } from "@/types/live";
+import { StreamStatus } from "@/types/sessions";
 import { formatAge } from "@/utils/format-date-time";
 import { formatAcceleration, formatFraction, formatMsdv, formatSpeedFromMs } from "@/utils/format-number";
 
 import { LIVE_STALE_PROBLEM_MS, LIVE_STALE_WARN_MS } from "../utils/constants";
 
+const FRESHNESS_BADGE: Record<StreamStatus, "success" | "warning" | "destructive"> = {
+  [StreamStatus.OK]: "success",
+  [StreamStatus.WARN]: "warning",
+  [StreamStatus.PROBLEM]: "destructive",
+};
+
 interface LiveDeviceCardProps {
   device: LiveDevice;
+  /** Current time on the server's clock (so a wrong laptop clock can't make data look stale). */
   now: number;
 }
 
 export function LiveDeviceCard({ device, now }: LiveDeviceCardProps) {
   const ageMs = now - Date.parse(device.updatedAt);
-  const freshness = ageMs > LIVE_STALE_PROBLEM_MS ? "problem" : ageMs > LIVE_STALE_WARN_MS ? "warn" : "ok";
+  const freshness: StreamStatus =
+    ageMs > LIVE_STALE_PROBLEM_MS ? StreamStatus.PROBLEM : ageMs > LIVE_STALE_WARN_MS ? StreamStatus.WARN : StreamStatus.OK;
   const metrics = [
     { label: "Speed", value: formatSpeedFromMs(device.speedMs) },
     { label: "Roughness now", value: formatAcceleration(device.roughnessNow) },
@@ -40,8 +49,8 @@ export function LiveDeviceCard({ device, now }: LiveDeviceCardProps) {
           ))}
         </dl>
         <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-xs text-muted-foreground">
-          <span className="horizontal gap-1" aria-live="polite">
-            <Badge variant={freshness === "ok" ? "success" : freshness === "warn" ? "warning" : "destructive"}>
+          <span className="horizontal gap-1">
+            <Badge variant={FRESHNESS_BADGE[freshness]}>
               updated {formatAge(device.updatedAt, now)}
             </Badge>
           </span>

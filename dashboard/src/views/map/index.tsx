@@ -6,7 +6,7 @@ import { segmentsApi } from "@/api/segments";
 import { EventsLayer } from "@/components/map/events-layer";
 import { MapCanvas } from "@/components/map/map-canvas";
 import { MapLegend } from "@/components/map/map-legend";
-import { QueryState } from "@/components/query-state";
+import { ErrorAlert } from "@/components/error-alert";
 import type { Position } from "@/types/common";
 import { boundsOf } from "@/utils/geo";
 
@@ -47,7 +47,8 @@ export function MapView() {
       <div className="pointer-events-none absolute inset-x-3 top-3 flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
         <div className="pointer-events-auto vertical max-w-sm gap-3">
           <MapControls search={search} onChange={update} />
-          {segments.error && <QueryState isPending={false} error={segments.error} onRetry={() => void segments.refetch()}>{null}</QueryState>}
+          {segments.error && <ErrorAlert title="Road segments" error={segments.error} onRetry={() => void segments.refetch()} />}
+          {search.events && events.error && <ErrorAlert title="Detected events" error={events.error} onRetry={() => void events.refetch()} />}
         </div>
         <div className="pointer-events-auto hidden sm:mr-12 sm:block">
           <OverviewStrip />

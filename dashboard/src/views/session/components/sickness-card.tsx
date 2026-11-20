@@ -4,11 +4,12 @@ import type { SicknessSummary } from "@/types/sessions";
 import { formatTime } from "@/utils/format-date-time";
 import { formatMsdv, formatNumber } from "@/utils/format-number";
 
-const MAX_ROWS = 12;
+import { MAX_RATING_ROWS } from "../utils/constants";
+
 
 /** The ISO prediction next to what the passenger actually reported (plan 02 §9 step 6). */
 export function SicknessCard({ sickness }: { sickness: SicknessSummary }) {
-  const ratings = sickness.ratings.slice(-MAX_ROWS);
+  const ratings = sickness.ratings.slice(-MAX_RATING_ROWS);
   return (
     <Card>
       <CardHeader>

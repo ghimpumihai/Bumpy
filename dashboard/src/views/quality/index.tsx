@@ -1,4 +1,5 @@
 import { qualityApi } from "@/api/quality";
+import { PLACEHOLDER } from "@/constants";
 import { QueryState } from "@/components/query-state";
 import { StatCard } from "@/components/stat-card";
 import { Card, CardContent } from "@/components/ui/card";
@@ -10,14 +11,15 @@ import { QualityTable } from "./components/quality-table";
 export function QualityView() {
   const query = qualityApi.useQuality();
   const rows = query.data ?? [];
-  const count = (status: QualityStatus) => rows.filter((row) => row.qualityStatus === status).length;
+  // No counts until data exists, so a failed request doesn't read as "0 bad sessions".
+  const count = (status: QualityStatus) => (query.data ? rows.filter((row) => row.qualityStatus === status).length : PLACEHOLDER);
   return (
     <div className="vertical gap-4">
       <div className="grid grid-cols-2 gap-3 md:grid-cols-4">
         <StatCard label="Good" value={count(QualityStatus.OK)} hint="No problems found" />
         <StatCard label="Degraded" value={count(QualityStatus.DEGRADED)} hint="Counted, invalid windows skipped" />
         <StatCard label="Bad" value={count(QualityStatus.BAD)} hint="Kept out of the map automatically" />
-        <StatCard label="Excluded from roughness" value={rows.filter((row) => !row.roughnessEligible).length} hint="Hand-held or loose mount" />
+        <StatCard label="Excluded from roughness" value={query.data ? rows.filter((row) => !row.roughnessEligible).length : PLACEHOLDER} hint="Hand-held or loose mount" />
       </div>
       <Card className="py-0">
         <CardContent className="p-0">

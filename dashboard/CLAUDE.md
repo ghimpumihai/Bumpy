@@ -68,7 +68,8 @@ internal simulation types stay inside `src/mock/` (they are not part of the app'
 ```text
 src/
 ├── routes/        # TanStack file routes (thin): validateSearch + page component. routeTree.gen.ts is generated
-├── pages/         # Helmet <title> + PageWrapper + the View (the full-screen map page skips PageWrapper)
+├── pages/         # Helmet <title> + PageWrapper + the View. Exceptions: the full-screen Map and Live pages,
+│                  # and the Session page, which renders its own header (back link, badges) in a <main>
 ├── views/<feature>/
 │   ├── index.tsx  # the screen
 │   ├── schema.ts  # Zod schemas (search params, forms) + inferred types
@@ -110,8 +111,10 @@ src/
 
 ## Forms
 
-React Hook Form + Zod + `zodResolver`; validation only in the schema; `z.infer` for form types;
-`useWatch` instead of `watch` (React Compiler compatible); `shouldUnregister: true` with `defaultValues`.
+React Hook Form + Zod + `zodResolver`; validation only in the schema; `z.input`/`z.output` for form types
+when the schema transforms; `useWatch` instead of `watch` (React Compiler compatible). Use
+`shouldUnregister: true` only for forms reused across entities; a field that is merely hidden (e.g. the API
+URL in mock mode) stays registered, and the schema decides when it is validated.
 
 ## Maps and charts
 
@@ -119,7 +122,10 @@ React Hook Form + Zod + `zodResolver`; validation only in the schema; `z.infer` 
   waits for base-map tiles). If the style cannot be fetched (offline), it switches to a plain fallback
   style and data layers still render.
 - Add data with `GeoJsonLayer` (declarative source + layers); never call `map.addLayer` in views.
-- Map and chart colours come from CSS tokens via `useThemeColors` — one source for legend and paint.
+- Map and chart colours come from CSS tokens via `useThemeColors` — one source for legend and paint. It
+  re-reads them when `<html>`'s class changes (after next-themes applied the theme), never on theme state.
+- `GeoJsonLayer` creates its source and layers once per style and applies later spec changes in place
+  (`setPaintProperty` / `setLayoutProperty` / `setFilter`), so layer order is stable and data isn't re-uploaded.
 - `TimeSeriesChart` wraps uPlot; charts in one view share a `syncKey` cursor.
 
 ## Styling

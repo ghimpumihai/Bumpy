@@ -6,6 +6,7 @@ import { StrictMode } from "react";
 import { createRoot } from "react-dom/client";
 import { HelmetProvider } from "react-helmet-async";
 
+import { StartupError } from "@/components/startup-error";
 import { Toaster } from "@/components/ui/sonner";
 import { TooltipProvider } from "@/components/ui/tooltip";
 import { configureApiClient } from "@/config/api-client";
@@ -30,15 +31,19 @@ declare module "@tanstack/react-router" {
   }
 }
 
+function rootElement(): HTMLElement {
+  const root = document.getElementById("root");
+  if (!root) throw new Error("#root element missing from index.html");
+  return root;
+}
+
 async function bootstrap() {
   const dataSource = await resolveDataSource();
   await configureApiClient(dataSource);
   const queryClient = createQueryClient();
   const router = createAppRouter(queryClient, dataSource);
-  const root = document.getElementById("root");
-  if (!root) throw new Error("#root element missing from index.html");
 
-  createRoot(root).render(
+  createRoot(rootElement()).render(
     <StrictMode>
       <HelmetProvider>
         <ThemeProvider
@@ -63,4 +68,9 @@ async function bootstrap() {
   );
 }
 
-void bootstrap();
+// A failed start (no API URL for an explicit API choice, a stale lazy chunk after a redeploy, …)
+// shows a message instead of a blank page.
+bootstrap().catch((error: unknown) => {
+  console.error(error);
+  createRoot(rootElement()).render(<StartupError message={error instanceof Error ? error.message : String(error)} />);
+});

@@ -4,6 +4,7 @@ import relativeTime from "dayjs/plugin/relativeTime";
 
 import { PLACEHOLDER } from "@/constants";
 import { DATE_FORMAT, DATE_TIME_FORMAT, TIME_FORMAT } from "@/constants/date-time";
+import { MS_PER_SECOND, SECONDS_PER_MINUTE } from "@/constants/units";
 
 dayjs.extend(duration);
 dayjs.extend(relativeTime);
@@ -30,7 +31,7 @@ export function formatDuration(seconds: number | null | undefined): string {
 /** `5 s ago`, `3 minutes ago`, relative to `now`. */
 export function formatAge(value: DateInput, now: number = Date.now()): string {
   if (isMissing(value)) return PLACEHOLDER;
-  const seconds = Math.max(0, Math.round((now - dayjs(value).valueOf()) / 1000));
-  if (seconds < 60) return `${seconds} s ago`;
+  const seconds = Math.max(0, Math.round((now - dayjs(value).valueOf()) / MS_PER_SECOND));
+  if (seconds < SECONDS_PER_MINUTE) return `${seconds} s ago`;
   return dayjs(value).from(now);
 }

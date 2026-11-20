@@ -58,6 +58,40 @@ describe("mock dataset", () => {
     expect(values[Math.floor(values.length / 2)]).toBeLessThan(0.8);
   });
 
+  it("trims the end of a finished trip too (open route, so start and end differ)", () => {
+    const id = "e4c7b2a9-6d1f-4e38-8b0a-3c9e5d2f1b77";
+    const sim = getDataset().sims.get(id);
+    if (!sim) throw new Error("bus session missing");
+    const track = get<SessionTrack>(`/api/sessions/${id}/track`);
+    const lastSample: [number, number] = [sim.lon[sim.lon.length - 1], sim.lat[sim.lat.length - 1]];
+    expect(haversineM(lastSample, track.geometry.coordinates.at(-1) as [number, number])).toBeGreaterThan(PRIVACY_TRIM_M * 0.6);
+  });
+
+  it("counts only the events the API publishes", () => {
+    for (const s of get<SessionListResponse>("/api/sessions").sessions) {
+      const events = get<{ features: { properties: { type: string } }[] }>(`/api/sessions/${s.sessionId}/events`).features;
+      expect(events.filter((e) => e.properties.type === "pothole")).toHaveLength(s.eventCounts.pothole);
+    }
+  });
+
+  it("never teleports: consecutive positions are at most a few metres apart", () => {
+    for (const sim of getDataset().sims.values()) {
+      let maxStep = 0;
+      for (let k = 1; k < sim.t.length; k++) maxStep = Math.max(maxStep, haversineM([sim.lon[k - 1], sim.lat[k - 1]], [sim.lon[k], sim.lat[k]]));
+      // 0.2 s at the fastest cruise speed (50 km/h ≈ 2.8 m), plus a grid-step margin.
+      expect(maxStep, sim.spec.sessionId).toBeLessThan(8);
+    }
+  });
+
+  it("ends live trips when their recording ends", () => {
+    const sim = getDataset().sims.get("c3e9a7b1-6d2f-4f80-b4e5-9a1c7e3d5b87");
+    if (!sim) throw new Error("live replay missing");
+    const afterEnd = sim.t[sim.t.length - 1] + 120_000;
+    const summary = sessionSummary(sim, afterEnd);
+    expect(summary.status).toBe("complete");
+    expect(summary.endedAt).not.toBeNull();
+  });
+
   it("trims the public track at both ends for privacy", () => {
     const sim = getDataset().sims.get("3f1c2b9e-0d4a-4e7b-9c51-6a2d8e0f4b11");
     const track = get<SessionTrack>("/api/sessions/3f1c2b9e-0d4a-4e7b-9c51-6a2d8e0f4b11/track");
@@ -83,5 +117,8 @@ describe("mock dataset", () => {
     expect(() => get("/api/sessions/nope")).toThrowError(MockHttpError);
     expect(() => get("/api/segments", "vehicle=plane")).toThrow(/vehicle must be/);
     expect(() => get("/api/nothing")).toThrow(/no route/);
+    expect(() => get("/api/sessions", "source=bogus")).toThrow(/source must be/);
+    expect(() => get("/api/sessions", "vehicle=plane")).toThrow(/vehicle must be/);
+    expect(() => get("/api/events", "type=meteor")).toThrow(/type must be/);
   });
 });

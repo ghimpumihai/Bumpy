@@ -271,7 +271,8 @@ export const SESSION_SPECS: SessionSpec[] = [
     sessionId: "c3e9a7b1-6d2f-4f80-b4e5-9a1c7e3d5b87",
     deviceId: "replay-tool",
     routeId: "bus35",
-    laps: 4,
+    // A replay re-sends exactly the original trip (one pass over an open route, which must not wrap).
+    laps: 1,
     vehicle: BUS_35,
     cruiseKmh: 32,
     startedAt: null,

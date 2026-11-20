@@ -2,21 +2,32 @@
 """quick_check.py: dry-run verifier for one exported SensorRecorder session folder (spec §10).
 
 Usage:
-    python3 tools/quick_check.py <session_folder>
+    python3 -I tools/quick_check.py <session_folder>
 
-Stdlib only (csv, json). Checks every CSV the app writes against the headers in
+Stdlib only (csv, json), Python 3.9+. Checks every CSV the app writes against the headers in
 SensorRecorder/Core/SessionFiles.swift, then reports per stream: row count, median rate
 (1 / median diff of t_up), max gap, gaps > 1 s, non-monotonic t_up and malformed rows.
 
 Pass criteria (spec §10):
-  - device_motion / accel_raw / gyro_raw: median rate >= 90 Hz and max gap < 0.1 s  (else FAIL)
+  - device_motion / accel_raw / gyro_raw: median rate >= 90 Hz and max gap < 0.1 s; fewer than
+    2 rows is a FAIL
   - mag_raw ~50 Hz (WARN only), audio_level ~10 Hz (WARN only)
-  - location ~1 Hz, lat/lon valid and not 0,0, h_acc median reported
-  - t_utc_ms of motion rows agrees with clock.csv anchors to within a few ms
-  - labels present, audio segments present and consistent with audio_segments.csv
-  - session.json sane (ended, not recovered, not synthetic, preflight not overridden)
+  - location ~1 Hz, lat/lon valid and not 0,0, h_acc median reported; 0 rows is a FAIL
+  - altimeter / heading / abs_altitude / activity / device with a header but 0 data rows: WARN
+  - t_utc_ms of motion rows vs clock.csv anchors: <= 20 ms PASS, <= 100 ms WARN, > 100 ms FAIL
+  - labels present (WARN if none); multi-line quoted notes are parsed with the csv module
+  - audio: if session.json audioEnabled is false, no audio file is expected (level meter only);
+    otherwise (true, or missing in older app versions) no audio_*.m4a is a FAIL. Files must be
+    consistent with audio_segments.csv. audio_level.csv is expected in both cases (WARN if missing)
+  - session.json: WARN if not ended cleanly (endedAtUtc null), recovered, synthetic sensors,
+    preflight overridden/missing, mount.handheld true or mount.rigid false (the backend excludes
+    such sessions from roughness). Keys added in newer app versions (audioEnabled, vehicle.line,
+    mount.handheld, mount.seatOverAxle, people.raterPosture) are INFO when absent.
 
-Prints a final line "OVERALL: PASS|WARN|FAIL". Exit code 0 for PASS/WARN, 1 for FAIL.
+A check that hits unexpected data (wrong header, unreadable file, ...) becomes a FAIL line for
+that file; the remaining checks still run and the summary is always printed.
+
+Prints a final line "OVERALL: PASS|WARN|FAIL". Exit code 0 for PASS/WARN, 1 for FAIL, 2 for usage.
 """
 
 import bisect
@@ -64,20 +75,29 @@ RATE_RULES = {
 STREAM_ORDER = ["device_motion", "accel_raw", "gyro_raw", "mag_raw", "location", "heading",
                 "altimeter", "abs_altitude", "activity", "audio_level", "device"]
 MISSING_SEVERITY = {"location": "FAIL", "clock": "FAIL", "labels": "WARN"}
+# Slow / event-driven streams: a header with 0 data rows means the sensor never delivered (no
+# barometer on the Simulator, permission denied, ...). Worth a WARN, not a silent PASS.
+ZERO_ROW_WARN = ("heading", "altimeter", "abs_altitude", "activity", "device")
 
-UTC_DEV_OK_MS = 20.0      # max |t_utc_ms - anchor-derived utc| considered fine
-UTC_DEV_FAIL_MS = 1000.0  # beyond this the time base is broken
+UTC_DEV_OK_MS = 20.0     # max |t_utc_ms - anchor-derived utc| considered fine (PASS)
+UTC_DEV_FAIL_MS = 100.0  # beyond this the time base is broken (FAIL); in between WARN
 
+RATER_POSTURES = ("seated", "standing")
 RANK = {"PASS": 0, "WARN": 1, "FAIL": 2}
 
 
 class Report:
     def __init__(self):
-        self.issues = []  # (severity, message)
+        self.issues = []  # (severity, message), severity in WARN/FAIL
+        self.infos = []
 
     def add(self, severity, msg):
         self.issues.append((severity, msg))
         print(f"  [{severity}] {msg}")
+
+    def info(self, msg):
+        self.infos.append(msg)
+        print(f"  [INFO] {msg}")
 
     def ok(self, msg):
         print(f"  [PASS] {msg}")
@@ -89,6 +109,17 @@ class Report:
             if RANK[sev] > RANK[worst]:
                 worst = sev
         return worst
+
+
+def guarded(rep, label, fn, *args, default=None):
+    """Run one check; any unexpected exception becomes a FAIL line for `label` instead of a crash."""
+    try:
+        return fn(*args)
+    except Exception as e:  # noqa: BLE001 - the verifier must never crash on odd input
+        detail = f"missing column/key {e.args[0]!r}" if isinstance(e, KeyError) and e.args else \
+            f"{type(e).__name__}: {e}"
+        rep.add("FAIL", f"{label}: could not be checked ({detail})")
+        return default
 
 
 def fnum(s):
@@ -114,14 +145,18 @@ def read_csv(path, name, rep):
     """Read a CSV with the csv module (handles quoted fields with commas/newlines).
     Validates the header and per-row column count. Returns (header, [(line_no, row), ...]) with
     only well-formed rows; header is None for an empty file."""
+    header, rows = None, []
     with open(path, newline="", encoding="utf-8", errors="replace") as fh:
         reader = csv.reader(fh)
-        header = next(reader, None)
-        rows = []
-        for row in reader:
-            if not row:  # skip blank lines
-                continue
-            rows.append((reader.line_num, row))
+        try:
+            header = next(reader, None)
+            for row in reader:
+                if not row:  # skip blank lines
+                    continue
+                rows.append((reader.line_num, row))
+        except csv.Error as e:
+            rep.add("FAIL", f"{name}.csv: CSV parse error near line {reader.line_num}: {e} "
+                            f"({len(rows)} rows read before it)")
     expected = EXPECTED_HEADERS.get(name)
     if header is None:
         rep.add("FAIL", f"{name}.csv: empty file (no header)")
@@ -141,6 +176,15 @@ def read_csv(path, name, rep):
                             f"(expected {ncol}; first at line {bad[0][0]} has {bad[0][1]})")
     good = [(ln, r) for ln, r in rows if len(r) == ncol]
     return header, good
+
+
+def require_columns(name, idx, cols, rep):
+    """FAIL (named) if any column needed for a semantic check is absent; returns True if all present."""
+    missing = [c for c in cols if c not in idx]
+    if missing:
+        rep.add("FAIL", f"{name}.csv: cannot check contents, column(s) missing: {', '.join(missing)}")
+        return False
+    return True
 
 
 def timing_stats(tups):
@@ -232,76 +276,86 @@ def check_streams(folder, rep, anchors):
     span = [None, None]  # overall t_up span of motion data, for label sanity
     utc_firstlast = {}
     for name in STREAM_ORDER:
-        path = os.path.join(folder, f"{name}.csv")
-        if not os.path.exists(path):
-            sev = RATE_RULES[name][3] if name in RATE_RULES else MISSING_SEVERITY.get(name, "WARN")
-            print(f"  {name:14s} MISSING")
-            rep.add(sev, f"MISSING {name}.csv")
-            continue
-        header, rows = read_csv(path, name, rep)
-        if header is None:
-            continue
-        idx = {h: i for i, h in enumerate(header)}
-        it, iu = idx.get("t_up", 0), idx.get("t_utc_ms", 1)
-        tups_all = [fnum(r[it]) for _, r in rows]
-        utcs_all = [fnum(r[iu]) for _, r in rows]
-        bad_t = sum(1 for t in tups_all if t is None)
-        tups = [t for t in tups_all if t is not None]
-        st = timing_stats(tups)
-        rate = f"{st['rate']:7.2f}Hz" if st["rate"] else "      n/a"
-        gap = f"{st['max_gap']:8.3f}s" if st["max_gap"] is not None else "      n/a"
-        print(f"  {name:14s} {st['rows']:8d} {rate:>9s} {gap:>9s} {st['gaps_1s']:7d} {st['nonmono']:7d}")
-        if bad_t:
-            rep.add("WARN", f"{name}: {bad_t} rows with empty/invalid t_up")
-        if st["nonmono"]:
-            rep.add("FAIL" if name in MOTION else "WARN",
-                    f"{name}: {st['nonmono']} non-monotonic t_up steps")
-        valid_utc = [u for u in utcs_all if u is not None]
-        if valid_utc:
-            utc_firstlast[name] = (valid_utc[0], valid_utc[-1])
-
-        if name in RATE_RULES:
-            min_hz, max_gap, sev, _ = RATE_RULES[name]
-            if st["rows"] < 2:
-                rep.add(sev, f"{name}: only {st['rows']} rows")
-            else:
-                problems = []
-                if st["rate"] is None or st["rate"] < min_hz:
-                    problems.append(f"median rate {st['rate'] or 0:.1f} Hz < {min_hz:.0f} Hz")
-                if st["max_gap"] >= max_gap:
-                    problems.append(f"max gap {st['max_gap']:.3f}s >= {max_gap}s "
-                                    f"({st['gaps_1s']} gaps > 1 s)")
-                if problems:
-                    rep.add(sev, f"{name}: " + "; ".join(problems))
-                else:
-                    rep.ok(f"{name}: {st['rate']:.1f} Hz, max gap {st['max_gap']:.3f}s")
-
-        if name in MOTION and tups:
-            span[0] = tups[0] if span[0] is None else min(span[0], tups[0])
-            span[1] = tups[-1] if span[1] is None else max(span[1], tups[-1])
-            near, best = utc_deviation(anchors, tups_all, utcs_all)
-            if near is None:
-                rep.add("WARN", f"{name}: t_utc_ms not verifiable (no clock anchors)")
-            elif not valid_utc:
-                rep.add("FAIL", f"{name}: no valid t_utc_ms values")
-            else:
-                msg = (f"{name}: t_utc_ms vs clock anchors max |dev| = {near:.1f} ms nearest-anchor, "
-                       f"{best:.1f} ms best-adjacent-anchor")
-                if best > UTC_DEV_FAIL_MS:
-                    rep.add("FAIL", msg)
-                elif best > UTC_DEV_OK_MS:
-                    rep.add("WARN", msg)
-                else:
-                    rep.ok(msg)
-
-        if name == "location":
-            check_location(rows, idx, st, rep)
+        guarded(rep, f"{name}.csv", check_one_stream, folder, name, rep, anchors, span, utc_firstlast)
     return span, utc_firstlast
+
+
+def check_one_stream(folder, name, rep, anchors, span, utc_firstlast):
+    path = os.path.join(folder, f"{name}.csv")
+    if not os.path.exists(path):
+        sev = RATE_RULES[name][3] if name in RATE_RULES else MISSING_SEVERITY.get(name, "WARN")
+        print(f"  {name:14s} MISSING")
+        rep.add(sev, f"MISSING {name}.csv")
+        return
+    header, rows = read_csv(path, name, rep)
+    if header is None:
+        return
+    idx = {h: i for i, h in enumerate(header)}
+    it, iu = idx.get("t_up", 0), idx.get("t_utc_ms", 1)
+    tups_all = [fnum(r[it]) for _, r in rows]
+    utcs_all = [fnum(r[iu]) for _, r in rows]
+    bad_t = sum(1 for t in tups_all if t is None)
+    tups = [t for t in tups_all if t is not None]
+    st = timing_stats(tups)
+    rate = f"{st['rate']:7.2f}Hz" if st["rate"] else "      n/a"
+    gap = f"{st['max_gap']:8.3f}s" if st["max_gap"] is not None else "      n/a"
+    print(f"  {name:14s} {st['rows']:8d} {rate:>9s} {gap:>9s} {st['gaps_1s']:7d} {st['nonmono']:7d}")
+    if bad_t:
+        rep.add("WARN", f"{name}: {bad_t} rows with empty/invalid t_up")
+    if st["nonmono"]:
+        rep.add("FAIL" if name in MOTION else "WARN",
+                f"{name}: {st['nonmono']} non-monotonic t_up steps")
+    valid_utc = [u for u in utcs_all if u is not None]
+    if valid_utc:
+        utc_firstlast[name] = (valid_utc[0], valid_utc[-1])
+
+    if name in ZERO_ROW_WARN and not rows:
+        rep.add("WARN", f"{name}.csv: header only, 0 data rows (sensor never delivered)")
+
+    if name in RATE_RULES:
+        min_hz, max_gap, sev, _ = RATE_RULES[name]
+        if st["rows"] < 2:
+            rep.add(sev, f"{name}: only {st['rows']} data rows")
+        else:
+            problems = []
+            if st["rate"] is None or st["rate"] < min_hz:
+                problems.append(f"median rate {st['rate'] or 0:.1f} Hz < {min_hz:.0f} Hz")
+            if st["max_gap"] >= max_gap:
+                problems.append(f"max gap {st['max_gap']:.3f}s >= {max_gap}s "
+                                f"({st['gaps_1s']} gaps > 1 s)")
+            if problems:
+                rep.add(sev, f"{name}: " + "; ".join(problems))
+            else:
+                rep.ok(f"{name}: {st['rate']:.1f} Hz, max gap {st['max_gap']:.3f}s")
+
+    if name in MOTION and tups:
+        span[0] = tups[0] if span[0] is None else min(span[0], tups[0])
+        span[1] = tups[-1] if span[1] is None else max(span[1], tups[-1])
+        near, best = utc_deviation(anchors, tups_all, utcs_all)
+        if near is None:
+            rep.add("WARN", f"{name}: t_utc_ms not verifiable (no clock anchors)")
+        elif not valid_utc:
+            rep.add("FAIL", f"{name}: no valid t_utc_ms values")
+        else:
+            msg = (f"{name}: t_utc_ms vs clock anchors max |dev| = {near:.1f} ms nearest-anchor, "
+                   f"{best:.1f} ms best-adjacent-anchor (PASS <= {UTC_DEV_OK_MS:.0f} ms, "
+                   f"FAIL > {UTC_DEV_FAIL_MS:.0f} ms)")
+            if best > UTC_DEV_FAIL_MS:
+                rep.add("FAIL", msg)
+            elif best > UTC_DEV_OK_MS:
+                rep.add("WARN", msg)
+            else:
+                rep.ok(msg)
+
+    if name == "location":
+        check_location(rows, idx, st, rep)
 
 
 def check_location(rows, idx, st, rep):
     if st["rows"] == 0:
         rep.add("FAIL", "location: 0 rows (no GPS fix)")
+        return
+    if not require_columns("location", idx, ("lat", "lon", "h_acc", "is_simulated"), rep):
         return
     bad, sim, hacc = 0, 0, []
     for _, r in rows:
@@ -341,7 +395,7 @@ def check_utc_realtime(utc_firstlast, meta, rep):
     for name, (a, b) in utc_firstlast.items():
         if not (lo <= a <= hi and lo <= b <= hi):
             rep.add("FAIL", f"{name}: t_utc_ms outside plausible range ({human_utc(a)} .. {human_utc(b)})")
-    started = parse_iso(meta.get("startedAtUtc")) if meta else None
+    started = parse_iso(meta.get("startedAtUtc")) if isinstance(meta, dict) else None
     if started is not None and "device_motion" in utc_firstlast:
         d = (utc_firstlast["device_motion"][0] - started) / 1000.0
         print(f"  first device_motion sample is {d:+.1f}s after session.json startedAtUtc")
@@ -364,16 +418,19 @@ def check_labels(folder, rep, span):
     if not os.path.exists(path):
         rep.add("WARN", "MISSING labels.csv")
         return
+    # csv module: a note with commas/newlines is one quoted field, so a multi-line note counts once.
     header, rows = read_csv(path, "labels", rep)
     if header is None:
         return
     idx = {h: i for i, h in enumerate(header)}
+    if not require_columns("labels", idx, ("t_up", "type"), rep):
+        return
     counts = {}
     outside = 0
     for _, r in rows:
-        typ = r[idx["type"]] if "type" in idx else "?"
+        typ = r[idx["type"]]
         counts[typ] = counts.get(typ, 0) + 1
-        t = fnum(r[idx.get("t_up", 0)])
+        t = fnum(r[idx["t_up"]])
         if span[0] is not None and t is not None and not (span[0] - 5 <= t <= span[1] + 5):
             outside += 1
     print(f"  rows={len(rows)}  " + ", ".join(f"{k}={v}" for k, v in sorted(counts.items())))
@@ -385,8 +442,31 @@ def check_labels(folder, rep, span):
         rep.add("WARN", f"labels: {outside} labels have t_up outside the motion data time span")
 
 
-def check_audio(folder, rep, anchors_present):
+def audio_segment_starts(folder, rep):
+    """Returns the list of files with a 'start' event in audio_segments.csv, or None if absent."""
+    seg_path = os.path.join(folder, "audio_segments.csv")
+    if not os.path.exists(seg_path):
+        return None
+    header, rows = read_csv(seg_path, "audio_segments", rep)
+    if header is None:
+        return []
+    idx = {h: i for i, h in enumerate(header)}
+    if not require_columns("audio_segments", idx, ("event", "file"), rep):
+        return []
+    events, started = {}, []
+    for _, r in rows:
+        ev = r[idx["event"]]
+        events[ev] = events.get(ev, 0) + 1
+        if ev == "start":
+            started.append(r[idx["file"]])
+    print("  audio_segments events: " + (", ".join(f"{k}={v}" for k, v in sorted(events.items()))
+                                         or "(none)"))
+    return started
+
+
+def check_audio(folder, rep, anchors_present, meta):
     print("\n== audio ==")
+    enabled = meta.get("audioEnabled", True) if isinstance(meta, dict) else True
     files = sorted(f for f in os.listdir(folder)
                    if f.startswith("audio_") and f.endswith(".m4a"))
     legacy = os.path.exists(os.path.join(folder, "audio.m4a"))
@@ -399,29 +479,26 @@ def check_audio(folder, rep, anchors_present):
         print(f"  {f:16s} {size:>12,d} bytes")
         if size == 0:
             rep.add("WARN", f"{f} is empty (0 bytes)")
+
+    if enabled is False:
+        started = audio_segment_starts(folder, rep) or []
+        if not files and not started:
+            rep.ok("audio recording OFF (privacy) — level meter only (audio_level.csv)")
+            return
+        rep.add("WARN", f"session.json audioEnabled=false but {len(files)} audio file(s) / "
+                        f"{len(started)} segment start(s) present - check privacy (spec §3.5)")
     if not files:
         print("  audio MISSING")
-        rep.add("WARN", "MISSING audio (no audio_*.m4a or audio.m4a)")
+        rep.add("FAIL", "MISSING audio: audioEnabled is true (or absent) but no audio_*.m4a / "
+                        "audio.m4a in the folder")
         return
     print(f"  total {total:,d} bytes in {len(files)} file(s)")
 
-    seg_path = os.path.join(folder, "audio_segments.csv")
-    if not os.path.exists(seg_path):
+    started = audio_segment_starts(folder, rep)
+    if started is None:
         if not legacy:
             rep.add("WARN", "MISSING audio_segments.csv (cannot cross-check audio files)")
         return
-    header, rows = read_csv(seg_path, "audio_segments", rep)
-    if header is None:
-        return
-    idx = {h: i for i, h in enumerate(header)}
-    events = {}
-    started = []
-    for _, r in rows:
-        ev = r[idx["event"]]
-        events[ev] = events.get(ev, 0) + 1
-        if ev == "start":
-            started.append(r[idx["file"]])
-    print("  audio_segments events: " + ", ".join(f"{k}={v}" for k, v in sorted(events.items())))
     on_disk = set(f for f in files if f != "audio.m4a")
     missing = [f for f in started if f not in on_disk]
     extra = sorted(on_disk - set(started))
@@ -441,6 +518,49 @@ def check_audio(folder, rep, anchors_present):
                             f"audio_segments.csv has {len(started)} start events")
 
 
+def _obj(meta, key):
+    v = meta.get(key)
+    return v if isinstance(v, dict) else {}
+
+
+def check_session_fields(meta, rep):
+    """Vehicle / mount / people / audio fields. Keys added in newer app versions are INFO if absent."""
+    vehicle, mount, people = _obj(meta, "vehicle"), _obj(meta, "mount"), _obj(meta, "people")
+
+    def show(label, container, key, newer):
+        present = key in container
+        val = container.get(key)
+        print(f"  {label:21s}: {json.dumps(val) if present else '(absent)'}")
+        if not present and newer:
+            rep.info(f"session.json: no {label} (older app version)")
+        return present, val
+
+    show("vehicle.type", vehicle, "type", False)
+    has_line, line = show("vehicle.line", vehicle, "line", True)
+    show("mount.rigid", mount, "rigid", False)
+    has_hand, handheld = show("mount.handheld", mount, "handheld", True)
+    has_axle, axle = show("mount.seatOverAxle", mount, "seatOverAxle", True)
+    has_post, posture = show("people.raterPosture", people, "raterPosture", True)
+    has_audio, audio = show("audioEnabled", meta, "audioEnabled", True)
+
+    if has_line and line is not None and not isinstance(line, str):
+        rep.add("WARN", f"session.json: vehicle.line should be a string or null, got {line!r}")
+    if vehicle.get("type") in ("bus", "tram") and not line:
+        rep.info("session.json: public-transport session without a line number")
+    for present, val, label in ((has_hand, handheld, "mount.handheld"),
+                                (has_axle, axle, "mount.seatOverAxle"),
+                                (has_audio, audio, "audioEnabled")):
+        if present and not isinstance(val, bool):
+            rep.add("WARN", f"session.json: {label} should be true/false, got {val!r}")
+    if has_post and posture not in RATER_POSTURES:
+        rep.add("WARN", f"session.json: people.raterPosture should be one of "
+                        f"{'/'.join(RATER_POSTURES)}, got {posture!r}")
+    if handheld is True:
+        rep.add("WARN", "session.json: mount.handheld=true - excluded from roughness by the backend")
+    if mount.get("rigid") is False:
+        rep.add("WARN", "session.json: mount.rigid=false - excluded from roughness by the backend")
+
+
 def check_session_json(folder, rep):
     print("\n== session.json ==")
     path = os.path.join(folder, "session.json")
@@ -456,13 +576,13 @@ def check_session_json(folder, rep):
     if not isinstance(meta, dict):
         rep.add("FAIL", "session.json is not a JSON object")
         return None
-    pre = meta.get("preflight") or {}
-    print(f"  sessionId        : {meta.get('sessionId')}")
-    print(f"  startedAtUtc     : {meta.get('startedAtUtc')}")
-    print(f"  endedAtUtc       : {meta.get('endedAtUtc')}")
-    print(f"  recovered        : {meta.get('recovered')}")
-    print(f"  syntheticSensors : {meta.get('syntheticSensors')}")
-    print(f"  preflight.overridden: {pre.get('overridden') if pre else '(no preflight)'}")
+    pre = _obj(meta, "preflight")
+    print(f"  sessionId            : {meta.get('sessionId')}")
+    print(f"  startedAtUtc         : {meta.get('startedAtUtc')}")
+    print(f"  endedAtUtc           : {meta.get('endedAtUtc')}")
+    print(f"  recovered            : {meta.get('recovered')}")
+    print(f"  syntheticSensors     : {meta.get('syntheticSensors')}")
+    print(f"  preflight.overridden : {pre.get('overridden') if pre else '(no preflight)'}")
     if not meta.get("sessionId"):
         rep.add("FAIL", "session.json: missing sessionId")
     if meta.get("endedAtUtc") is None:
@@ -481,6 +601,7 @@ def check_session_json(folder, rep):
         rep.add("WARN", "session.json: preflight was overridden")
     elif not pre:
         rep.add("WARN", "session.json: no preflight record")
+    guarded(rep, "session.json fields", check_session_fields, meta, rep)
     return meta
 
 
@@ -488,18 +609,23 @@ def main(argv):
     if len(argv) != 2 or argv[1] in ("-h", "--help"):
         print(__doc__)
         return 0 if len(argv) == 2 else 2
+    try:  # never die on a console that cannot print the em dash / non-ASCII notes
+        sys.stdout.reconfigure(errors="replace")
+    except (AttributeError, ValueError):
+        pass
     folder = argv[1]
     if not os.path.isdir(folder):
         print(f"not a directory: {folder}")
         return 2
     print(f"Session folder: {os.path.abspath(folder)}")
     rep = Report()
-    meta = check_session_json(folder, rep)
-    anchors = load_clock(folder, rep)
-    span, utc_firstlast = check_streams(folder, rep, anchors)
-    check_utc_realtime(utc_firstlast, meta, rep)
-    check_labels(folder, rep, span)
-    check_audio(folder, rep, bool(anchors))
+    meta = guarded(rep, "session.json", check_session_json, folder, rep)
+    anchors = guarded(rep, "clock.csv", load_clock, folder, rep, default=[])
+    span, utc_firstlast = guarded(rep, "sensor streams", check_streams, folder, rep, anchors,
+                                  default=([None, None], {}))
+    guarded(rep, "real-time check", check_utc_realtime, utc_firstlast, meta, rep)
+    guarded(rep, "labels.csv", check_labels, folder, rep, span)
+    guarded(rep, "audio", check_audio, folder, rep, bool(anchors), meta)
 
     overall = rep.overall
     print("\n== summary ==")
@@ -507,6 +633,8 @@ def main(argv):
         for s, msg in rep.issues:
             if s == sev:
                 print(f"  {sev}: {msg.splitlines()[0]}")
+    for msg in rep.infos:
+        print(f"  INFO: {msg}")
     n_fail = sum(1 for s, _ in rep.issues if s == "FAIL")
     n_warn = sum(1 for s, _ in rep.issues if s == "WARN")
     print(f"OVERALL: {overall}  ({n_fail} fail, {n_warn} warn)")

@@ -1,22 +1,35 @@
 #!/usr/bin/env python3
-"""mock_ingest_server.py: stdlib mock of the Azure ingest backend (spec §6) for local testing.
+"""mock_ingest_server.py: stdlib stand-in for the AWS ingest backend (API Gateway + ingest Lambda,
+decisions/02-infrastructure-plan.md §6/§7; app contract spec §6) for local testing.
 
 Usage:
-    python3 tools/mock_ingest_server.py [--port 8080] [--key KEY] [--out DIR] [--fail-every N]
+    python3 -I tools/mock_ingest_server.py [--port 8080] [--host 0.0.0.0] [--key KEY] [--out DIR]
+                                           [--fail-every N] [--dup-status {200,409}]
 
 Then set the app's API base URL to http://<laptop-LAN-IP>:<port> (and the device key to KEY).
 Note: iOS App Transport Security blocks plain http unless the app allows it (or use a tunnel).
+--port 0 picks a free port; the first output line names the bound URL.
 
-Endpoints:
-  GET  /api/health -> 200 {"ok": true}; 401 if --key is set and x-device-key differs.
-  POST /api/ingest -> body must be gzip JSON (Content-Encoding: gzip), schemaVersion 1.
-       201 accepted | 400 malformed/invalid (reason in JSON "error") | 401 bad x-device-key
-       409 duplicate (sessionId, batchSeq) already accepted (in-memory dedupe)
-       503 every Nth POST /api/ingest when --fail-every N is given (tests retry/backoff)
-  x-idempotency-key, when present, must equal "<sessionId>:<batchSeq>".
+Endpoint (the only route; anything else is 404 like API Gateway, including GET /api/health):
+  POST /api/ingest, checked in the same order as the Lambda:
+    1. x-device-key (401 if --key is set and the header differs)
+    2. Content-Encoding exactly "gzip" (400 otherwise, e.g. "x-gzip" or "gzip, br"),
+       Content-Type application/json (400)
+    3. gunzip with a size cap (413 compressed > 20 MB; 400 inflated > 100 MB, truncated stream,
+       trailing data or more than one gzip member)
+    4. JSON parse (400; NaN / Infinity / out-of-range numbers rejected)
+    5. schema (400, reason in JSON "error"): schemaVersion int 1, batchSeq int >= 0,
+       t0Utc "YYYY-MM-DDTHH:MM:SS.mmmZ", exact units, columnar arrays of equal length,
+       location[].tUtcMs int, labels with explicit nulls, device object. A batch with 0 samples
+       is valid. The app's connectivity probe body {"probe":true} (header x-probe: 1) gets 400
+       with a reason naming the probe, i.e. "reachable, key accepted".
+    6. x-idempotency-key, when present, must equal "<sessionId>:<batchSeq>" (400)
+  201 new batch | --dup-status (default 200, as AWS: the backend dedupes later in the database)
+  for a repeated (sessionId, batchSeq) | 503 every Nth POST when --fail-every N (tests backoff).
 
-One log line per request. With --out DIR, accepted batches are appended as JSON lines to
-DIR/<sessionId>.jsonl. Binds 0.0.0.0 using ThreadingHTTPServer. Ctrl-C to stop.
+One log line per request. With --out DIR, accepted (unique) batches are appended as JSON lines to
+DIR/<sessionId>.jsonl. Binds with ThreadingHTTPServer. Ctrl-C / SIGTERM prints a summary (unique
+batches per session, rejects by reason) and exits 0.
 """
 
 import argparse
@@ -25,6 +38,7 @@ import json
 import math
 import os
 import re
+import signal
 import sys
 import threading
 import zlib
@@ -36,6 +50,7 @@ MAX_INFLATED = 100 * 1024 * 1024   # decompressed (zip-bomb guard)
 REQUIRED_KEYS = ["schemaVersion", "sessionId", "deviceId", "batchSeq", "t0Utc", "t0Up", "units",
                  "deviceMotion", "accelRaw", "gyroRaw", "location", "altimeter", "audioLevel",
                  "labels", "device"]
+EXPECTED_UNITS = {"accel": "g", "gyro": "rad/s", "speed": "m/s", "pressure": "kPa"}
 # Columnar blocks (IngestBatch.swift): required array keys besides "t".
 COLUMNAR = {
     "deviceMotion": ["ua_x", "ua_y", "ua_z", "g_x", "g_y", "g_z", "rr_x", "rr_y", "rr_z",
@@ -45,7 +60,9 @@ COLUMNAR = {
     "altimeter": ["relAltM", "pressureKpa"],
     "audioLevel": ["avgDbfs", "peakDbfs"],
 }
-LOCATION_KEYS = ["tUtcMs", "lat", "lon", "alt", "hAcc", "speed", "speedAcc", "course"]
+LOCATION_KEYS = ["lat", "lon", "alt", "hAcc", "speed", "speedAcc", "course"]
+# ISO8601.string in the app: ISO8601DateFormatter [.withInternetDateTime, .withFractionalSeconds]
+T0_UTC_RE = re.compile(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$")
 
 
 class Invalid(Exception):
@@ -56,28 +73,38 @@ def is_num(v):
     return isinstance(v, (int, float)) and not isinstance(v, bool) and math.isfinite(v)
 
 
+def is_int(v):
+    return type(v) is int  # excludes bool and float (1.0)
+
+
 def validate(b):
     """Raises Invalid(reason) if the batch does not match the schemaVersion 1 contract."""
     if not isinstance(b, dict):
         raise Invalid("body is not a JSON object")
+    if b.get("probe") is True:
+        raise Invalid("probe request (connectivity test): not an ingest batch, nothing stored - "
+                      "endpoint reachable and device key accepted")
     missing = [k for k in REQUIRED_KEYS if k not in b]
     if missing:
         raise Invalid(f"missing top-level keys: {', '.join(missing)}")
-    if b["schemaVersion"] != 1 or isinstance(b["schemaVersion"], bool):
-        raise Invalid(f"schemaVersion must be 1, got {b['schemaVersion']!r}")
+    if not is_int(b["schemaVersion"]) or b["schemaVersion"] != 1:
+        raise Invalid(f"schemaVersion must be the integer 1, got {b['schemaVersion']!r}")
     for k in ("sessionId", "deviceId", "t0Utc"):
         if not isinstance(b[k], str) or not b[k]:
             raise Invalid(f"{k} must be a non-empty string")
-    if not isinstance(b["batchSeq"], int) or isinstance(b["batchSeq"], bool) or b["batchSeq"] < 0:
-        raise Invalid("batchSeq must be a non-negative integer")
+    if not is_int(b["batchSeq"]) or b["batchSeq"] < 0:
+        raise Invalid(f"batchSeq must be a non-negative integer, got {b['batchSeq']!r}")
+    if not T0_UTC_RE.match(b["t0Utc"]):
+        raise Invalid(f"t0Utc must be ISO-8601 UTC with milliseconds "
+                      f"(e.g. 2026-11-21T09:15:32.120Z), got {b['t0Utc']!r}")
     try:
-        dt.datetime.fromisoformat(b["t0Utc"].replace("Z", "+00:00"))
+        dt.datetime.strptime(b["t0Utc"], "%Y-%m-%dT%H:%M:%S.%fZ")
     except ValueError:
-        raise Invalid(f"t0Utc is not ISO-8601: {b['t0Utc']!r}")
+        raise Invalid(f"t0Utc is not a valid date/time: {b['t0Utc']!r}")
     if not is_num(b["t0Up"]):
         raise Invalid("t0Up must be a finite number")
-    if not isinstance(b["units"], dict):
-        raise Invalid("units must be an object")
+    if b["units"] != EXPECTED_UNITS:
+        raise Invalid(f"units must be {json.dumps(EXPECTED_UNITS)}, got {json.dumps(b['units'])}")
 
     for block, cols in COLUMNAR.items():
         blk = b[block]
@@ -102,6 +129,9 @@ def validate(b):
     for i, loc in enumerate(b["location"]):
         if not isinstance(loc, dict):
             raise Invalid(f"location[{i}] must be an object")
+        if not is_int(loc.get("tUtcMs")):
+            raise Invalid(f"location[{i}].tUtcMs missing or not an integer (Unix ms), "
+                          f"got {loc.get('tUtcMs')!r}")
         for k in LOCATION_KEYS:
             if not is_num(loc.get(k)):
                 raise Invalid(f"location[{i}].{k} missing or not a number")
@@ -144,14 +174,66 @@ def _reject_constant(name):
     raise ValueError(f"non-finite number {name} not allowed")
 
 
+def _parse_float(s):
+    v = float(s)
+    if not math.isfinite(v):
+        raise ValueError(f"number {s} out of range")
+    return v
+
+
+def gunzip_one_member(raw, limit):
+    """Strict gzip decode: exactly one member, no trailing bytes, at most `limit` bytes out.
+    Raises ValueError(reason)."""
+    d = zlib.decompressobj(16 + zlib.MAX_WBITS)
+    try:
+        out = d.decompress(raw, limit + 1)
+    except zlib.error as e:
+        raise ValueError(f"gzip decode failed: {e}")
+    if len(out) > limit:
+        raise ValueError(f"decompressed body larger than {limit} bytes")
+    if not d.eof:
+        raise ValueError("gzip decode failed: truncated gzip stream")
+    if d.unused_data:
+        if d.unused_data[:2] == b"\x1f\x8b":
+            raise ValueError("multiple gzip members are not accepted")
+        raise ValueError(f"{len(d.unused_data)} bytes of trailing data after the gzip stream")
+    return out
+
+
 class State:
-    def __init__(self, key, out, fail_every):
+    def __init__(self, key, out, fail_every, dup_status):
         self.key = key
         self.out = out
         self.fail_every = fail_every
+        self.dup_status = dup_status
         self.lock = threading.Lock()
-        self.seen = set()
+        self.sessions = {}      # sessionId -> set(batchSeq) accepted
+        self.duplicates = 0
+        self.rejects = {}       # "status category" -> [count, first reason]
         self.ingest_count = 0
+
+    def reject(self, status, category, reason):
+        with self.lock:
+            k = f"{status} {category}"
+            entry = self.rejects.setdefault(k, [0, reason])
+            entry[0] += 1
+
+    def summary(self):
+        with self.lock:
+            lines = ["", "== mock ingest summary =="]
+            total = sum(len(s) for s in self.sessions.values())
+            lines.append(f"unique batches: {total} in {len(self.sessions)} session(s); "
+                         f"duplicates answered {self.dup_status}: {self.duplicates}")
+            for sid, seqs in sorted(self.sessions.items()):
+                lo, hi = min(seqs), max(seqs)
+                holes = (hi - lo + 1) - len(seqs)
+                lines.append(f"  {sid}: {len(seqs)} batches, batchSeq {lo}..{hi}"
+                             + (f", {holes} missing in between" if holes else ""))
+            n_rej = sum(c for c, _ in self.rejects.values())
+            lines.append(f"rejects: {n_rej}")
+            for k, (c, first) in sorted(self.rejects.items()):
+                lines.append(f"  {k}: {c}  (e.g. {first})")
+            return "\n".join(lines)
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -175,6 +257,10 @@ class Handler(BaseHTTPRequestHandler):
         self.wfile.write(data)
         self._log(status, info)
 
+    def _reject(self, status, category, reason, info=""):
+        self.state.reject(status, category, reason)
+        return self._send(status, {"error": reason}, (info + " " if info else "") + f"reason={reason}")
+
     def _key_ok(self):
         k = self.state.key
         return k is None or self.headers.get("x-device-key") == k
@@ -189,102 +275,124 @@ class Handler(BaseHTTPRequestHandler):
             return None, n
         return self.rfile.read(n), n
 
+    def _not_found(self):
+        return self._send(404, {"message": "Not Found"})  # API Gateway's body for unknown routes
+
     def do_GET(self):
-        path = self.path.split("?", 1)[0]
-        if path != "/api/health":
-            return self._send(404, {"error": "not found"})
-        if not self._key_ok():
-            return self._send(401, {"error": "bad x-device-key"})
-        self._send(200, {"ok": True})
+        self._not_found()
+
+    def do_PUT(self):
+        self._drain_body()
+        self._not_found()
 
     def do_POST(self):
         path = self.path.split("?", 1)[0]
         raw, n = self._drain_body()
         if path != "/api/ingest":
-            return self._send(404, {"error": "not found"})
+            return self._not_found()
         st = self.state
         with st.lock:
             st.ingest_count += 1
             nth = st.ingest_count
         if st.fail_every and nth % st.fail_every == 0:
-            return self._send(503, {"error": f"simulated outage (request #{nth})"},
-                              f"simulated 503 (#{nth})")
+            return self._reject(503, "simulated outage", f"simulated outage (request #{nth})")
+        # 1. device key first (the Lambda authenticates before touching the body)
         if not self._key_ok():
-            return self._send(401, {"error": "bad x-device-key"})
+            return self._reject(401, "bad key", "bad x-device-key")
         if raw is None:
-            return self._send(413 if n > MAX_BODY else 400, {"error": "missing/invalid Content-Length"})
+            if n > MAX_BODY:
+                return self._reject(413, "too large", f"body larger than {MAX_BODY} bytes")
+            return self._reject(400, "content-length", "missing/invalid Content-Length")
+        probe = self.headers.get("x-probe") == "1"
 
-        def bad(reason, sid="-", seq="-"):
-            return self._send(400, {"error": reason}, f"sid={sid} seq={seq} reason={reason}")
-
-        if "gzip" not in (self.headers.get("Content-Encoding") or "").lower():
-            return bad("Content-Encoding must be gzip")
+        # 2. headers
+        enc = self.headers.get("Content-Encoding")
+        if enc != "gzip":
+            return self._reject(400, "content-encoding",
+                                f"Content-Encoding must be exactly 'gzip', got {enc!r}")
         if not (self.headers.get("Content-Type") or "").lower().startswith("application/json"):
-            return bad("Content-Type must be application/json")
+            return self._reject(400, "content-type", "Content-Type must be application/json")
+        # 3. gunzip
         try:
-            d = zlib.decompressobj(16 + zlib.MAX_WBITS)
-            body = d.decompress(raw, MAX_INFLATED)
-            if d.unconsumed_tail:
-                return bad("decompressed body too large")
-            if not d.eof:
-                raise zlib.error("truncated gzip stream")
-        except zlib.error as e:
-            return bad(f"gzip decode failed: {e}")
+            body = gunzip_one_member(raw, MAX_INFLATED)
+        except ValueError as e:
+            return self._reject(400, "gzip", str(e))
+        # 4. JSON
         try:
-            b = json.loads(body.decode("utf-8"), parse_constant=_reject_constant)
+            b = json.loads(body.decode("utf-8"), parse_constant=_reject_constant,
+                           parse_float=_parse_float)
         except (UnicodeDecodeError, ValueError) as e:
-            return bad(f"invalid JSON: {e}")
+            return self._reject(400, "json", f"invalid JSON: {e}")
 
         sid = b.get("sessionId") if isinstance(b, dict) else None
         seq = b.get("batchSeq") if isinstance(b, dict) else None
-        sid_short = str(sid)[:8] if sid else "-"
+        ids = f"sid={str(sid)[:8] if sid else '-'} seq={seq if seq is not None else '-'}"
+        # 5. schema
         try:
             validate(b)
         except Invalid as e:
-            return bad(str(e), sid_short, seq)
+            reason = str(e)
+            category = "probe" if reason.startswith("probe request") else "schema"
+            if probe and category != "probe":
+                reason = f"probe request (x-probe: 1) with a non-probe body: {reason}"
+            return self._reject(400, category, reason, ids)
+        # 6. idempotency header
         idem = self.headers.get("x-idempotency-key")
         if idem is not None and idem != f"{sid}:{seq}":
-            return bad(f"x-idempotency-key {idem!r} != '{sid}:{seq}'", sid_short, seq)
+            return self._reject(400, "idempotency-key",
+                                f"x-idempotency-key {idem!r} != '{sid}:{seq}'", ids)
 
-        info = f"sid={sid_short} seq={seq} {counts(b)}"
+        info = f"{ids} {counts(b)}"
         with st.lock:
-            if (sid, seq) in st.seen:
-                dup = True
+            seqs = st.sessions.setdefault(sid, set())
+            dup = seq in seqs
+            if dup:
+                st.duplicates += 1
             else:
-                dup = False
-                st.seen.add((sid, seq))
+                seqs.add(seq)
                 if st.out:
                     safe = re.sub(r"[^A-Za-z0-9._-]", "_", sid)[:128]
                     with open(os.path.join(st.out, f"{safe}.jsonl"), "a", encoding="utf-8") as fh:
                         fh.write(json.dumps(b, separators=(",", ":")) + "\n")
         if dup:
-            return self._send(409, {"error": "duplicate", "sessionId": sid, "batchSeq": seq},
-                              info + " duplicate")
+            return self._send(st.dup_status, {"ok": True, "duplicate": True, "sessionId": sid,
+                                              "batchSeq": seq}, info + " duplicate")
         self._send(201, {"ok": True, "sessionId": sid, "batchSeq": seq}, info)
 
 
+def _sigterm(signum, frame):
+    raise KeyboardInterrupt
+
+
 def main():
-    ap = argparse.ArgumentParser(description="Mock /api/ingest + /api/health server (stdlib only).")
-    ap.add_argument("--port", type=int, default=8080)
+    ap = argparse.ArgumentParser(description="Mock AWS POST /api/ingest server (stdlib only).")
+    ap.add_argument("--port", type=int, default=8080, help="0 = pick a free port")
     ap.add_argument("--host", default="0.0.0.0")
     ap.add_argument("--key", default=None, help="require this x-device-key (default: accept any)")
     ap.add_argument("--out", default=None, help="append accepted batches to DIR/<sessionId>.jsonl")
     ap.add_argument("--fail-every", type=int, default=0, metavar="N",
                     help="return 503 for every Nth POST /api/ingest")
+    ap.add_argument("--dup-status", type=int, choices=(200, 409), default=200,
+                    help="status for a repeated (sessionId, batchSeq); AWS answers 200 (default)")
     a = ap.parse_args()
     if a.out:
         os.makedirs(a.out, exist_ok=True)
-    Handler.state = State(a.key, a.out, a.fail_every if a.fail_every > 0 else 0)
+    state = State(a.key, a.out, a.fail_every if a.fail_every > 0 else 0, a.dup_status)
+    Handler.state = state
     srv = ThreadingHTTPServer((a.host, a.port), Handler)
     srv.daemon_threads = True
-    print(f"mock ingest server on http://{a.host}:{a.port}  key={'set' if a.key else 'any'} "
-          f"out={a.out or '-'} fail_every={a.fail_every or '-'}", flush=True)
+    signal.signal(signal.SIGTERM, _sigterm)
+    port = srv.server_address[1]
+    print(f"mock ingest server on http://{a.host}:{port}  key={'set' if a.key else 'any'} "
+          f"out={a.out or '-'} fail_every={a.fail_every or '-'} dup_status={a.dup_status}",
+          flush=True)
     try:
         srv.serve_forever()
     except KeyboardInterrupt:
         pass
     finally:
         srv.server_close()
+        print(state.summary(), flush=True)
     return 0
 
 

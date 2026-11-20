@@ -82,9 +82,9 @@ Label `type` values: `pothole`, `speed_bump`, `phone_moved`, `surface_start/surf
 - **Extra files/columns:** `audio_segments.csv`, `abs_altitude.csv` (B2), `activity.csv … start_utc_ms`.
 - **One poison batch can't block the queue:** after 5 server errors (5xx/408/429) for the same
   batch, it moves to the back of the queue. Network errors don't count, and nothing is deleted.
-  Upload batches are queued only while an API URL is set; the session folder is the dataset
-  (the session folder stays the local source of truth; 02 §2: live upload is the main
-  path to the cloud, laptop upload the fallback).
+  Upload batches are queued only while an API URL is set (spec §6: empty URL = upload disabled), so
+  set the URL before the drive: live upload is the main path to the cloud (02 D32), and laptop
+  upload of the session folder is the fallback. The session folder stays the local source of truth.
 - **401/403 are retried with backoff** instead of moved to `upload_failed/`; otherwise a mistyped
   key would dump the whole queue. 408/429/5xx/network errors are retried; other 4xx go to
   `upload_failed/` (Settings → *Move failed batches back to queue*).
@@ -113,7 +113,11 @@ unit, and UTC timestamp") it adds these optional, additive fields:
 - `eventType: "sensor_batch"` and `source: "live"`;
 - `t0UtcMs`, so a sample's UTC time is `t0UtcMs + t[i]·1000`;
 - `fieldUnits`, the unit of every field (the §6 `units` map is unchanged);
-- `location[].isSimulated`.
+- `location[].isSimulated`;
+- the **full dataset** (02 D32: only raw audio stays on the phone): `deviceMotion.roll/pitch/yaw`, `magRaw`,
+  `heading`, `absAltitude`, `activity`, `location[].ellAlt/vAcc/courseAcc` and the full `device` status.
+
+All of this is listed for the backend team in spec §6.2 (`decisions/01-initial-plan.md`).
 
 Backend: please don't use pydantic `extra="forbid"` or a fixed `units` literal.
 

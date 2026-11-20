@@ -208,7 +208,9 @@ Documents/sessions/2026-11-21T09-12-03Z_<shortId>/
 ├── heading.csv           # L2 (P2)
 ├── altimeter.csv         # B1 (+B2 columns or abs_altitude.csv)
 ├── activity.csv          # A1
-├── audio.m4a             # S2
+├── audio_000.m4a, …      # S2, 5-minute segments (crash-safe; see the app README)
+├── audio_segments.csv    # start/stop/interrupted per audio file
+├── abs_altitude.csv      # B2
 ├── audio_level.csv       # S1
 ├── device.csv            # D1–D5
 ├── labels.csv            # H1–H8
@@ -322,6 +324,18 @@ x-device-key: <device key>
 - Put it in the **same disk queue** as the batches, so it is sent in order: the Start copy before batch 0, the Stop copy after the last batch. The queue file name needs a marker that tells it apart from a batch.
 - Same rules as batches: 2xx and 409 = done, same backoff. The backend answers `200` for a repeat.
 - Until this exists, the backend creates the trip from its first batch with unknown context and closes it after 15 minutes without batches.
+
+### 6.2 What the app sends beyond the example above (implementation, app v1.0)
+
+Everything here is **additive**: the §6 keys keep their names, types and units, so the backend must accept extra keys (no pydantic `extra="forbid"`, no fixed `units` literal). The app's `tools/mock_ingest_server.py` validates all of it and is tested against payloads produced by the app's own encoder (`src/mobile-ios/tools/fixtures/`).
+
+- **Full dataset in every batch** (02 D32, only raw audio stays on the phone): `deviceMotion.roll/pitch/yaw`; `magRaw {t,x,y,z}` (µT, 50 Hz); `heading [{tUtcMs, magHeading, trueHeading, headingAcc, x, y, z}]`; `absAltitude {t, altitudeM, accuracyM, precisionM}`; `activity [{t, stationary, walking, running, automotive, cycling, unknown, confidence, startUtcMs}]`; `location[].ellAlt, vAcc, courseAcc, isSimulated`; `device.batteryState, freeDiskBytes, netStatus, netType`.
+- **Hackathon payload rule** ("device ID, event type, value, unit, UTC timestamp"): `eventType: "sensor_batch"`, `source: "live"`, `t0UtcMs` (sample UTC = `t0UtcMs + t[i]·1000`), `fieldUnits` (the unit of every field). Accelerations stay in **g** as the iPhone delivers them (`1 g = 9.80665 m/s²`); invalid speed/course/accuracies are **−1** as in iOS.
+- **Headers:** `x-idempotency-key: <sessionId>:<batchSeq>` for batches, `<sessionId>:meta-start|meta-stop` for §6.1.
+- **§6.1 body:** `session.json` plus `source: "live"` (the replay tool rewrites it) and, in the Stop copy, `batchCount`. `people.raterName` is removed from the cloud copy (personal data stays on the phone).
+- **Queue:** files `<createdMs>_<sessionId>_<batchSeq>.json.gz` and `<createdMs>_<sessionId>_meta-start|stop.json.gz`; lexical order is send order. `batchSeq` counts only batches actually queued (windows recorded while the URL was empty are not queued and use no number), so `batchCount` is exact. Recovered (crashed) sessions send no Stop copy; the 15-minute close applies.
+- **Statuses:** 2xx/409 done; 401/403/404 (batches) and 408/429/5xx/network retried with backoff 1→30 s; for session metadata 404/405 means "no PUT route yet": it is set aside in `upload_failed/` and never blocks the batches; other 4xx go to `upload_failed/`; redirects are never followed; a batch that fails 5× on the server moves to the back of the queue (metadata is never re-ordered: it is set aside instead). Plain `http://` is accepted only for local test servers.
+- **Size:** a 2 s batch is about 45 KB of JSON (about 16 KB gzipped); the app logs a warning above 180 KB (the function's limit is 200 KB decompressed).
 
 ---
 
@@ -477,8 +491,10 @@ for f in ["device_motion","accel_raw","gyro_raw","location","altimeter","audio_l
         print(f"{f:15s} rows={len(df):8d} rate={1/dt.median():6.1f}Hz max_gap={dt.max():.3f}s")
     else:
         print(f"{f:15s} rows={len(df)}")
-print("audio.m4a", (d/"audio.m4a").stat().st_size if (d/"audio.m4a").exists() else "MISSING")
+print("audio", sum(f.stat().st_size for f in d.glob("audio_*.m4a")) or "MISSING")
 ```
+
+The full verifier is `src/mobile-ios/tools/quick_check.py` (stdlib only): headers, rates, gaps, clock alignment, labels, audio segments, coverage and session.json.
 
 Pass criteria: motion streams ~100 Hz with max gap < 0.1 s; GPS ~1 Hz with sane coordinates; labels present with the right timestamps; audio file plays; `t_utc_ms` values are the correct real time.
 

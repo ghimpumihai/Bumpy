@@ -3,7 +3,7 @@
 > **Audience:** a Claude Code instance (and the teammate driving it) building the iPhone data-collection app on macOS.
 > This file is the complete context. Read it fully before writing code.
 >
-> **Status (2026-11-20):** the backend is on **Azure** (it moved to AWS and back the same day; nothing in the app contract changed). The backend architecture and the reasons behind each choice are in [02-infrastructure-plan.md](02-infrastructure-plan.md). Changes for the app: the upload target in §6 is the Azure ingest function, and §3.5 and §3.8 gained public-transport fields (audio switch, posture, handheld, line).
+> **Status (2026-11-20):** the backend is on **Azure** (it moved to AWS and back the same day; the app contract only gains the session metadata call in §6.1). The backend architecture and the reasons behind each choice are in [02-infrastructure-plan.md](02-infrastructure-plan.md). Changes for the app: the upload target in §6 is the Azure ingest function, and §3.5 and §3.8 gained public-transport fields (audio switch, posture, handheld, line).
 
 ---
 
@@ -311,7 +311,7 @@ x-device-key: <device key>
 The backend learns a trip's context (vehicle, mount, seat, posture) and when it ended from `session.json`. Without it, a live trip shows on the dashboard but can't be compared with other trips.
 
 ```
-PUT {API_BASE}/api/sessions/{sessionId}
+PUT {API_BASE}/api/ingest/sessions/{sessionId}
 Content-Type: application/json
 Content-Encoding: gzip
 x-device-key: <device key>

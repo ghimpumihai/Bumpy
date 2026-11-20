@@ -1,10 +1,10 @@
-# Read API contract (dashboard ⇄ read API Lambda)
+# Read API contract (dashboard ⇄ read API)
 
-The dashboard reads everything from the **read API Lambda** behind API Gateway
-([02-infrastructure-plan.md](../decisions/02-infrastructure-plan.md) §5 "Read API Lambda"). This file is
+The dashboard reads everything from the **read API**, a small web service running as an Azure Container App
+([02-infrastructure-plan.md](../decisions/02-infrastructure-plan.md) §5 "Read API (Container App)"). This file is
 the contract between the two. The TypeScript source of truth is [`src/types/`](src/types); the mock
 backend in [`src/mock/`](src/mock) implements every route below, so the dashboard can be developed and
-demoed without AWS.
+demoed without Azure.
 
 General rules:
 
@@ -15,10 +15,11 @@ General rules:
 - Missing values are `null`, never omitted.
 - Errors: `4xx`/`5xx` with body `{"error": "human readable reason"}`. Unknown session/segment → `404`;
   invalid query parameter → `400`.
-- CORS: only the dashboard's CloudFront origin (plan §5).
+- CORS: only the dashboard's Static Web Apps origin (plan §5).
 - **Privacy** (plan §11): the API trims the first and last `PRIVACY_TRIM_M` (200 m) of every track, and
   drops events and segment observations inside that zone, before anything leaves the database.
-- **Aggregation rules** (plan §10): replays and live-only sessions are never in aggregates; sessions with
+- **Aggregation rules** (plan §10): only finalized trips count: replays never, and a live trip only once it is finalized
+  (until then its exclusion reason is `live_only`); sessions with
   `quality_status = 'bad'` are excluded; hand-held / non-rigid mounts are excluded from roughness and
   potholes, and their sickness numbers are flagged experimental.
 
@@ -39,8 +40,8 @@ General rules:
 | `GET /api/live` | `LiveResponse` (live) | `live_state` of devices that sent data in the last 60 s, with the last ~2 min of track. Polled every 2 s |
 | `GET /api/quality` | `QualityListResponse` (sessions) | The data-quality panel for every session |
 
-The ingest routes (`POST /api/ingest`, `GET /api/health`) belong to the ingest Lambda and are not used
-by the dashboard.
+The ingest routes (`POST /api/ingest`, and `PUT /api/ingest/sessions/{id}` from spec §6.1) belong to the ingest
+function, on a different host, and are not used by the dashboard. There is no health route.
 
 ## Where each field comes from (plan §8)
 
@@ -53,7 +54,7 @@ by the dashboard.
 | `quality.*` | per-stream rows/rates/gaps, GPS accuracy, invalid windows, `rejected/late/duplicate` live batches |
 | `detection` | detections vs. manual taps within ±1.5 s (precision, recall) |
 | `SessionSeries` | `session_series` (≈ 5 Hz vertical/lateral/longitudinal acceleration, speed, MSDV so far) |
-| `SegmentAggregate` | `segment_agg` materialized view (segment × vehicle type, plus an `all` row) |
+| `SegmentAggregate` | `segment_agg` table, rebuilt by the aggregation step (segment × vehicle type, plus an `all` row) |
 | `roughness` | `exp(mean(log r − vehicle effect − β·log(v / 10 m/s)))`: what a car would feel at 36 km/h |
 | `roughnessPctl` | mean per-session percentile of raw roughness (fallback when the model can't be fitted) |
 | `potholeHits / potholePasses / potholeConfirmed` | passes > 15 km/h with a detection; confirmed at ≥ k of n passes (per vehicle type) |
@@ -66,6 +67,7 @@ biases the fitted β low (0.54 instead of 0.60 on the mock data).
 
 ## Runtime configuration
 
-The deployed site reads `/config.json` at startup: `{"apiBase": "https://<api-id>.execute-api.eu-west-1.amazonaws.com"}`.
-Infrastructure writes this file next to the site; CI must not overwrite it. An empty `apiBase` (the
+The deployed site reads `/config.json` at startup: `{"apiBase": "https://<read-api>.<env>.northeurope.azurecontainerapps.io"}`.
+The `deploy-dashboard.yml` workflow writes this file from a Terraform output just before uploading;
+the committed `public/config.json` stays empty. An empty `apiBase` (the
 default in `public/config.json`) makes the dashboard use its built-in mock data.

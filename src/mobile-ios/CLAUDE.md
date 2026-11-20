@@ -16,7 +16,7 @@ real-time data capture.
 This is the iPhone data-collection app of the Codelap Hackathon 2026 project (Porsche Engineering,
 "Data-Driven Infrastructure Engineering"). It records every useful sensor of an iPhone 14 Pro at
 the highest practical rate, **writes everything to local files first**, optionally uploads gzipped
-batches to the AWS backend, and shows a live health dashboard. The single source of requirements is
+batches to the Azure backend, and shows a live health dashboard. The single source of requirements is
 [`decisions/01-initial-plan.md`](../../decisions/01-initial-plan.md) (backend plan:
 [`02-infrastructure-plan.md`](../../decisions/02-infrastructure-plan.md)); user-facing docs are in
 [`README.md`](README.md).
@@ -24,8 +24,9 @@ batches to the AWS backend, and shows a live health dashboard. The single source
 There is **ONE real test drive**. Every decision favours: over-collect, local-first, visible health,
 hard to break. Losing data is the worst possible bug; a red banner is better than silent failure.
 
-The backend (AWS API Gateway + ingest Lambda, see 02) is built by teammates. The app's contract is
-`POST {API}/api/ingest` (gzip JSON, spec §6); there is no health route, so connectivity is tested
+The backend (Azure: ingest Function → Event Hubs, see 02) is built by teammates. The app's contract is
+`POST {API}/api/ingest` (gzip JSON, spec §6), plus the proposed `PUT {API}/api/ingest/sessions/{id}`
+(session.json at Start and Stop, spec §6.1, not built yet); there is no health route, so connectivity is tested
 with a probe POST. `tools/mock_ingest_server.py` stands in for it locally. Do **not** write
 backend, processing or web-dashboard code in this folder.
 

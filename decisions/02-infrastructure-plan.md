@@ -1,6 +1,6 @@
 # Infrastructure plan: Azure backend
 
-> **Status:** proposed, 2026-11-20. Moved from AWS to Azure the same day (D21 to D31 in the [decision log](README.md)). The AWS version, which was researched and reviewed by an independent advisor model, is in git history (commit `83e1dec`); everything that does not depend on the cloud (data model, processing, aggregation, data-quality rules) carries over unchanged. Later the same day, the **live path (phone → cloud → dashboard) became the main path**, with laptop upload only as a fallback (D32, D33). The app side is in [01-initial-plan.md](01-initial-plan.md); research sources are in [03-research-notes.md](03-research-notes.md).
+> **Status:** final, 2026-11-20. Every open point was researched (prices from the Azure Retail Prices API, behaviour from Microsoft Learn and the Terraform provider docs); the answers and what they changed are in §20 (D34–D36). Moved from AWS to Azure the same day (D21 to D31 in the [decision log](README.md)). The AWS version, which was researched and reviewed by an independent advisor model, is in git history (commit `83e1dec`); everything that does not depend on the cloud (data model, processing, aggregation, data-quality rules) carries over unchanged. Later the same day, the **live path (phone → cloud → dashboard) became the main path**, with laptop upload only as a fallback (D32, D33). The app side is in [01-initial-plan.md](01-initial-plan.md); research sources are in [03-research-notes.md](03-research-notes.md).
 >
 > **Who this is for:** anyone on the team, including people who have not used these Azure tools before. Every tool is explained in plain words in §5, together with why we picked it and what we rejected.
 
@@ -90,7 +90,7 @@ flowchart TB
     end
     lake["Blob container: lake<br/>raw batches + Parquet samples"]
     pg[("PostgreSQL Flexible Server + PostGIS<br/>sessions, segments, results")]
-    read["Read API Function"]
+    read["Read API<br/>Container App"]
     web["Dashboard<br/>live view + aggregated map<br/>Static Web Apps"]
     ops["Azure Monitor workbook<br/>+ budget alerts"]
   end
@@ -129,23 +129,26 @@ Read this section if a tool name is unfamiliar. Each entry says what the tool is
 
 ### Getting data into Azure
 
-**Azure Functions (ingest function, Flex Consumption plan).** Azure Functions runs a small piece of code only when a request arrives; you pay per run, and it costs nothing when idle. An HTTP-triggered function already has a public HTTPS address with a certificate, so we don't need a separate API gateway. It serves three routes:
+**Azure Functions (ingest function, Flex Consumption plan).** Azure Functions runs a small piece of code only when a request arrives; you pay per run, and it costs nothing when idle. An HTTP-triggered function already has a public HTTPS address with a certificate, so we don't need a separate API gateway. It serves two routes:
 
 | Route | What it does |
 |---|---|
 | `POST /api/ingest` | one 2-second batch (spec §6) |
-| `PUT /api/sessions/{sessionId}` | the session's metadata, sent at Start and at Stop (spec §6.1) |
-| `GET /api/health` | the app's connection test before a drive |
+| `PUT /api/ingest/sessions/{sessionId}` | the session's metadata, sent at Start and at Stop (spec §6.1) |
+
+There is no health route. The app tests its connection with a **probe**: a gzipped `{"probe":true}` with the device key and the header `x-probe: 1`, sent to `/api/ingest`. Because the function checks the key before the body, the answer tells the app everything it needs: `401`/`403` = wrong key, `400` = reachable and key accepted (the probe is rejected and never stored), `404` = wrong address. `src/mobile-ios/tools/mock_ingest_server.py` implements exactly this order and is the reference for the function's responses.
 
 For each batch or metadata message the function:
 - checks the `x-device-key` header against hashed device keys (stored in Key Vault, loaded once at start-up, compared in constant time so timing can't leak them);
-- decompresses the gzip body and checks its format (with pydantic, a Python validation library), and rejects bodies over 200 KB;
+- decompresses the gzip body and checks its format (with pydantic, a Python validation library), and rejects bodies over 200 KB. The Functions host does not document whether it decompresses request bodies itself, so the code checks the gzip magic bytes (`1f 8b`) and only decompresses when they are there; that works either way;
 - sends it to Event Hubs as **decompressed JSON**, marked `kind=batch` or `kind=session`, with the **device ID as the partition key**, so a phone's metadata and batches stay in the order the phone sent them;
-- writes it to the raw archive under `lake/raw/session=<sessionId>/` (`<batchSeq>.json.gz` or `session.json.gz`), then answers `200`.
+- writes it to the raw archive under `lake/raw/session=<sessionId>/` (`<batchSeq>.json.gz` or `session.json.gz`), then answers `200`, for a new batch and for a repeat alike (it can't tell them apart; the database drops repeats). Invalid bodies get `400`/`422` with a reason; the app moves those to its `upload_failed/` folder.
 
 The archive file name comes from the message itself, so if the phone retries, the same file is simply overwritten: no duplicates in the archive. Duplicates in the stream are removed later in the database (§8). The archive is the long-term copy of every trip: the finalize job rebuilds a whole trip from it.
 
 It runs **outside** our private network (VNet) on purpose: it then needs no network setup and reaches Event Hubs, Blob Storage and Key Vault directly over their public, login-protected endpoints. Abuse is limited by the device keys and by a cap on how many copies of the function may run at once (`maximum_instance_count`), so a flood of bad requests can't run up the bill.
+
+Setup details: Python 3.12 (GA on Flex Consumption), instance memory 512 MB (billing counts memory × time, so the free grant lasts longer), North Europe (one of the first Flex Consumption regions; confirm with `az functionapp list-flexconsumption-locations` on day 0).
 
 *Rejected:* API Management (an extra service and extra configuration for what the function already does; it can be put in front later if we need per-client throttling).
 
@@ -159,7 +162,9 @@ It runs **outside** our private network (VNet) on purpose: it then needs no netw
 - **buffers** a day of data, so a processor crash or redeploy during a drive loses nothing;
 - costs about **$0.36 per day**.
 
-Basic tier limits that matter: one reader group (fine, only the processor reads; the archive is written by the ingest function), 256 KB per message (a batch is about 30 KB), 1 day of retention. *Rejected:* Event Hubs Standard with **Capture**, which writes the stream to storage by itself, like Firehose. Capture costs extra per hour on Standard and writes Avro files instead of plain JSON; a few lines in the ingest function do the same job for free. See §6 for Kafka and others.
+Basic tier limits that matter: one reader group (fine, only the processor reads; the archive is written by the ingest function), 256 KB per message (a batch is about 30 KB, billed as one event because events are counted in 64 KB units), 1 day of retention, up to 32 partitions, 100 connections per namespace. Price in North Europe: $0.015 per throughput-unit hour plus $0.028 per million events.
+
+Login: the ingest function and processor use their managed identities ("Azure Event Hubs Data Sender" / "Data Receiver" roles) and key-based access is switched off. Microsoft's tier tables don't list authentication per tier, so on day 0 we send one test event with a managed identity; if Basic refused it, the fallback is a send-only and a listen-only access key stored in Key Vault. *Rejected:* Event Hubs Standard with **Capture**, which writes the stream to storage by itself, like Firehose. Capture costs extra per hour on Standard and writes Avro files instead of plain JSON; a few lines in the ingest function do the same job for free. See §6 for Kafka and others.
 
 ### Processing: live, then once more per trip
 
@@ -184,20 +189,22 @@ Public access and storage keys are switched off; everything logs in with an Azur
 
 **Event Grid.** Azure's event router, used only by the fallback upload. When a file whose name ends in `_complete.json` is created in `sessions`, Event Grid puts a message in the Service Bus queue. The filter is set in Terraform, so other files don't trigger anything.
 
-**Service Bus (Basic tier) queue.** A queue of small "to-do" messages: "session X is ready", sent by the processor (live trips) or by Event Grid (uploads). The finalize job takes a message, processes the session, and completes the message. If processing fails, the message comes back and is retried; after 5 failed tries it moves to a **dead-letter queue**, so one broken session can't loop forever. Costs a few cents per million messages. *Rejected:* Storage Queues (no dead-letter queue built in), RabbitMQ (something to run and secure).
+**Service Bus (Basic tier) queue.** A queue of small "to-do" messages: "session X is ready", sent by the processor (live trips) or by Event Grid (uploads, which delivers with its own managed identity holding "Azure Service Bus Data Sender" on the queue). The finalize job takes a message, processes the session, and completes the message. If processing fails, the message comes back and is retried; after 5 failed tries (`max_delivery_count = 5`) it moves to a **dead-letter queue**, so one broken session can't loop forever. Costs $0.05 per million operations. *Rejected:* Storage Queues (no dead-letter queue built in), RabbitMQ (something to run and secure).
 
-**Azure Container Apps.** Runs Docker containers without us managing servers. We use it for two things:
-- the **stream processor**: a long-running container app (always 1 copy) that reads Event Hubs continuously;
+**Azure Container Apps.** Runs Docker containers without us managing servers. Everything that needs the private database runs here, in one environment connected to our VNet:
+- the **stream processor**: a long-running container app (always 1 copy, 0.25 vCPU, 0.5 GiB) that reads Event Hubs continuously;
+- the **read API**: a small web container app with public HTTPS ingress (see Dashboard);
 - **Container Apps Jobs**: containers that run to completion and stop. The **finalize job** is started automatically by the Service Bus queue: when a message arrives, Azure starts one copy, which processes that session and exits. Two more jobs, **aggregate** and **migrate**, are started by hand or by CI (see below).
 
-All of them run the **same Python code** (numpy and scipy for signal processing). *Why not Functions for processing?* The filters keep state for minutes (motion-sickness dose accumulates over a whole trip), and functions are short-lived and stateless. A container can keep that state in memory and checkpoint it to the database.
+The processor and jobs run the **same Python code** (numpy and scipy for signal processing). *Why not Functions for processing?* The filters keep state for minutes (motion-sickness dose accumulates over a whole trip), and functions are short-lived and stateless. A container can keep that state in memory and checkpoint it to the database.
 
 Setup details:
-- The finalize job uses a KEDA rule (Azure's built-in autoscaler) on the Service Bus queue: 0 copies when the queue is empty, at most 3 at once, a 30-minute time limit per run.
-- A long session can take longer than the 5-minute message lock, so the job renews the lock while it works (`AutoLockRenewer` in the Service Bus SDK).
-- The processor needs no incoming traffic, so the environment is **internal**: nothing in it is reachable from the internet.
+- A **workload profiles** environment with only the free-of-fee Consumption profile, on its own `/27` subnet (the minimum; the size can't change later). It is **external**, so the read API can have public ingress; the processor and jobs have no ingress at all, so they stay unreachable. The environment brings its own static public IP for outgoing traffic (and one for incoming), so it doesn't depend on the VNet's default outbound access.
+- The finalize job uses a KEDA rule (Azure's built-in autoscaler) on the Service Bus queue: 0 copies when the queue is empty, at most 3 at once, a 30-minute time limit per run (`replica_timeout_in_seconds = 1800`). The rule logs in with a **user-assigned** identity (`identity_id` on the rule) that Terraform creates and gives "Azure Service Bus Data Receiver" **before** the job exists; with a system-assigned identity the job would need the role before it could be created.
+- A long session can take longer than the 5-minute maximum message lock, so the job renews the lock while it works (`AutoLockRenewer` in the Service Bus SDK).
+- Jobs are billed only while they run, at the active rate; there are no idle or request charges for jobs.
 
-**Azure Container Registry (ACR).** Where our Docker images are stored so Container Apps can run them. CI pushes a new image on every merge. Containers pull images with their own identity; the registry's admin password is switched off.
+**Azure Container Registry (ACR).** Where our Docker images are stored so Container Apps can run them. CI pushes a new image on every merge. Containers pull images with their own identity; the registry's admin password is switched off. We use the **Standard** tier, because one Standard registry is free for 12 months on the free account (Basic costs $0.17 per day otherwise).
 
 ### Storage and results
 
@@ -213,13 +220,14 @@ Setup details:
 |---|---|---|
 | `migrator` (the server's Entra admin) | migrate job | creates PostGIS, tables and the other users |
 | `writer` | stream processor, finalize and aggregate jobs | read and write on our tables |
-| `reader` | read API function | `SELECT` only |
+| `reader` | read API | `SELECT` only |
 
 Setup details:
-- Turn on Entra authentication and turn off password authentication in Terraform; make the migrate job's identity the Entra admin.
-- The migrate job creates the other users with `pgaadauth_create_principal_with_oid(...)`, then grants rights.
-- Tokens are requested for `https://ossrdbms-aad.database.windows.net/.default` and used as the password. A token is only needed to *open* a connection; keep the connection in a global variable and reconnect (with a fresh token) when it fails.
-- TLS is required: connect with `sslmode=verify-full` and ship the Azure root certificates (DigiCert Global Root G2 and Microsoft RSA Root CA 2017) with the code.
+- Turn on Entra authentication and turn off password authentication in Terraform; make the migrate job's user-assigned identity the Entra admin (a managed identity can be an Entra admin). Turning Entra on restarts the server once.
+- The migrate job creates the other users with `pgaadauth_create_principal_with_oid('<role>', '<identity object ID>', 'service', false, false)`, then grants rights. The object ID matters: the server matches tokens to roles by Entra ID, not by name.
+- Tokens are requested for `https://ossrdbms-aad.database.windows.net/.default` and used as the password, with the role name as the user name. A token is only needed to *open* a connection; keep the connection in a global variable and reconnect (with a fresh token) when it fails.
+- To check Entra tokens, the server itself must reach Microsoft Entra ID: its subnet's network security group allows outgoing HTTPS to the `AzureActiveDirectory` service tag.
+- TLS is required (`require_secure_transport` on the server). Clients connect with `sslmode=require`, which is what Microsoft recommends: Azure rotates the intermediate certificates without notice, and Microsoft documents `verify-ca`/`verify-full` as unsupported for that reason. The connection is still encrypted, and it never leaves our VNet.
 
 **Migrations run once, in their own job.** PostGIS and tables are created by SQL migrations (`db/migrations/`). CI starts the **migrate job** before updating the processor, so two containers can never run migrations at the same time.
 
@@ -227,15 +235,21 @@ Setup details:
 
 **What the dashboard shows.** The web app is where the whole system becomes visible, so it is built around the live path:
 
-| View | What you see | Fed by |
+The dashboard is already built (`dashboard/`, React + MapLibre + uPlot) and runs on a mock backend until the read API is deployed. Its pages:
+
+| Page | What you see | Fed by |
 |---|---|---|
-| **Live** (the main screen) | The map follows each vehicle that is sending. The road behind it colours in hexagon by hexagon (roughness), pothole and speed-bump markers pop up as they are detected. A side panel shows speed, current roughness, motion-sickness dose so far and the predicted share of sick passengers, the passenger's latest MISC rating, and how fresh the data is (seconds behind the phone, "catching up" after a dead zone). | stream processor, updated every 2 s |
-| **Map** | All finished trips combined: hexagons coloured by normalized roughness or sickness score, filtered by vehicle type; confirmed potholes. | finalize job + aggregation |
-| **Trip** | One trip: vertical and sideways acceleration, speed and sickness dose over time, with the MISC ratings on top; its track on the map; the data-quality panel (§10). | finalize job (live results while the trip is running) |
+| **Live** (the main screen) | Each vehicle that sent data in the last 60 s moves on the map with its last ~2 minutes of track; speed, current roughness, motion-sickness dose so far, the passenger's latest MISC rating, and how fresh the data is. Polled every 2 s. | stream processor (`live_state`) |
+| **Map** | All finished trips combined: H3 hexagons coloured by normalized roughness or sickness score, filtered by vehicle type; confirmed potholes; a panel per segment. | finalize job + aggregation |
+| **Sessions** / **Session** | The list of trips, and one trip: acceleration, speed and sickness dose over time with the MISC ratings, its track and events on the map, detection scores. | processor while live, finalize job after |
+| **Quality** | The data-quality panel for every trip (§10). | processor + finalize job |
+| **Method** | How the numbers are computed, including the fitted vehicle effects and β. | aggregation |
 
 End-to-end delay target: under 10 seconds from the phone to the screen (2 s batch, upload, stream, processing, 2 s polling). The processor stores when each batch arrived, so the dashboard can show the real delay instead of claiming "live".
 
-**Read API function.** A second, separate function app. It only reads from the database and returns JSON and GeoJSON (map data) to the dashboard: `/api/live`, `/api/trips`, `/api/trips/{id}`, `/api/segments`. It is connected to the VNet because the database is private, and it logs in as `reader` with its managed identity.
+**Read API (Container App).** A small Python web service (FastAPI) in the Container Apps environment. It only reads from the database and returns JSON and GeoJSON (map data) to the dashboard. Its routes, response types and rules (privacy trimming, aggregation rules, units) are fixed by [`dashboard/API.md`](../dashboard/API.md), and the dashboard's mock backend implements the same contract. It logs in as `reader` with its managed identity and keeps 1 copy running so the live view never waits for a cold start.
+
+*Why a container, not a second function?* A Flex Consumption function joined to the VNet sends **all** its outgoing traffic through the VNet, including logs and its own storage. Subnets in new VNets no longer get internet access by default, so that would need a NAT gateway (about $1 per day) or a fragile workaround. The Container Apps environment already has its own outgoing IP and is already in the VNet, so the read API fits there at almost no cost.
 
 **React + Vite + MapLibre + uPlot, hosted on Static Web Apps.**
 - *React + Vite*: a common way to build a web app; Vite is the build tool.
@@ -243,16 +257,17 @@ End-to-end delay target: under 10 seconds from the phone to the screen (2 s batc
 - *uPlot*: a very fast chart library for long time series.
 - *Azure Static Web Apps (Free plan)*: hosts the built website (plain files) over HTTPS from a global network. Free.
 
-The read API allows browser requests (CORS) only from the dashboard's Static Web Apps address; Terraform passes that address to the function app in the same run. The dashboard learns the API address at build time from a Terraform output. It polls the read API every 2 to 5 seconds when showing live data. *Rejected:* WebSockets or SignalR (more moving parts for a handful of viewers), Front Door + Storage static website (Front Door has a monthly base fee).
+The read API allows browser requests (CORS, set in the container app's ingress settings) only from the dashboard's Static Web Apps address; Terraform passes that address to the container app in the same run. The Free plan of Static Web Apps allows 100 GB of traffic a month and 250 MB per app, far more than we need. The dashboard reads its API address at runtime from `/config.json` (`{"apiBase": "https://<read-api>.<env>.northeurope.azurecontainerapps.io"}`); the deploy workflow writes that file from a Terraform output just before uploading, and the empty `public/config.json` in the repo keeps the mock backend for local work. It polls the read API every 2 to 5 seconds when showing live data. *Rejected:* WebSockets or SignalR (more moving parts for a handful of viewers), Front Door + Storage static website (Front Door has a monthly base fee).
 
 ### Running and watching it
 
-**VNet (virtual network).** Our own private network in Azure, split into subnets:
-- a subnet for the **database** (handed over to PostgreSQL), unreachable from the internet;
-- a subnet for the **Container Apps environment** (processor and jobs);
-- a subnet for the **read API function**.
+**VNet (virtual network).** Our own private network in Azure (`10.20.0.0/24`), split into two subnets:
+- `snet-aca` (`/27`, handed over to Container Apps): the processor, the jobs and the read API;
+- `snet-psql` (`/28`, handed over to PostgreSQL): the database, unreachable from the internet.
 
-A private DNS zone lets our services find the database by name. Network security groups (Azure's firewall rules) allow the database only from our own subnets. *Why not a NAT gateway* (the usual way to give private machines internet access)? It costs about $1 per day plus data, and we don't need it: the subnets keep Azure's default outbound access (set explicitly in Terraform, because new VNets no longer get it automatically), and Storage, Event Hubs and Service Bus are reached through free service endpoints or their login-protected public endpoints.
+A private DNS zone lets our services find the database by name. Network security groups (Azure's firewall rules) allow the database only from `snet-aca`, and allow the database to reach Microsoft Entra ID (to check login tokens).
+
+Outgoing internet access: since 31 March 2026, subnets in **new** VNets are private by default (no implicit internet access). That doesn't hurt us: the Container Apps environment has its own outgoing IP, the ingest function isn't in the VNet, and Terraform's `default_outbound_access_enabled` is `true` by default and we set it explicitly on `snet-psql`, so the database can still reach Entra ID. *Why not a NAT gateway* (Microsoft's recommended way to give private subnets internet access)? It costs about $1 per day plus data, and with this layout nothing needs it. Storage, Event Hubs and Service Bus are reached over their login-protected public endpoints.
 
 **Managed identities and role assignments.** Azure's permission system. Each service gets its own identity with only the roles it needs:
 
@@ -261,7 +276,7 @@ A private DNS zone lets our services find the database by name. Network security
 | ingest function | send to the event hub; write to `lake`; read the device-key secret |
 | processor and jobs | read from the event hub; send to and receive from the queue; read `sessions`; read and write `lake`; pull images; database `writer` |
 | migrate job | database Entra admin; pull images |
-| read API function | database `reader` |
+| read API | database `reader`; pull images |
 | Event Grid | send to the Service Bus queue |
 
 Event Hubs, Service Bus and Storage have **key-based access switched off**, so there are no connection strings to leak.
@@ -270,15 +285,21 @@ Event Hubs, Service Bus and Storage have **key-based access switched off**, so t
 
 Nothing secret is ever committed to the repo.
 
-**Azure Monitor: Log Analytics and Application Insights.** Azure's logs, metrics and alerts. All services send logs and traces to one Log Analytics workspace (with a daily cap so logs can't run up the bill). One **workbook** (an Azure dashboard), defined in Terraform, shows ingest rate, errors, Event Hubs incoming messages, **processor lag** (now minus the time of the last processed message, a custom metric the processor reports), rows written and data-quality counts. An action group emails us on errors and lag.
+**Azure Monitor: Log Analytics and Application Insights.** Azure's logs, metrics and alerts. All services send logs and traces to one Log Analytics workspace. The first 5 GB a month per billing account are free, and the workspace has a daily cap (`daily_quota_gb = 0.5`) so logs can't run up the bill. One **workbook** (an Azure dashboard), defined in Terraform, shows ingest rate, errors, Event Hubs incoming messages, **processor lag** (now minus the time of the last processed message, a custom metric the processor reports), rows written and data-quality counts. An action group emails us on errors and lag.
 
-**Cost Management budget.** Sends an email when spending crosses $20 and $50, so a forgotten resource can't surprise us. On the free account, the spending limit is a second safety net: when the credit is used up, resources are stopped, not billed.
+**Cost Management budget.** Sends an email when spending crosses $20 and $50, so a forgotten resource can't surprise us. On the free account, the spending limit is a second safety net: when the credit is used up, resources are stopped, not billed. Note that the credit can't pay for Marketplace products, so we use none.
 
 ### Building and deploying
 
 **Terraform.** Infrastructure as code: we describe every Azure resource in `.tf` files (the `azurerm` provider), and Terraform creates, changes or deletes the real resources to match. `terraform plan` shows what would change; `terraform apply` does it. The current state is stored in a Blob Storage container, which locks it automatically, so two people can't apply at once. Because storage keys are off, the provider uses Entra login for storage (`storage_use_azuread = true`, and `use_azuread_auth = true` in the backend). We write plain `azurerm` resources and use Azure Verified Modules only where they clearly save time.
 
 **GitHub Actions.** CI/CD inside GitHub: workflows run on every pull request and every merge. They log in to Azure with **OIDC**: GitHub proves which repo and branch a job comes from, Azure trusts that through a **federated credential** on a managed identity, and hands out short-lived tokens (`azure/login@v2`). No Azure secrets are stored anywhere; the client, tenant and subscription IDs are plain repo variables.
+
+Our repo was created on 2026-11-20, after GitHub switched new repos to **immutable subject claims** (2026-07-15). The token's subject therefore carries the numeric owner and repo IDs, and the federated credentials must match them exactly:
+- deploy: `repo:ghimpumihai@163877193/DataInfrastructure_Chuds@1465690625:environment:prod`
+- plan: `repo:ghimpumihai@163877193/DataInfrastructure_Chuds@1465690625:pull_request`
+
+These IDs are public and never change, even if the repo is renamed. If login fails, print the real `sub` claim in a workflow step and compare.
 
 **Docker Compose (local development).** Runs PostgreSQL with PostGIS on a laptop. The processor can run directly on session CSV files, so most development and testing needs no Azure at all.
 
@@ -297,6 +318,7 @@ We looked at each seriously. The guiding rule: use a tool when the data or the d
 | **IoT Hub** | Device messaging | The free tier counts messages in small chunks, so one drive would use up the daily quota; per-device registration and certificates add setup. HTTPS plus device keys gives a similar security story. |
 | **Stream Analytics** | Stream processing engine | Its SQL-like language can't run numpy and scipy, and it bills every hour it runs. |
 | **Durable Functions** | Stateful serverless code | Possible, but long numpy filters with minutes of state fit a plain container better. |
+| **Read API as a VNet-joined Function** | Serverless dashboard API | All its outgoing traffic would go through a VNet subnet that has no internet by default; it would need a NAT gateway. A container app in the existing environment avoids that. |
 | **Cosmos DB** | Duplicate check | Same data-loss risk as the old DynamoDB idea; the database handles duplicates safely. |
 | **Azure SQL Database (free offer)** | Database | No PostGIS. |
 | **AKS (Kubernetes)** | Container platform | Nodes cost money all the time and it takes days to set up; Container Apps does what we need. |
@@ -311,7 +333,7 @@ If the project ever grows to thousands of vehicles, the design moves to Kafka cl
 ## 7. How the data flows
 
 **During a trip (main path).**
-1. At Start, the app sends the session metadata (`PUT /api/sessions/{id}`). The trip appears on the dashboard with its vehicle and context.
+1. At Start, the app sends the session metadata (`PUT /api/ingest/sessions/{id}`). The trip appears on the dashboard with its vehicle and context.
 2. Every 2 seconds the phone (or the replay tool) posts a gzip batch to the ingest function. Without network, batches wait in the app's disk queue and are sent oldest first when the network returns.
 3. The ingest function checks each message, sends it to Event Hubs keyed by device, and writes it to the raw archive.
 4. The stream processor reads the messages in order, runs the calculations incrementally, and writes live state, segment observations, events and chart data. It records how far it has read (the partition's sequence number, in `stream_checkpoints`) in the same database transaction.
@@ -336,7 +358,7 @@ If the project ever grows to thousands of vehicles, the design moves to Kafka cl
 |---|---|---|
 | `vehicles` | vehicle | type (car/bus/tram), make/model, line |
 | `devices` | phone | device ID, hashed key |
-| `sessions` | trip | vehicle, device, mount (rigid, handheld, location), rater seat and posture (from `session.json`), `source` (`live`/`upload`/`replay`), `status` (`recording`/`ended`/`finalized`, plus `incomplete`), expected batch count, quality status, `include_in_agg` |
+| `sessions` | trip | vehicle, device, mount (rigid, handheld, location), rater seat and posture (from `session.json`), `source` (`live`/`upload`/`replay`), `status` (`live` while recording, `processing` until finalized, `complete`; plus an `incomplete` flag for trips closed without a Stop), `quality_status` (`pending`/`ok`/`degraded`/`bad`), exclusion reasons, expected batch count, quality status, `include_in_agg` |
 | `ingest_batches` | live batch received | (session_id, batch_seq) **unique**: a repeated batch is ignored with `ON CONFLICT DO NOTHING`; arrival time, for the delay shown on the dashboard |
 | `stream_checkpoints` | Event Hubs partition | last sequence number processed |
 | `segments` | road piece | H3 cell ID, geometry |
@@ -347,7 +369,7 @@ If the project ever grows to thousands of vehicles, the design moves to Kafka cl
 | `live_state` | device | last position, speed, current scores (for the live view) |
 | `segment_agg` | segment × vehicle type | normalized roughness, pothole confirmation ratio, sickness score, number of sessions; rebuilt by the aggregation step |
 
-`include_in_agg` is true only for **finalized** trips (live or uploaded, never replays) whose context is known and that pass the quality rules (§10).
+`include_in_agg` is true only for **finalized** trips (live or uploaded, never replays) whose context is known and that pass the quality rules (§10). The dashboard shows why a trip is excluded: `replay`, `live_only` (a live trip that isn't finalized yet), bad quality, and so on.
 
 Raw values are always stored as measured; normalization happens only in the aggregation step, so we can change the method later without reprocessing.
 
@@ -396,7 +418,7 @@ Raw values are always stored as measured; normalization happens only in the aggr
 
 | Concern | Measure |
 |---|---|
-| Data in transit | HTTPS only (functions, Static Web Apps), TLS 1.2 minimum; database connections require TLS with certificate checks |
+| Data in transit | HTTPS only (ingest function, read API ingress, Static Web Apps), TLS 1.2 minimum; database connections require TLS (`sslmode=require`, Microsoft's recommendation) and stay inside the VNet |
 | Who may send data | Per-device keys, stored only as hashes in Key Vault, compared in constant time; strict payload validation and a size limit |
 | Data at rest | Storage, PostgreSQL and Event Hubs encrypted by default; blob public access off |
 | Database exposure | Private subnet only, no public access; password login off, Entra login only |
@@ -415,11 +437,11 @@ infra/
   main/               # the whole stack (one cloud environment)
     main.tf  variables.tf  outputs.tf  backend.tf (azurerm, use_azuread_auth = true, use_oidc = true)
   modules/
-    network/          # VNet, subnets (database, Container Apps, read function), NSGs, service endpoints, private DNS zone
+    network/          # VNet, subnets (snet-aca, snet-psql), NSGs (incl. outbound to AzureActiveDirectory), private DNS zone
     storage/          # storage account, containers (sessions, lake), Event Grid subscription to Service Bus
     messaging/        # Service Bus (Basic) queue + dead-letter, Event Hubs (Basic) namespace + hub
     database/         # PostgreSQL Flexible Server, server parameters (azure.extensions, TLS), Entra admin
-    compute/          # ACR, Container Apps environment, processor app, finalize/aggregate/migrate jobs, both function apps, Key Vault, identities + role assignments
+    compute/          # ACR, Container Apps environment, processor and read API apps, finalize/aggregate/migrate jobs, ingest function app, Key Vault, user-assigned identities + role assignments
     web/              # Static Web App for the dashboard
     observability/    # Log Analytics, Application Insights, workbook, alerts, budget
 ```
@@ -438,29 +460,38 @@ infra/
 | `python-ci.yml` | PR touching `services/**` or `tools/**` | ruff (lint), pytest (including the Wf filter test and a test on a sample session) |
 | `terraform-plan.yml` | PR touching `infra/**` | fmt, validate, plan; posts the plan as a PR comment; read-only identity |
 | `terraform-apply.yml` | merge to `main` touching `infra/**` | apply, after approval in the protected `prod` environment |
-| `deploy-services.yml` | merge to `main` touching `services/**` or `db/**` | build images, push to ACR, run the migrate job and wait for it, update the processor and jobs, deploy both function apps |
-| `deploy-dashboard.yml` | merge to `main` touching `dashboard/**` | build, deploy to Static Web Apps (the deploy token is fetched with `az` after OIDC login, not stored) |
+| `deploy-services.yml` | merge to `main` touching `services/**` or `db/**` | build images, push to ACR, run the migrate job and wait for it, update the processor, read API and jobs, deploy the ingest function app |
+| `deploy-dashboard.yml` | merge to `main` touching `dashboard/**` | build, write `config.json` with the read API address from Terraform, deploy to Static Web Apps (the deploy token is fetched with `az` after OIDC login, not stored) |
 | `security.yml` | every PR | gitleaks (scans for committed secrets) |
+| `ios-app.yml` (exists) | push or PR touching `src/mobile-ios/**` | builds the app for device (unsigned) and runs its tests on a macOS runner (free for public repos) |
 | `teardown.yml` | manual | `terraform destroy` after the hackathon |
 
 ---
 
 ## 14. Cost estimate
 
-Approximate, North Europe prices; verify in the Azure Pricing Calculator.
+Prices are North Europe list prices from the Azure Retail Prices API (2026-11-20, USD).
 
-| Item | Approx. per day |
-|---|---|
-| Event Hubs Basic, 1 throughput unit (exists 24/7) | ~$0.36 |
-| PostgreSQL Flexible Server `B1ms` + 32 GB | $0 for 12 months on the free account (~$0.55 after) |
-| Container Apps processor (0.25 vCPU, 0.5 GB, always on) | $0 for the first ~8 days each month (monthly free grant), then ~$0.45 |
-| Container Apps Jobs (finalize, aggregate, migrate) | ~$0 (minutes per session) |
-| Functions (Flex Consumption) | ~$0 at our volume |
-| Container Registry | $0 to ~$0.17 (Basic) |
-| Storage, Event Grid, Service Bus, Key Vault, Log Analytics (capped), Static Web Apps (Free) | < $0.20 |
-| **Total** | **≈ $0.50 to $1.50 per day** |
+| Item | Price | Per day for us |
+|---|---|---|
+| Event Hubs Basic, 1 throughput unit (exists 24/7) | $0.015/hour + $0.028 per million events | $0.36 |
+| Container Apps environment: 2 static public IPs (outgoing, incoming) | $0.005/hour each | $0.24 |
+| Container Apps: processor + read API (0.25 vCPU, 0.5 GiB each, always on) | active $0.000024/vCPU-s, idle $0.000003/vCPU-s, memory $0.000003/GiB-s; free grant 180,000 vCPU-s + 360,000 GiB-s per month | $0 for the first ~4 days of each month, then $0.40 (idle) to $1.30 (busy) |
+| Container Apps Jobs (finalize, aggregate, migrate) | active rate, only while running | ~$0.01 |
+| PostgreSQL Flexible Server `B1ms` + 32 GB | $0.018/hour + $0.1265/GB-month | $0 for 12 months on the free account ($0.57 after) |
+| Functions Flex Consumption (ingest) | free grant 100,000 GB-s + 250,000 runs per month, then $0.000026/GB-s | $0 (a 3-hour drive is ~5,400 runs) |
+| Container Registry Standard | free for 12 months on the free account (Basic: $0.17/day) | $0 |
+| Service Bus Basic | $0.05 per million operations | ~$0 |
+| Event Grid | first 100,000 operations per month free | $0 |
+| Log Analytics | first 5 GB per month free; daily cap 0.5 GB | $0 |
+| Static Web Apps Free, Storage, Key Vault | free / cents | < $0.05 |
+| **Total** | | **≈ $0.65 per day during the hackathon; at most ≈ $2.20 once the monthly free grants are used up** |
 
-The free account gives **$200 of credit for 30 days**, which covers the hackathon many times over. After 30 days the account must be upgraded to pay-as-you-go to keep running; the 12-month free services continue after the upgrade. Run `teardown.yml` after the event.
+**Which account.**
+- **Azure free account:** $200 credit for 30 days (card needed for identity, not charged while the spending limit is on). Within 30 days, or when the credit runs out, it must be upgraded to pay-as-you-go to keep running; the 12-month free services (PostgreSQL, Container Registry) continue after the upgrade. Credits can't pay for Marketplace products. One free account per person.
+- **Azure for Students** (if a team member is a full-time student at a degree-granting school): $100 credit for 12 months, **no card**; when the credit is gone the subscription is disabled.
+
+Either covers the hackathon: three days cost about $2. Run `teardown.yml` after the event.
 
 ---
 
@@ -471,7 +502,7 @@ decisions/            # this folder: plans and decision log
 src/mobile-ios/       # iPhone app (teammate, built on a Mac)
 services/
   ingest/             # Function app: validate, send to Event Hubs, archive
-  read-api/           # Function app: dashboard queries
+  read-api/           # Container App (FastAPI): dashboard queries
   processor/          # shared Python package + entry points: stream, finalize, aggregate, migrate
 tools/
   upload/             # fallback: upload a session folder to Blob Storage, marker file last
@@ -491,12 +522,14 @@ docker-compose.yml    # local PostGIS
 **Day 0 (setup).**
 - Create the Azure free account (or Azure for Students, if a team member qualifies: no card needed). The 30-day credit clock starts now.
 - Register the resource providers the stack needs (`Microsoft.App`, `Microsoft.EventHub`, `Microsoft.ServiceBus`, `Microsoft.EventGrid`, `Microsoft.DBforPostgreSQL`, `Microsoft.Web`, `Microsoft.ContainerRegistry`, `Microsoft.OperationalInsights`); `infra/bootstrap` does this.
-- Check that `B1ms` PostgreSQL and Flex Consumption are available in North Europe for this subscription.
+- Check the region: `az functionapp list-flexconsumption-locations` lists North Europe, and creating the `B1ms` server in North Europe succeeds (capacity isn't guaranteed by quota).
+- Send one test event to Event Hubs Basic with a managed identity (or `az login` user with the Data Sender role); if Basic refuses Entra login, switch to the key-in-Key-Vault fallback (§5).
+- Create the GitHub federated credentials with the immutable subjects from §5.
 - Create the budget, run `infra/bootstrap`, and set up OIDC.
 
 **Day 1: the thin live slice first.**
-- Morning: phone (or replay tool) → ingest function → Event Hubs → processor → PostgreSQL → read API → a dot moving on the dashboard map. No signal processing yet, just position and speed. Once this works end to end, every later step only adds detail to a path that already runs.
-- Early check in that slice: the read API function can get an Entra token and connect to the private database (this exercises the VNet's outbound access).
+- Morning: phone (or replay tool) → ingest function → Event Hubs → processor → PostgreSQL → read API → a dot moving on the dashboard's Live page (the dashboard already exists; point its `config.json` at the real read API). No signal processing yet, just position and speed. Once this works end to end, every later step only adds detail to a path that already runs.
+- Early check in that slice: the read API and processor log in to the private database with their managed identities (this exercises Entra login and the database's outbound rule to Entra ID).
 - In parallel: processing on the first real session folders, locally (this is where the value is); Terraform; CI workflows; the app's session metadata call (spec §6.1).
 
 **Day 2.**
@@ -515,7 +548,7 @@ docker-compose.yml    # local PostGIS
 ## 17. Top risks
 
 1. **Account limits.** The free account's credit lasts 30 days and some sizes may be unavailable in the region. Fix on day 0; fall back to West Europe if needed.
-2. **Network surprises.** New VNets no longer have outbound internet by default; if Terraform doesn't keep it on, the read function can't get a database token. Test on day 1, not day 3.
+2. **Login and network surprises.** The database must reach Entra ID to accept token logins (NSG rule plus default outbound access on `snet-psql`); a scale rule that can't log in never starts the finalize job. Test both on day 1. Reported quirk: suspending or updating a Container Apps Job can break its event trigger; if the finalize job stops starting, recreate it (`terraform apply -replace`).
 3. **The app's metadata call isn't ready.** Without it the backend doesn't know the vehicle or when a trip ended. Fallback: the processor creates the trip from its first batch with unknown context and closes it after 15 minutes of silence; such trips stay out of the aggregated map until their folder is uploaded.
 4. **Bad recordings:** loose mount, clock problems, wrong axes. Do a 10-minute dry run, watch it live on the dashboard, and check the folder with `quick_check` before the first real drive.
 5. **Mobile network on the route.** Dead zones delay data (the queue catches up) but don't lose it. Pick a loop with decent coverage so the live view looks live.
@@ -527,7 +560,7 @@ docker-compose.yml    # local PostGIS
 
 ## 18. Open questions
 
-- Free account or Azure for Students, and whose card or student account?
+- Free account (card) or Azure for Students (no card), and in whose name? (§14)
 - Can the app's session metadata call (spec §6.1) be added on day 1?
 - Can a car stream live during the presentation (organizers, parking, mobile coverage), or do we show the replay only?
 - Which loop will we drive repeatedly, and which bus or tram line overlaps it?
@@ -547,4 +580,34 @@ These were in earlier versions of the plan. We removed them because they mainly 
 | OpenStreetMap road snapping | Segments that follow real roads, no blurring at junctions or parallel roads | H3 hexagons are good enough for aggregation and need no map import | Import an OSM extract, cut roads into 25 m pieces, add a road ID to `segments` |
 | Lateral (sideways) sickness metric | A second, non-standard sickness score based on Donohew & Griffin (2004) | Scientifically interesting, not required. The ISO vertical metric covers the requirement | The lateral acceleration is still stored in `session_series`, so the metric can be computed later from existing data |
 | checkov in CI | Automatic checks for Terraform misconfigurations | Extra checks that judges rarely open; gitleaks stays for secrets | Add one step to `security.yml` |
-| iOS build check in CI | Unsigned simulator build of the app on a macOS runner | The app is built and tested on the Mac anyway | Add an `ios-build.yml` workflow with a path filter on `src/mobile-ios/**` |
+
+---
+
+## 20. Research answers (2026-11-20)
+
+Every point the plan had marked as unsure, what we found, and what it changed. Sources are in [03-research-notes.md](03-research-notes.md).
+
+| Question | Answer | Effect on the plan |
+|---|---|---|
+| What does Event Hubs Basic cost? | $0.015 per throughput-unit hour + $0.028 per million events (events counted in 64 KB units) | $0.36/day; batches are one event each (§14) |
+| Does Event Hubs Basic accept Entra (managed identity) login? | Not stated per tier in Microsoft's tables; Entra login is documented for Event Hubs in general | Day-0 test; fallback is a send-only and a listen-only key in Key Vault (§5, §16) |
+| What are Container Apps' free grant and rates? | 180,000 vCPU-s, 360,000 GiB-s and 2 M requests per subscription per month; active $0.000024/vCPU-s, idle $0.000003/vCPU-s, memory $0.000003/GiB-s; jobs billed only while running | Costs in §14 |
+| Is Container Registry free? | One Standard registry is free for 12 months on the free account | Use Standard, not Basic (§5) |
+| Is PostgreSQL `B1ms` free? | Yes: 750 hours, 32 GB storage, 32 GB backup per month for 12 months, new customers only; $0.018/hour after | Unchanged |
+| Azure for Students? | $100 for 12 months, no card, full-time students only; disabled when the credit runs out | Listed as an option (§14) |
+| Do new VNets still have internet access by default? | No: since 31 March 2026, subnets in new VNets are private by default. Terraform's `default_outbound_access_enabled` still defaults to `true` | Kept `true` explicitly on the database subnet (§5) |
+| How do Container Apps get outgoing access in a VNet? | Through the environment's own static public IP (billed), not the subnet's default access; needs a `/27` subnet (workload profiles) | No NAT gateway needed; 2 IPs added to costs (§5, §14) |
+| How does a VNet-joined Flex Consumption function get outgoing access? | All its traffic goes through the subnet, which is now private by default | **Read API moved from a function to a container app** (D34) |
+| Does PostgreSQL with private networking need anything for Entra login? | Yes: an outbound rule to the `AzureActiveDirectory` service tag | NSG rule added (§5, D35) |
+| Which TLS mode for PostgreSQL? | Microsoft recommends `require`; `verify-ca`/`verify-full` are unsupported because intermediate certificates rotate without notice | `sslmode=require` (D35) |
+| Can a Container Apps Job's KEDA rule log in with a managed identity? | Yes: `identity_id` on the rule in `azurerm_container_app_job`; needs "Service Bus Data Receiver". Reported quirk: suspending or updating a job can break its trigger | User-assigned identity created first; recreate the job if it stops starting (§5, §17) |
+| Does Event Grid deliver to a Service Bus Basic queue with a managed identity? | Yes, with "Azure Service Bus Data Sender" on the queue | Unchanged (§5) |
+| Service Bus Basic limits? | $0.05 per million operations, 256 KB messages, dead-letter queue, message lock up to 5 minutes | Lock renewal kept (§5) |
+| Does the Functions host decompress gzip request bodies? | Not documented; reports suggest the body arrives as sent | Code checks the gzip magic bytes and handles both (§5) |
+| Is Flex Consumption in North Europe, with which Python? | North Europe was a launch region; Python 3.12 and 3.13 are GA | Python 3.12; confirm region with the CLI on day 0 |
+| Is Log Analytics free? | First 5 GB per month per billing account | Daily cap 0.5 GB (§5) |
+| Static Web Apps Free limits? | 100 GB traffic per month, 250 MB per app, 10 apps per subscription | Unchanged |
+| GitHub OIDC subject format for this repo? | Repo created 2026-11-20, after GitHub's switch to immutable subjects (2026-07-15) | Federated credentials use `repo:ghimpumihai@163877193/DataInfrastructure_Chuds@1465690625:...` (§5, D36) |
+| What can't the free credit pay for? | Marketplace products, support plans and a few others; the account must be upgraded within 30 days to keep running | Noted in §5 and §14 |
+| Does the plan match what is already built on `main`? (merged 2026-11-20) | The app has no health route and tests its connection with a probe POST; the dashboard is built with its own read-API contract (`dashboard/API.md`) and a mock backend | Ingest follows the probe and status rules of `mock_ingest_server.py`; the read API follows `API.md`; dashboard pages listed in §5; session status names match the dashboard |
+| Where does the session metadata call go? | The read API already uses `GET /api/sessions/{id}` on another host | The app's call is `PUT /api/ingest/sessions/{id}`, so every app route sits under `/api/ingest` |

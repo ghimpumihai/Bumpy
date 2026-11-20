@@ -31,9 +31,27 @@ $sha = [System.Security.Cryptography.SHA256]::Create()
 $hash = -join ($sha.ComputeHash([Text.Encoding]::UTF8.GetBytes($key)) | ForEach-Object { $_.ToString('x2') })
 
 $current = @{}
+# On the first key the secret doesn't exist yet and az writes an error to stderr. With
+# ErrorActionPreference 'Stop', Windows PowerShell 5.1 turns redirected native stderr into a
+# terminating error, so relax it for this one call and decide by the exit code instead.
+$ErrorActionPreference = 'Continue'
 $existing = az keyvault secret show --vault-name $VaultName --name $SecretName --query value -o tsv 2>$null
-if ($LASTEXITCODE -eq 0 -and $existing) {
+$showExit = $LASTEXITCODE
+$ErrorActionPreference = 'Stop'
+if ($showExit -eq 0 -and $existing) {
   ($existing | ConvertFrom-Json).PSObject.Properties | ForEach-Object { $current[$_.Name] = $_.Value }
+} elseif ($showExit -ne 0) {
+  # Distinguish "no secret yet" from "can't reach the vault" (wrong name, no rights, not logged in).
+  $ErrorActionPreference = 'Continue'
+  $names = az keyvault secret list --vault-name $VaultName --query "[].name" -o tsv 2>$null
+  $listExit = $LASTEXITCODE
+  $ErrorActionPreference = 'Stop'
+  if ($listExit -ne 0) {
+    throw "Can't read Key Vault '$VaultName'. Check 'az login' and that your object ID is in TF_VAR_admin_object_ids (Key Vault Secrets Officer)."
+  }
+  if ($names -contains $SecretName) {
+    throw "Secret '$SecretName' exists but couldn't be read; not overwriting it."
+  }
 }
 $current[$DeviceId] = $hash
 

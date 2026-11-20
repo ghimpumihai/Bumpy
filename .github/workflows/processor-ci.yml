@@ -1,0 +1,64 @@
+name: processor-ci
+
+on:
+  pull_request:
+    paths:
+      - "services/processor/**"
+      - "db/**"
+      - ".github/workflows/processor-ci.yml"
+  push:
+    branches: [main]
+    paths:
+      - "services/processor/**"
+      - "db/**"
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    services:
+      postgis:
+        image: postgis/postgis:17-3.5 # same PostgreSQL major as Azure
+        env:
+          POSTGRES_PASSWORD: ${{ secrets.POSTGRES_PASSWORD }}
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 5s --health-timeout 5s --health-retries 20
+    env:
+      PGHOST: localhost
+      PGPORT: "5432"
+      PGUSER: postgres
+      PGPASSWORD: ${{ secrets.POSTGRES_PASSWORD }} # repo secret; not passed to PRs from forks
+    defaults:
+      run:
+        working-directory: services/processor
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: services/processor/requirements.txt
+
+      - name: Install
+        run: pip install -r requirements.txt pytest
+
+      - name: Tests (unit + PostGIS integration)
+        run: pytest -q -rs tests
+
+      - name: Migrate job runs end to end on an empty database
+        env:
+          PGDATABASE: postgres
+          RUN_MODE: migrate
+        run: python -m roadride && python -m roadride
+
+  image:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Docker image builds
+        run: docker build -f services/processor/Dockerfile -t processor:ci .

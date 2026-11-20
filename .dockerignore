@@ -1,0 +1,6 @@
+# Images are built from the repo root; send only what they need (not dashboard/node_modules etc.).
+*
+!services/processor/requirements.txt
+!services/processor/roadride/
+!db/migrations/
+**/__pycache__

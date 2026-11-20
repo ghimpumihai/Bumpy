@@ -1,6 +1,7 @@
 import Foundation
 import Observation
 import SwiftUI
+import UIKit
 
 enum Route: Hashable {
     case setup
@@ -18,6 +19,7 @@ final class AppModel {
     let location = LocationService()
     let deviceMonitor = DeviceStatusMonitor()
     let audio = AudioRecorderService()
+    let audioMeter = AudioLevelMeterService()
     let uploadQueue: UploadQueue
     let sicknessInterval: TimeInterval
     let sicknessTimeout: TimeInterval
@@ -53,6 +55,14 @@ final class AppModel {
         setup = SetupDefaults.load()
         // Upload events go to the active session's app_log.txt (spec §4) and to the unified log.
         let active = activeSession
+        // Force-quit / system termination while recording: stop cleanly (final flush, endedAtUtc,
+        // stats) instead of leaving a "recovered" session that lost its last half second.
+        NotificationCenter.default.addObserver(forName: UIApplication.willTerminateNotification, object: nil, queue: .main) { [weak self] _ in
+            MainActor.assumeIsolated {
+                guard let rec = self?.recording, !rec.isFinished else { return }
+                rec.stop()
+            }
+        }
         uploadQueue.onEvent = { level, msg in
             appLogger.log(level: level == .info ? .info : .error, "\(msg, privacy: .public)")
             active.current?.log(level, msg)
@@ -96,7 +106,10 @@ final class AppModel {
     func makeDependencies() -> RecordingSession.Dependencies {
         RecordingSession.Dependencies(
             motion: CoreMotionSource(), location: location, altimeter: CoreAltimeterSource(),
-            activity: CoreActivitySource(), audio: audio, deviceStatus: deviceMonitor, uploadQueue: uploadQueue,
+            activity: CoreActivitySource(),
+            // Audio OFF (default on bus/tram, GDPR): level meter only, nothing from the mic is stored.
+            audio: setup.audioEnabled ? audio : audioMeter,
+            deviceStatus: deviceMonitor, uploadQueue: uploadQueue,
             deviceId: AppSettings.deviceId, appVersion: AppInfo.version, deviceInfo: AppInfo.deviceInfo)
     }
 
@@ -148,18 +161,21 @@ enum SetupDefaults {
         var mount: SessionMetadata.Mount
         var people: SessionMetadata.People
         var conditions: SessionMetadata.Conditions
+        var audioEnabled: Bool? // optional: older stored setups lack it
     }
 
     static func load() -> SessionSetup {
         guard let data = UserDefaults.standard.data(forKey: key),
               let s = try? JSONDecoder().decode(Stored.self, from: data) else { return SessionSetup() }
-        var setup = SessionSetup(vehicle: s.vehicle, mount: s.mount, people: s.people, conditions: s.conditions)
+        var setup = SessionSetup(vehicle: s.vehicle, audioEnabled: s.audioEnabled ?? !s.vehicle.isPublicTransport,
+                                 mount: s.mount, people: s.people, conditions: s.conditions)
         setup.mount.photoFile = nil
         return setup
     }
 
     static func save(_ setup: SessionSetup) {
-        let s = Stored(vehicle: setup.vehicle, mount: setup.mount, people: setup.people, conditions: setup.conditions)
+        let s = Stored(vehicle: setup.vehicle, mount: setup.mount, people: setup.people, conditions: setup.conditions,
+                       audioEnabled: setup.audioEnabled)
         if let data = try? JSONEncoder().encode(s) { UserDefaults.standard.set(data, forKey: key) }
     }
 }

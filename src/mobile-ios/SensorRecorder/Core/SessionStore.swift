@@ -82,6 +82,13 @@ struct SessionStore: Sendable {
     func recoverUnfinishedSessions(excluding active: URL? = nil, now: Date = Date()) -> [URL] {
         var recovered: [URL] = []
         for e in list() {
+            // Unreadable/missing session.json: we can't mark it, but torn CSV rows are still repaired
+            // (idempotent) so the data stays parseable, and the folder is never deleted.
+            if e.metadata == nil, e.folder.standardizedFileURL != active?.standardizedFileURL {
+                let repairs = CSVRepair.repairTornLines(in: e.folder)
+                if !repairs.isEmpty { appendRecoveryNote(folder: e.folder, repairs: repairs, now: now, unreadable: true) }
+                continue
+            }
             guard e.folder.standardizedFileURL != active?.standardizedFileURL,
                   var meta = e.metadata,
                   meta.endedAtUtc == nil,
@@ -102,9 +109,11 @@ struct SessionStore: Sendable {
         return recovered
     }
 
-    private func appendRecoveryNote(folder: URL, repairs: [String: Int], now: Date) {
+    private func appendRecoveryNote(folder: URL, repairs: [String: Int], now: Date, unreadable: Bool = false) {
         let url = folder.appendingPathComponent(SessionFileName.appLog)
-        var text = "\(ISO8601.string(now)) [WARN] session recovered on next launch (app was terminated while recording)\n"
+        var text = unreadable
+            ? "\(ISO8601.string(now)) [WARN] session.json missing/unreadable; CSV files repaired only\n"
+            : "\(ISO8601.string(now)) [WARN] session recovered on next launch (app was terminated while recording)\n"
         for (file, bytes) in repairs.sorted(by: { $0.key < $1.key }) {
             text += "\(ISO8601.string(now)) [WARN] recovery: trimmed \(bytes) bytes of incomplete last line from \(file)\n"
         }

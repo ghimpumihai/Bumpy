@@ -15,7 +15,7 @@ struct SettingsView: View {
     var body: some View {
         Form {
             Section {
-                TextField("https://<your-api>.azurewebsites.net", text: $baseURL)
+                TextField("https://<api-id>.execute-api.<region>.amazonaws.com", text: $baseURL)
                     .keyboardType(.URL)
                     .textInputAutocapitalization(.never)
                     .autocorrectionDisabled()
@@ -27,7 +27,7 @@ struct SettingsView: View {
                 if baseURL.trimmingCharacters(in: .whitespaces).isEmpty {
                     Text("UPLOAD OFF (local only)").font(.footnote.bold()).foregroundStyle(Theme.neutral)
                 } else if parsedURL == nil {
-                    Text("Invalid URL (must start with https:// or http://)").font(.footnote).foregroundStyle(Theme.problem)
+                    Text("Invalid URL: use https:// (http:// only for a local test server)").font(.footnote).foregroundStyle(Theme.problem)
                 } else {
                     Text("POST \(parsedURL!.appendingPathComponent("api/ingest").absoluteString)")
                         .font(.caption.monospaced()).foregroundStyle(.secondary)
@@ -42,12 +42,12 @@ struct SettingsView: View {
                         testing = false
                     }
                 } label: {
-                    HStack { Text("Test connection (GET /api/health)"); if testing { Spacer(); ProgressView() } }
+                    HStack { Text("Test connection (probe POST /api/ingest)"); if testing { Spacer(); ProgressView() } }
                 }
                 .disabled(parsedURL == nil || testing)
                 if let testResult { Text(testResult).font(.footnote) }
             } header: {
-                Text("Azure upload (optional)")
+                Text("AWS upload (optional)")
             } footer: {
                 Text("Empty URL = upload disabled. Recording always works fully offline; batches are queued on disk and uploaded when possible. The key is stored in the Keychain.")
             }

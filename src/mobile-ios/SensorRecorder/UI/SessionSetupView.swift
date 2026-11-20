@@ -7,6 +7,8 @@ struct SessionSetupView: View {
     @Environment(AppModel.self) private var model
     @State private var showCamera = false
     @State private var libraryItem: PhotosPickerItem?
+    /// Decoded once per photo (a 12 MP JPEG must not be decoded on every re-render while typing).
+    @State private var thumbnail: UIImage?
 
     private let vehicleTypes = ["car", "bus", "tram", "bike", "boat"]
     private let mountPresets = ["taped flat on center console", "clamped in cup holder mount", "dashboard suction mount",
@@ -15,7 +17,9 @@ struct SessionSetupView: View {
                                       "screen up, top of phone pointing to vehicle rear",
                                       "portrait, screen facing driver",
                                       "landscape, screen facing driver"]
-    private let seats = ["driver", "front passenger", "rear left", "rear middle", "rear right"]
+    private let carSeats = ["driver", "front passenger", "rear left", "rear middle", "rear right"]
+    private let transitSeats = ["front of vehicle", "middle of vehicle", "rear of vehicle", "over front axle",
+                                "over rear axle", "standing area"]
     private let weather = ["dry", "wet", "rain", "snow", "fog"]
 
     var body: some View {
@@ -27,6 +31,12 @@ struct SessionSetupView: View {
                 }
                 TextField("Make / model (e.g. Porsche Taycan)", text: $model.setup.vehicle.makeModel)
                     .accessibilityIdentifier("vehicleMakeModel")
+                if model.setup.vehicle.isPublicTransport {
+                    TextField("Line number (e.g. 24B)", text: Binding(
+                        get: { model.setup.vehicle.line ?? "" },
+                        set: { model.setup.vehicle.line = $0.trimmingCharacters(in: .whitespaces).isEmpty ? nil : $0 }))
+                        .accessibilityIdentifier("vehicleLine")
+                }
                 TextField("Vehicle notes", text: $model.setup.vehicle.notes)
             }
 
@@ -38,6 +48,9 @@ struct SessionSetupView: View {
                     ForEach(withCurrent(orientationPresets, model.setup.mount.phoneOrientation), id: \.self) { Text($0) }
                 }
                 Toggle("Rigid mount", isOn: $model.setup.mount.rigid)
+                Toggle("Hand-held (no mount)", isOn: $model.setup.mount.handheld)
+                    .accessibilityIdentifier("handheldToggle")
+                Toggle("Seat over an axle", isOn: $model.setup.mount.seatOverAxle)
                 mountPhotoRow
             } header: {
                 Text("Mount")
@@ -47,11 +60,15 @@ struct SessionSetupView: View {
 
             Section("People") {
                 Picker("Operator seat", selection: $model.setup.people.operatorSeat) {
-                    ForEach(seats.filter { $0 != "driver" }, id: \.self) { Text($0) }
+                    ForEach(withCurrent(seats.filter { $0 != "driver" }, model.setup.people.operatorSeat), id: \.self) { Text($0) }
                 }
                 Picker("Sickness rater seat", selection: $model.setup.people.raterSeat) {
-                    ForEach(seats, id: \.self) { Text($0) }
+                    ForEach(withCurrent(seats, model.setup.people.raterSeat), id: \.self) { Text($0) }
                 }
+                Picker("Rater posture", selection: $model.setup.people.raterPosture) {
+                    ForEach(SessionMetadata.People.postures, id: \.self) { Text($0) }
+                }
+                .accessibilityIdentifier("raterPosture")
                 TextField("Rater name / id (optional)", text: $model.setup.people.raterName)
                 Stepper("Passengers: \(model.setup.people.passengerCount)", value: $model.setup.people.passengerCount, in: 1...60)
             }
@@ -64,9 +81,14 @@ struct SessionSetupView: View {
             }
 
             Section {
-                Label("Audio is recorded locally for road-noise analysis. Tell everyone in the car.", systemImage: "mic.fill")
-                    .font(.footnote)
-                    .foregroundStyle(Theme.warn)
+                Toggle("Record audio", isOn: $model.setup.audioEnabled)
+                    .accessibilityIdentifier("audioToggle")
+            } header: {
+                Text("Audio")
+            } footer: {
+                Text(model.setup.audioEnabled
+                     ? "Road noise is recorded locally (never uploaded). Tell everyone in the vehicle."
+                     : "Audio recording OFF: only the sound level (numbers) is measured; nothing from the microphone is stored. Default on bus and tram (other passengers, GDPR).")
             }
         }
         .navigationTitle("Session setup")
@@ -79,6 +101,7 @@ struct SessionSetupView: View {
                 Text("Continue to preflight").font(.headline).frame(maxWidth: .infinity, minHeight: 50)
             }
             .buttonStyle(.borderedProminent)
+            .foregroundStyle(Theme.onBright) // contrast on accent blue
             .padding()
             .background(.ultraThinMaterial)
             .accessibilityIdentifier("setupContinue")
@@ -89,6 +112,13 @@ struct SessionSetupView: View {
             }
             .ignoresSafeArea()
         }
+        .onChange(of: model.setup.vehicle.type) { _, _ in
+            model.setup.applyVehicleTypeDefaults()
+        }
+        .onChange(of: model.setup.mountPhotoJPEG) { _, data in
+            thumbnail = Self.makeThumbnail(data)
+        }
+        .onAppear { thumbnail = Self.makeThumbnail(model.setup.mountPhotoJPEG) }
         .onChange(of: libraryItem) { _, item in
             guard let item else { return }
             Task {
@@ -101,7 +131,7 @@ struct SessionSetupView: View {
 
     @ViewBuilder private var mountPhotoRow: some View {
         HStack {
-            if let data = model.setup.mountPhotoJPEG, let img = UIImage(data: data) {
+            if let img = thumbnail {
                 Image(uiImage: img).resizable().scaledToFill().frame(width: 56, height: 56).clipped().cornerRadius(6)
                 Text("Mount photo ✓").foregroundStyle(Theme.ok)
             } else {
@@ -118,6 +148,13 @@ struct SessionSetupView: View {
             }
         }
     }
+
+    static func makeThumbnail(_ data: Data?) -> UIImage? {
+        guard let data, let img = UIImage(data: data) else { return nil }
+        return img.preparingThumbnail(of: CGSize(width: 168, height: 168)) ?? img
+    }
+
+    private var seats: [String] { model.setup.vehicle.isPublicTransport ? transitSeats : carSeats }
 
     private func withCurrent(_ presets: [String], _ current: String) -> [String] {
         presets.contains(current) || current.isEmpty ? presets : [current] + presets

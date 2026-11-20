@@ -52,6 +52,7 @@ final class PreflightModel {
     nonisolated static let minMotionRate = 90.0
     nonisolated static let stillnessMaxStdG = 0.01
     nonisolated static let gpsMaxAccuracyM = 10.0
+    nonisolated static let gpsKeepAccuracyM = 20.0
     nonisolated static let minBattery: Float = 0.5
     nonisolated static let minFreeDisk: Int64 = 2_000_000_000
     nonisolated static let motionTestDuration: TimeInterval = 5
@@ -65,6 +66,10 @@ final class PreflightModel {
     @ObservationIgnored private let app: AppModel
     @ObservationIgnored private var gpsTimer: Timer?
     @ObservationIgnored private var runTask: Task<Void, Never>?
+    @ObservationIgnored private var motionTask: Task<Void, Never>?
+    /// Uptime when GPS last met ≤ 10 m; the check then stays green unless the fix degrades a lot,
+    /// so START and Override don't swap under the operator's finger on marginal accuracy.
+    @ObservationIgnored private var gpsPassedAtUp: TimeInterval?
 
     /// True while any check is still running — Start/Override must wait.
     var busy: Bool { running || motionTestRunning }
@@ -74,12 +79,13 @@ final class PreflightModel {
         checks = [
             Check(id: "perm.motion", title: "Motion permission", required: true),
             Check(id: "perm.location", title: "Location: authorized + precise", required: true),
-            Check(id: "perm.mic", title: "Microphone permission", required: true),
+            Check(id: "perm.mic", title: "Microphone permission", required: app.setup.audioEnabled),
             Check(id: "avail.motion", title: "Device motion / accel / gyro", required: true),
             Check(id: "avail.baro", title: "Barometer available", required: true),
             Check(id: "gps.fix", title: "GPS fix ≤ 10 m", required: true),
-            Check(id: "motion.rate", title: "Motion rate ≥ 90 Hz (3 s test)", required: true),
-            Check(id: "motion.still", title: "Mount stillness (5 s, vehicle stopped)", required: true),
+            Check(id: "motion.rate", title: "Motion rate ≥ 90 Hz", required: true),
+            // A hand-held phone can't pass a stillness test; the backend excludes such sessions anyway.
+            Check(id: "motion.still", title: "Mount stillness (5 s, vehicle stopped)", required: !app.setup.mount.handheld),
             Check(id: "dev.lpm", title: "Low Power Mode off", required: true),
             Check(id: "dev.battery", title: "Battery ≥ 50 % or charging", required: true),
             Check(id: "dev.thermal", title: "Thermal nominal / fair", required: true),
@@ -118,7 +124,8 @@ final class PreflightModel {
     func onDisappear() {
         gpsTimer?.invalidate()
         gpsTimer = nil
-        runTask?.cancel() // stops an in-flight motion test (its sleeps throw on cancel)
+        runTask?.cancel() // stops permission waits and an in-flight motion test (sleeps throw on cancel)
+        motionTask?.cancel()
     }
 
     func runAll() async {
@@ -150,12 +157,15 @@ final class PreflightModel {
         set("perm.location", .running, "requesting…")
         app.location.requestPermission()
         for _ in 0..<120 where app.location.authorization == .notDetermined {
-            try? await Task.sleep(nanoseconds: 250_000_000)
+            do { try await Task.sleep(nanoseconds: 250_000_000) } catch { return } // screen left
         }
         if app.location.isAuthorized && !app.location.isFullAccuracy {
             app.location.requestPermission() // asks for temporary full accuracy
-            for _ in 0..<40 where !app.location.isFullAccuracy { try? await Task.sleep(nanoseconds: 250_000_000) }
+            for _ in 0..<40 where !app.location.isFullAccuracy {
+                do { try await Task.sleep(nanoseconds: 250_000_000) } catch { return }
+            }
         }
+        guard !Task.isCancelled else { return }
         updateLocationPermission()
         if app.location.isAuthorized { app.location.startPreview() }
 
@@ -167,6 +177,9 @@ final class PreflightModel {
             let granted = await withCheckedContinuation { c in AudioRecorderService.requestPermission { c.resume(returning: $0) } }
             set("perm.mic", granted ? .pass : .fail, granted ? "authorized" : "denied: Settings → Privacy → Microphone")
         }
+        if !app.setup.audioEnabled, let i = checks.firstIndex(where: { $0.id == "perm.mic" }) {
+            checks[i].detail += " · audio recording OFF (level meter only)"
+        }
     }
 
     private func updateLocationPermission() {
@@ -174,7 +187,7 @@ final class PreflightModel {
         if !loc.isAuthorized {
             set("perm.location", .fail, loc.authorization == .notDetermined ? "not determined" : "denied: Settings → Privacy → Location")
         } else if !loc.isFullAccuracy {
-            set("perm.location", .fail, "Precise Location is OFF")
+            set("perm.location", .fail, "Precise Location is OFF: Settings → Sensor Recorder → Location → Precise")
         } else {
             set("perm.location", .pass, loc.authorization == .authorizedAlways ? "always, precise" : "when in use, precise")
         }
@@ -205,12 +218,18 @@ final class PreflightModel {
             set("gps.fix", .running, "waiting for fix…")
             return
         }
-        let age = ProcessInfo.processInfo.systemUptime - at
+        let now = ProcessInfo.processInfo.systemUptime
+        let age = now - at
         let acc = fix.hAcc
         let detail = String(format: "hAcc %.1f m · %.0f s ago", acc, age)
-        if acc >= 0 && acc <= Self.gpsMaxAccuracyM && age < 5 {
+        let good = acc >= 0 && acc <= Self.gpsMaxAccuracyM && age < 5
+        if good { gpsPassedAtUp = now }
+        // Hysteresis: once passed, stay green while the fix is still reasonable (≤ 20 m, < 30 s old).
+        let stillOK = gpsPassedAtUp != nil && acc >= 0 && acc <= Self.gpsKeepAccuracyM && age < 30
+        if good || stillOK {
             set("gps.fix", .pass, detail)
         } else {
+            gpsPassedAtUp = nil
             set("gps.fix", .running, detail + " (need ≤ 10 m; go outside / wait)")
         }
     }
@@ -237,7 +256,7 @@ final class PreflightModel {
             set("upload", .info, "OFF – local only")
             return
         }
-        set("upload", .running, "testing \(cfg.healthURL?.absoluteString ?? "")…")
+        set("upload", .running, "probing \(cfg.ingestURL?.absoluteString ?? "")…")
         let r = await UploadQueue.testConnection(config: cfg)
         set("upload", r.ok ? .pass : .warn, r.detail + (r.ok ? "" : " (data stays queued on disk)"))
     }
@@ -289,8 +308,21 @@ final class PreflightModel {
         }
     }
 
+    /// Re-run only the motion test (tracked so leaving the screen cancels it).
+    func rerunMotionTest() {
+        guard !busy else { return }
+        motionTask = Task { await runMotionTest() }
+    }
+
+    /// Some permission was denied: the only fix is in the Settings app.
+    var needsSettings: Bool {
+        checks.contains { $0.id.hasPrefix("perm.") && $0.status == .fail && $0.detail.contains("Settings") }
+            || (app.location.isAuthorized && !app.location.isFullAccuracy)
+    }
+
     func rerun() {
         for i in checks.indices { checks[i].status = .pending; checks[i].detail = "" }
+        gpsPassedAtUp = nil
         runTask?.cancel()
         runTask = Task { await runAll() }
     }

@@ -67,11 +67,32 @@ enum SessionFileName {
     static func audioSegment(_ index: Int) -> String { String(format: "audio_%03d.m4a", index) }
 }
 
+/// Where a `BufferedFileWriter` puts bytes. Production: the file; tests inject failures
+/// (disk full, partial writes) through this seam.
+protocol FileSink: AnyObject {
+    func offset() throws -> UInt64
+    func write(_ data: Data) throws
+    func synchronize() throws
+    func close() throws
+}
+
+final class FileHandleSink: FileSink {
+    private let handle: FileHandle
+    init(url: URL) throws {
+        handle = try FileHandle(forWritingTo: url)
+        try handle.seekToEnd()
+    }
+    func offset() throws -> UInt64 { try handle.offset() }
+    func write(_ data: Data) throws { try handle.write(contentsOf: data) }
+    func synchronize() throws { try handle.synchronize() }
+    func close() throws { try handle.close() }
+}
+
 /// Append-only, buffered text file. `append` is cheap and thread-safe (called from sensor queues);
 /// `flush` must only be called from the owner's serial writer queue.
 final class BufferedFileWriter: @unchecked Sendable {
     let url: URL
-    private let handle: FileHandle
+    private let handle: FileSink
     private let pending = Locked(String())
     /// Bytes that failed to write last time (e.g. disk full). Retried first on the next flush.
     private var retryData = Data()
@@ -80,12 +101,15 @@ final class BufferedFileWriter: @unchecked Sendable {
 
     /// Hard cap for data held in memory per file while the disk refuses writes (prevents OOM:
     /// ~15 writers × 4 MB worst case).
-    static let maxRetryBytes = 4 * 1024 * 1024
+    static let defaultMaxRetryBytes = 4 * 1024 * 1024
+    /// Per-instance so tests can use a tiny cap.
+    var maxRetryBytes = BufferedFileWriter.defaultMaxRetryBytes
     /// Whether the bytes on disk end with a complete line.
     private var diskEndsWithNewline = true
 
     /// Creates the file (must not exist) and writes `header` synchronously.
-    init(url: URL, header: String?) throws {
+    /// - Parameter sink: test seam; defaults to a `FileHandle` appending to `url`.
+    init(url: URL, header: String?, sink: ((URL) throws -> FileSink)? = nil) throws {
         self.url = url
         let fm = FileManager.default
         guard !fm.fileExists(atPath: url.path) else {
@@ -95,8 +119,7 @@ final class BufferedFileWriter: @unchecked Sendable {
         guard fm.createFile(atPath: url.path, contents: initial) else {
             throw CocoaError(.fileWriteUnknown, userInfo: [NSFilePathErrorKey: url.path])
         }
-        handle = try FileHandle(forWritingTo: url)
-        try handle.seekToEnd()
+        handle = try (sink ?? { try FileHandleSink(url: $0) })(url)
         stats.withLock { $0.bytes = Int64(initial.count) }
     }
 
@@ -126,7 +149,7 @@ final class BufferedFileWriter: @unchecked Sendable {
         guard !data.isEmpty else { return }
         let before = (try? handle.offset()) ?? 0
         do {
-            try handle.write(contentsOf: data)
+            try handle.write(data)
             retryData.removeAll(keepingCapacity: true)
             diskEndsWithNewline = data.last == UInt8(ascii: "\n")
             stats.withLock { $0.bytes += Int64(data.count) }
@@ -139,10 +162,11 @@ final class BufferedFileWriter: @unchecked Sendable {
                 stats.withLock { $0.bytes += Int64(written) }
             }
             var rest = Data(data.dropFirst(written))
-            if rest.count > Self.maxRetryBytes {
+            if rest.count > maxRetryBytes {
                 // Drop the oldest *whole lines* only, so the retained data starts at a row boundary.
-                let cut = rest.count - Self.maxRetryBytes
-                if let nl = rest[(rest.startIndex + cut)...].firstIndex(of: UInt8(ascii: "\n")) {
+                // Search from cut-1: if the cut falls exactly on a row start, that row is kept.
+                let cut = rest.count - maxRetryBytes
+                if let nl = rest[(rest.startIndex + cut - 1)...].firstIndex(of: UInt8(ascii: "\n")) {
                     rest = Data(rest[(nl + 1)...])
                 } else {
                     rest = Data()

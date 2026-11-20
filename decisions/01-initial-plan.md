@@ -2,12 +2,14 @@
 
 > **Audience:** a Claude Code instance (and the teammate driving it) building the iPhone data-collection app on macOS.
 > This file is the complete context. Read it fully before writing code.
+>
+> **Status (2026-11-20):** updated for **AWS** (this plan was first written for Azure). The backend architecture and the reasons behind each choice are in [02-infrastructure-plan.md](02-infrastructure-plan.md). Changes for the app: the upload target in §6 is now the AWS API, and §3.5 and §3.8 gained public-transport fields (audio switch, posture, handheld, line).
 
 ---
 
 ## 0. TL;DR for the builder
 
-Build a **native iOS app (Swift + SwiftUI)** that records **every useful sensor on an iPhone 14 Pro at the highest practical rate**, **writes everything to local files first**, optionally **streams batches to Azure**, and shows a **live dashboard proving every stream is healthy**.
+Build a **native iOS app (Swift + SwiftUI)** that records **every useful sensor on an iPhone 14 Pro at the highest practical rate**, **writes everything to local files first**, optionally **streams batches to the AWS backend**, and shows a **live dashboard proving every stream is healthy**.
 
 We get **ONE test drive** to collect the data. There is no second chance:
 
@@ -22,7 +24,7 @@ We get **ONE test drive** to collect the data. There is no second chance:
 
 ### Hackathon
 - **Codelap Hackathon 2026**, "Data-Driven Infrastructure Engineering" challenge (Porsche Engineering, Cluj-Napoca).
-- **Challenge:** build an end-to-end system: **Capture** (phone) → **Transmit** (securely to Azure) → **Process** → **Store** (database) → **Visualize** (web dashboard).
+- **Challenge:** build an end-to-end system: **Capture** (phone) → **Transmit** (securely to the cloud; we use **AWS**, which the organizers accept) → **Process** → **Store** (database) → **Visualize** (web dashboard).
 - **Also required:** Infrastructure as Code plus CI/CD pipelines, and a public Git repo with regular, meaningful commits.
 - **Judging:** presentation and demo, relevance and impact, technical execution, innovation and creativity.
 - The guidance says *"A small, reliable stream of real data is more valuable than a complex integration that cannot be demonstrated."*
@@ -124,6 +126,7 @@ Notes:
 | S2 | **Audio recording** | `AVAudioSession` category `.record`, **mode `.measurement`** (turns off auto gain and voice processing, which matters for measurement), AAC, 48 kHz (or 44.1), mono, ~64 kbps, `.m4a`, saved locally only | Lets us classify road surface from sound later (frequency analysis); also an audible "sync tap" (§5) | **P1** |
 
 - ⚠️ This records conversations in the car. **Tell everyone in the car.** Never upload the raw audio live; it stays on the phone and goes into the session folder.
+- ⚠️ **Turn audio recording off on public transport** (other passengers' conversations, GDPR). Session setup has an `audioEnabled` switch that defaults to off when the vehicle type is `bus` or `tram`. The audio *level* meter (S1, numbers only) may stay on.
 - Store the uptime at which recording actually started (see §5).
 
 ### 3.6 Device health (polled every 5 s)
@@ -167,14 +170,17 @@ Note: looking at a phone screen itself increases motion sickness. The person rat
   "startedAtUtc": "2026-11-21T09:12:03.512Z",
   "startUptimeSec": 123456.789012,
   "endedAtUtc": null,
-  "vehicle": { "type": "car|bus|tram|bike|boat", "makeModel": "string", "notes": "" },
+  "vehicle": { "type": "car|bus|tram|bike|boat", "makeModel": "string", "line": "bus/tram line number, or null", "notes": "" },
   "mount": {
     "location": "e.g. taped flat on center console",
     "phoneOrientation": "e.g. screen up, top of phone pointing to vehicle front",
     "rigid": true,
+    "handheld": false,
+    "seatOverAxle": false,
     "photoFile": "mount.jpg"
   },
-  "people": { "operatorSeat": "front passenger", "raterSeat": "rear left", "passengerCount": 3 },
+  "people": { "operatorSeat": "front passenger", "raterSeat": "rear left", "raterPosture": "seated|standing", "passengerCount": 3 },
+  "audioEnabled": true,
   "conditions": { "weather": "dry", "notes": "" },
   "requestedRatesHz": { "deviceMotion": 100, "accel": 100, "gyro": 100, "mag": 50, "audioLevel": 10 },
   "recovered": false,
@@ -253,7 +259,9 @@ Use the same numeric precision everywhere: 6 decimals for sensor values, 8 decim
 
 ---
 
-## 6. Live upload to Azure (secondary; must never block recording)
+## 6. Live upload to AWS (secondary; must never block recording)
+
+The API base URL points at the AWS API Gateway endpoint (see [02-infrastructure-plan.md](02-infrastructure-plan.md)). The backend answers `200` for both new and repeated batches; the app should still treat `409` as success, as below. After a drive, the session folder is uploaded to S3 from a laptop, so live upload is optional for most sessions.
 
 The backend may not be ready during the drive. The app must work **fully offline**; upload is a bonus.
 
@@ -467,7 +475,7 @@ Pass criteria: motion streams ~100 Hz with max gap < 0.1 s; GPS ~1 Hz with sane 
 4. Preflight checklist + session setup + summary + export.
 5. Audio recording + level meter, barometer, activity, device health.
 6. Live plots + mini map.
-7. Live upload queue to Azure.
+7. Live upload queue to AWS.
 8. P2 extras (magnetometer, heading, absolute altitude, on-device roughness/MSDV estimates).
 
 ---

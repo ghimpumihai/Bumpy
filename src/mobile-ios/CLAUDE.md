@@ -177,8 +177,10 @@ imports SwiftUI or UIKit** and never touches hardware frameworks.
   sizes/durations through `ByteFormat`/`DurationFormat`. No ad-hoc `String(format:)` for file output.
 - Never rename or reorder existing columns; only append new ones at the end. Any schema change
   updates spec/README, `quick_check.py` and the tests in the same change.
-- Raw audio is never uploaded. With `audioEnabled == false` (default on bus/tram, GDPR) no audio
+- Raw audio is never sent live (it is in the session folder/export). With `audioEnabled == false` (default on bus/tram, GDPR) no audio
   is written at all — only the level meter runs.
+- `tools/fixtures/` (ingest batch + `csv_headers.json`) is the cross-language contract. Tests compare,
+  never rewrite; regenerate only for a deliberate change: `TEST_RUNNER_REGENERATE_FIXTURES=1 xcodebuild … test`.
 - `session.json` must stay decodable across app versions: new keys are decoded with
   `decodeIfPresent` + defaults, and a test decodes an old-format file.
 

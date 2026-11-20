@@ -19,6 +19,19 @@ Pass criteria (spec §10):
   - audio: if session.json audioEnabled is false, no audio file is expected (level meter only);
     otherwise (true, or missing in older app versions) no audio_*.m4a is a FAIL. Files must be
     consistent with audio_segments.csv. audio_level.csv is expected in both cases (WARN if missing)
+  - audio playability: every audio_*.m4a / audio.m4a must contain a top-level 'moov' box (the MP4
+    index, written only when AVAudioRecorder stops). Missing moov is a FAIL, except for the LAST
+    segment of a recovered session (recorded when the app died): WARN. session.json
+    stats.audioFilesIncomplete (optional) is printed and must agree with the scan (WARN otherwise)
+  - rows before the session start (t_utc_ms < startedAtUtc), in every CSV: location rows up to 5 s
+    early are INFO (the app keeps CoreLocation's cached first fix if <= 5 s old), older ones WARN;
+    activity.csv is exempt (the current CMMotionActivity may have begun earlier); any other file
+    with pre-start rows is a WARN (file, count, earliest offset)
+  - stream coverage: location / audio_level must span (last - first t_up) at least 50% of the
+    session duration ((endedAtUtc or the last row of any stream) - startedAtUtc), else WARN;
+    sessions shorter than 30 s are not checked
+  - stats.durationSec (if present) vs endedAtUtc - startedAtUtc (finished sessions) or vs the last
+    sensor row t_up - startUptimeSec (recovered / unfinished sessions): |diff| > 2 s is a WARN
   - session.json: WARN if not ended cleanly (endedAtUtc null), recovered, synthetic sensors,
     preflight overridden/missing, mount.handheld true or mount.rigid false (the backend excludes
     such sessions from roughness). Keys added in newer app versions (audioEnabled, vehicle.line,
@@ -61,6 +74,9 @@ EXPECTED_HEADERS = {
     "labels": COMMON + ["type", "value", "note"],
     "clock": COMMON + ["source"],
 }
+# Same schema as exact header lines, keyed by file stem (StreamFile.rawValue). test_tools.py pins it
+# against tools/fixtures/csv_headers.json, which the Swift unit tests write from StreamFile.header.
+EXPECTED_HEADER_LINES = {name: ",".join(cols) for name, cols in EXPECTED_HEADERS.items()}
 
 # Rate-checked streams: (min_hz, max_gap_s, severity_if_violated, missing_severity)
 MOTION = ("device_motion", "accel_raw", "gyro_raw")
@@ -81,6 +97,17 @@ ZERO_ROW_WARN = ("heading", "altimeter", "abs_altitude", "activity", "device")
 
 UTC_DEV_OK_MS = 20.0     # max |t_utc_ms - anchor-derived utc| considered fine (PASS)
 UTC_DEV_FAIL_MS = 100.0  # beyond this the time base is broken (FAIL); in between WARN
+
+# Rows before session start. startedAtUtc and t_utc_ms are both millisecond-rounded renderings of
+# the start anchor, so 1 ms of slack avoids flagging the start anchor itself.
+PRESTART_ROUNDING_MS = 1.0
+LOCATION_PRESTART_OK_MS = 5000.0  # RecordingSession.staleFixMargin: cached first fix kept if <= 5 s old
+PRESTART_EXEMPT = ("activity",)   # the current CMMotionActivity may have started before the session
+
+COVERAGE_STREAMS = ("location", "audio_level")
+COVERAGE_MIN_FRACTION = 0.5    # stream span must cover at least this share of the session
+COVERAGE_MIN_SESSION_S = 30.0  # shorter sessions are not coverage-checked
+DURATION_TOLERANCE_S = 2.0     # stats.durationSec vs. timestamps
 
 RATER_POSTURES = ("seated", "standing")
 RANK = {"PASS": 0, "WARN": 1, "FAIL": 2}
@@ -275,12 +302,14 @@ def check_streams(folder, rep, anchors):
     print(f"  {'stream':14s} {'rows':>8s} {'rate':>9s} {'max_gap':>9s} {'gaps>1s':>7s} {'nonmono':>7s}")
     span = [None, None]  # overall t_up span of motion data, for label sanity
     utc_firstlast = {}
+    times = {}  # stem -> ([valid t_up], [valid t_utc_ms]) in file order, for the timeline checks
     for name in STREAM_ORDER:
-        guarded(rep, f"{name}.csv", check_one_stream, folder, name, rep, anchors, span, utc_firstlast)
-    return span, utc_firstlast
+        guarded(rep, f"{name}.csv", check_one_stream, folder, name, rep, anchors, span, utc_firstlast,
+                times)
+    return span, utc_firstlast, times
 
 
-def check_one_stream(folder, name, rep, anchors, span, utc_firstlast):
+def check_one_stream(folder, name, rep, anchors, span, utc_firstlast, times):
     path = os.path.join(folder, f"{name}.csv")
     if not os.path.exists(path):
         sev = RATE_RULES[name][3] if name in RATE_RULES else MISSING_SEVERITY.get(name, "WARN")
@@ -306,6 +335,7 @@ def check_one_stream(folder, name, rep, anchors, span, utc_firstlast):
         rep.add("FAIL" if name in MOTION else "WARN",
                 f"{name}: {st['nonmono']} non-monotonic t_up steps")
     valid_utc = [u for u in utcs_all if u is not None]
+    times[name] = (tups, valid_utc)
     if valid_utc:
         utc_firstlast[name] = (valid_utc[0], valid_utc[-1])
 
@@ -412,6 +442,131 @@ def parse_iso(s):
         return None
 
 
+def scan_times(path):
+    """Quietly read (t_up, t_utc_ms) of a CSV (header/row problems are reported by the main checks).
+    Returns ([valid t_up], [valid t_utc_ms]) in file order; only rows with the header's width."""
+    tups, utcs = [], []
+    with open(path, newline="", encoding="utf-8", errors="replace") as fh:
+        reader = csv.reader(fh)
+        try:
+            header = next(reader, None)
+            if not header or "t_up" not in header or "t_utc_ms" not in header:
+                return tups, utcs
+            it, iu, ncol = header.index("t_up"), header.index("t_utc_ms"), len(header)
+            for row in reader:
+                if len(row) != ncol:
+                    continue
+                t, u = fnum(row[it]), fnum(row[iu])
+                if t is not None:
+                    tups.append(t)
+                if u is not None:
+                    utcs.append(u)
+        except csv.Error:
+            pass  # already a FAIL from read_csv; keep what was read
+    return tups, utcs
+
+
+def check_timeline(folder, meta, times, rep):
+    """Rows before the session start, stream coverage and stats.durationSec (all need session.json)."""
+    print("\n== session timeline ==")
+    if not isinstance(meta, dict):
+        print("  session.json unavailable - timeline checks skipped")
+        return
+    for name in EXPECTED_HEADERS:  # labels / clock / audio_segments are not in the stream table
+        path = os.path.join(folder, f"{name}.csv")
+        if name not in times and os.path.exists(path):
+            times[name] = guarded(rep, f"{name}.csv", scan_times, path, default=([], []))
+    start = parse_iso(meta.get("startedAtUtc"))
+    if start is None:
+        rep.add("WARN", "session.json: startedAtUtc missing/invalid - timeline checks skipped")
+        return
+    guarded(rep, "rows before session start", check_prestart_rows, start, times, rep)
+    guarded(rep, "stream coverage", check_coverage, meta, start, times, rep)
+    guarded(rep, "stats.durationSec", check_duration, meta, start, times, rep)
+
+
+def check_prestart_rows(start, times, rep):
+    found = False
+    for name in EXPECTED_HEADERS:
+        if name not in times:
+            continue
+        pre = [u for u in times[name][1] if u < start - PRESTART_ROUNDING_MS]
+        if not pre:
+            continue
+        found = True
+        earliest = (min(pre) - start) / 1000.0
+        if name in PRESTART_EXEMPT:
+            print(f"  {name}.csv: {len(pre)} row(s) before session start (earliest {earliest:+.1f} s) "
+                  f"- expected, the current activity began earlier")
+        elif name == "location":
+            old = [u for u in pre if u < start - LOCATION_PRESTART_OK_MS]
+            recent = len(pre) - len(old)
+            if recent:
+                rep.info(f"location.csv: {recent} row(s) up to {LOCATION_PRESTART_OK_MS / 1000:.0f} s "
+                         f"before session start (cached first fix, expected)")
+            if old:
+                rep.add("WARN", f"location.csv: {len(old)} row(s) more than "
+                                f"{LOCATION_PRESTART_OK_MS / 1000:.0f} s before session start "
+                                f"(earliest {(min(old) - start) / 1000.0:+.1f} s)")
+        else:
+            rep.add("WARN", f"{name}.csv: {len(pre)} row(s) before session start "
+                            f"(earliest {earliest:+.1f} s)")
+    if not found:
+        rep.ok("no rows before session start")
+
+
+def check_coverage(meta, start, times, rep):
+    end = parse_iso(meta.get("endedAtUtc"))
+    basis = "endedAtUtc"
+    if end is None:
+        lasts = [max(u) for _, u in times.values() if u]
+        if not lasts:
+            print("  session duration unknown (no endedAtUtc, no rows) - coverage not checked")
+            return
+        end, basis = max(lasts), "last row"
+    dur = (end - start) / 1000.0
+    print(f"  session duration: {dur:.1f} s (startedAtUtc .. {basis})")
+    if dur < COVERAGE_MIN_SESSION_S:
+        print(f"  session shorter than {COVERAGE_MIN_SESSION_S:.0f} s - coverage not checked")
+        return
+    for name in COVERAGE_STREAMS:
+        tups = times.get(name, ([], []))[0]
+        if not tups:
+            continue  # missing / 0 rows is reported by the stream checks
+        span = max(tups) - min(tups)
+        if span < COVERAGE_MIN_FRACTION * dur:
+            rep.add("WARN", f"{name} covers only {span:.0f} s of {dur:.0f} s session")
+        else:
+            rep.ok(f"{name} covers {span:.0f} s of {dur:.0f} s session")
+
+
+def check_duration(meta, start, times, rep):
+    stats = meta.get("stats")
+    d = fnum(stats.get("durationSec")) if isinstance(stats, dict) else None
+    if d is None:
+        print("  stats.durationSec: (absent)")
+        return
+    if meta.get("recovered") or meta.get("endedAtUtc") is None:
+        su = fnum(meta.get("startUptimeSec"))
+        lasts = [max(times[n][0]) for n in STREAM_ORDER if n in times and times[n][0]]
+        if su is None or su <= 0 or not lasts:
+            print(f"  stats.durationSec={d:.1f} s not verifiable (no startUptimeSec / sensor rows)")
+            return
+        ref, basis = max(lasts) - su, "last row t_up - startUptimeSec"
+    else:
+        end = parse_iso(meta.get("endedAtUtc"))
+        if end is None:
+            rep.add("WARN", f"session.json: endedAtUtc {meta.get('endedAtUtc')!r} is not a valid date")
+            return
+        ref, basis = (end - start) / 1000.0, "endedAtUtc - startedAtUtc"
+    diff = d - ref
+    msg = f"session.json: stats.durationSec {d:.1f} s vs {basis} {ref:.1f} s (diff {diff:+.1f} s)"
+    if abs(diff) > DURATION_TOLERANCE_S:
+        rep.add("WARN", msg)
+    else:
+        rep.ok(msg)
+
+
 def check_labels(folder, rep, span):
     print("\n== labels.csv ==")
     path = os.path.join(folder, "labels.csv")
@@ -464,6 +619,63 @@ def audio_segment_starts(folder, rep):
     return started
 
 
+def has_moov_box(path):
+    """True if the file has a top-level MP4 'moov' box (the index AVAudioRecorder writes on stop;
+    without it the file is unplayable). Same walk as SessionAnalyzer.hasMoovBox: 4-byte big-endian
+    size + 4-byte type; size 1 -> 64-bit largesize follows; size 0 -> box runs to end of file."""
+    end = os.path.getsize(path)
+    with open(path, "rb") as fh:
+        offset = 0
+        while offset + 8 <= end:
+            fh.seek(offset)
+            hdr = fh.read(16)
+            if len(hdr) < 8:
+                return False
+            size, typ = int.from_bytes(hdr[0:4], "big"), hdr[4:8]
+            if typ == b"moov":
+                return True
+            if size == 1:
+                if len(hdr) < 16:
+                    return False
+                size = int.from_bytes(hdr[8:16], "big")
+            elif size == 0:
+                return False  # last box runs to EOF and it is not moov
+            if size < 8:
+                return False  # corrupt box header; cannot walk further
+            offset += size
+    return False
+
+
+def check_audio_playable(folder, files, meta, rep):
+    """files: audio file names in segment order (legacy audio.m4a last)."""
+    meta = meta if isinstance(meta, dict) else {}
+    recovered = meta.get("recovered") is True
+    unplayable = [f for f in files if not has_moov_box(os.path.join(folder, f))]
+    for f in unplayable:
+        if recovered and f == files[-1]:
+            rep.add("WARN", f"{f} unplayable (no index): it was being recorded when the app died — "
+                            f"expected after a crash")
+        else:
+            rep.add("FAIL", f"{f} unplayable (no 'moov' box / MP4 index)")
+    if not unplayable:
+        rep.ok(f"{len(files)} audio file(s) playable ('moov' box present)")
+
+    stats = meta.get("stats")
+    listed = stats.get("audioFilesIncomplete") if isinstance(stats, dict) else None
+    if listed is None:
+        return
+    if not isinstance(listed, list) or not all(isinstance(x, str) for x in listed):
+        rep.add("WARN", f"session.json: stats.audioFilesIncomplete should be a list of file names, "
+                        f"got {listed!r}")
+        return
+    print(f"  stats.audioFilesIncomplete: {', '.join(listed) or '(empty)'}")
+    if set(listed) == set(unplayable):
+        rep.ok("stats.audioFilesIncomplete agrees with the 'moov' scan")
+    else:
+        rep.add("WARN", f"session.json: stats.audioFilesIncomplete ({', '.join(listed) or 'none'}) "
+                        f"disagrees with the 'moov' scan ({', '.join(unplayable) or 'none'})")
+
+
 def check_audio(folder, rep, anchors_present, meta):
     print("\n== audio ==")
     enabled = meta.get("audioEnabled", True) if isinstance(meta, dict) else True
@@ -493,6 +705,7 @@ def check_audio(folder, rep, anchors_present, meta):
                         "audio.m4a in the folder")
         return
     print(f"  total {total:,d} bytes in {len(files)} file(s)")
+    guarded(rep, "audio playability", check_audio_playable, folder, files, meta, rep)
 
     started = audio_segment_starts(folder, rep)
     if started is None:
@@ -621,9 +834,10 @@ def main(argv):
     rep = Report()
     meta = guarded(rep, "session.json", check_session_json, folder, rep)
     anchors = guarded(rep, "clock.csv", load_clock, folder, rep, default=[])
-    span, utc_firstlast = guarded(rep, "sensor streams", check_streams, folder, rep, anchors,
-                                  default=([None, None], {}))
+    span, utc_firstlast, times = guarded(rep, "sensor streams", check_streams, folder, rep, anchors,
+                                         default=([None, None], {}, {}))
     guarded(rep, "real-time check", check_utc_realtime, utc_firstlast, meta, rep)
+    guarded(rep, "session timeline", check_timeline, folder, meta, times, rep)
     guarded(rep, "labels.csv", check_labels, folder, rep, span)
     guarded(rep, "audio", check_audio, folder, rep, bool(anchors), meta)
 

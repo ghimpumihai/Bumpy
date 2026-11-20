@@ -3,11 +3,13 @@
 decisions/02-infrastructure-plan.md §6/§7; app contract spec §6) for local testing.
 
 Usage:
-    python3 -I tools/mock_ingest_server.py [--port 8080] [--host 0.0.0.0] [--key KEY] [--out DIR]
+    python3 -I tools/mock_ingest_server.py [--port 8080] [--host 127.0.0.1] [--key KEY] [--out DIR]
                                            [--fail-every N] [--dup-status {200,409}]
 
-Then set the app's API base URL to http://<laptop-LAN-IP>:<port> (and the device key to KEY).
-Note: iOS App Transport Security blocks plain http unless the app allows it (or use a tunnel).
+Default: loopback only (Simulator). For a real phone on the same Wi-Fi:
+    --host 0.0.0.0 --key <throwaway-key>   (a key is required on the network; never your real one:
+                                            plain http on Wi-Fi is sniffable)
+then set the app's API base URL to http://<laptop-LAN-IP>:<port> and the device key to that key.
 --port 0 picks a free port; the first output line names the bound URL.
 
 Endpoint (the only route; anything else is 404 like API Gateway, including GET /api/health):
@@ -105,6 +107,15 @@ def validate(b):
         raise Invalid("t0Up must be a finite number")
     if b["units"] != EXPECTED_UNITS:
         raise Invalid(f"units must be {json.dumps(EXPECTED_UNITS)}, got {json.dumps(b['units'])}")
+    # Additive fields (app >= review round 3): optional, but typed when present.
+    for k in ("eventType", "source"):
+        if k in b and (not isinstance(b[k], str) or not b[k]):
+            raise Invalid(f"{k} must be a non-empty string when present")
+    if "t0UtcMs" in b and not is_int(b["t0UtcMs"]):
+        raise Invalid("t0UtcMs must be an integer (Unix ms) when present")
+    if "fieldUnits" in b and (not isinstance(b["fieldUnits"], dict)
+                              or not all(isinstance(k, str) and isinstance(v, str) for k, v in b["fieldUnits"].items())):
+        raise Invalid("fieldUnits must be an object of string -> string when present")
 
     for block, cols in COLUMNAR.items():
         blk = b[block]
@@ -129,6 +140,8 @@ def validate(b):
     for i, loc in enumerate(b["location"]):
         if not isinstance(loc, dict):
             raise Invalid(f"location[{i}] must be an object")
+        if "isSimulated" in loc and loc["isSimulated"] is not None and not isinstance(loc["isSimulated"], bool):
+            raise Invalid(f"location[{i}].isSimulated must be true/false/null when present")
         if not is_int(loc.get("tUtcMs")):
             raise Invalid(f"location[{i}].tUtcMs missing or not an integer (Unix ms), "
                           f"got {loc.get('tUtcMs')!r}")
@@ -239,6 +252,7 @@ class State:
 class Handler(BaseHTTPRequestHandler):
     server_version = "MockIngest/1.0"
     protocol_version = "HTTP/1.1"
+    timeout = 15  # seconds per socket read: a slow/stalled client can't hold a thread forever
     state = None  # set in main
 
     def log_message(self, fmt, *args):  # silence default access log; we log our own lines
@@ -367,7 +381,11 @@ def _sigterm(signum, frame):
 def main():
     ap = argparse.ArgumentParser(description="Mock AWS POST /api/ingest server (stdlib only).")
     ap.add_argument("--port", type=int, default=8080, help="0 = pick a free port")
-    ap.add_argument("--host", default="0.0.0.0")
+    ap.add_argument("--host", default="127.0.0.1",
+                    help="bind address (default loopback). Use 0.0.0.0 to accept the phone over Wi-Fi; "
+                         "that requires --key (or --allow-any-key).")
+    ap.add_argument("--allow-any-key", action="store_true",
+                    help="accept any device key even when listening on the network (not recommended)")
     ap.add_argument("--key", default=None, help="require this x-device-key (default: accept any)")
     ap.add_argument("--out", default=None, help="append accepted batches to DIR/<sessionId>.jsonl")
     ap.add_argument("--fail-every", type=int, default=0, metavar="N",
@@ -375,6 +393,9 @@ def main():
     ap.add_argument("--dup-status", type=int, choices=(200, 409), default=200,
                     help="status for a repeated (sessionId, batchSeq); AWS answers 200 (default)")
     a = ap.parse_args()
+    if a.host not in ("127.0.0.1", "localhost", "::1") and not a.key and not a.allow_any_key:
+        ap.error("listening on the network without --key lets anyone on the Wi-Fi inject batches; "
+                 "pass --key <throwaway key> (or --allow-any-key)")
     if a.out:
         os.makedirs(a.out, exist_ok=True)
     state = State(a.key, a.out, a.fail_every if a.fail_every > 0 else 0, a.dup_status)

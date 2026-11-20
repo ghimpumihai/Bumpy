@@ -5,15 +5,22 @@ Usage:
     python3 -I src/mobile-ios/tools/test_tools.py -v
 
 Both tools are run as subprocesses (exactly as the team runs them), with the same interpreter.
-  - quick_check: synthetic session folders (valid and deliberately broken) in a temp dir.
+  - quick_check: synthetic session folders (valid and deliberately broken) in a temp dir: rates,
+    headers, UTC anchors, audio (incl. fake MP4s with/without a 'moov' box, recovered sessions),
+    rows before the session start, stream coverage and stats.durationSec.
+  - quick_check as a module (imported by path): has_moov_box, and the header contract: if
+    tools/fixtures/csv_headers.json exists (written by the Swift unit tests from StreamFile.header),
+    quick_check.EXPECTED_HEADER_LINES must equal it exactly.
   - mock_ingest_server: started on a free port, exercised over HTTP, always terminated.
   - contract test: if tools/fixtures/ingest_batch_v1.json.gz exists (written by the Swift unit
     tests from the app's real IngestBatch encoder), it is POSTed unchanged and must get 201.
 Python 3.9+, stdlib only.
 """
 
+import datetime as dt
 import gzip
 import http.client
+import importlib.util
 import json
 import os
 import re
@@ -29,6 +36,7 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 QUICK_CHECK = os.path.join(HERE, "quick_check.py")
 MOCK_SERVER = os.path.join(HERE, "mock_ingest_server.py")
 FIXTURE = os.path.join(HERE, "fixtures", "ingest_batch_v1.json.gz")
+HEADERS_FIXTURE = os.path.join(HERE, "fixtures", "csv_headers.json")
 KEY = "test-device-key"
 
 # ----------------------------------------------------------------------------------------------
@@ -64,11 +72,33 @@ def iso(ms):
     return time.strftime("%Y-%m-%dT%H:%M:%S", time.gmtime(ms / 1000.0)) + ".%03dZ" % (int(ms) % 1000)
 
 
+def mp4(moov=True, largesize=False, mdat_to_eof=False):
+    """A tiny fake MP4: 'ftyp' + 'mdat' (+ 'moov'). Only the top-level box structure is real."""
+    ftyp = b"\x00\x00\x00\x18ftypM4A \x00\x00\x00\x00M4A isom"
+    payload = b"\x00" * 4096
+    if mdat_to_eof:
+        mdat = b"\x00\x00\x00\x00mdat" + payload  # size 0: box runs to end of file
+    elif largesize:
+        mdat = b"\x00\x00\x00\x01mdat" + (16 + len(payload)).to_bytes(8, "big") + payload
+    else:
+        mdat = (8 + len(payload)).to_bytes(4, "big") + b"mdat" + payload
+    moov_box = b"\x00\x00\x00\x10moov" + b"\x00" * 8 if moov and not mdat_to_eof else b""
+    return ftyp + mdat + moov_box
+
+
 def make_session(folder, audio_enabled=True, write_audio=True, gyro_gap=None, location_header=None,
-                 utc_offset_ms=0, legacy_meta=False, empty_altimeter=False):
-    """Writes a ~30 s session that passes every quick_check rule unless a knob breaks it."""
+                 utc_offset_ms=0, legacy_meta=False, empty_altimeter=False, pre=None, until=None,
+                 segments=(True,), recovered=False, stats=None):
+    """Writes a ~30 s session that passes every quick_check rule unless a knob breaks it.
+    pre:      {stem: [seconds before start, ...]} extra rows prepended (t_up/t_utc_ms before start)
+    until:    {stem: seconds} the stream stops after that many seconds
+    segments: one moov flag per audio_00N.m4a (False = no MP4 index, as after a crash)
+    recovered: session.json as rewritten by crash recovery (recovered=true, endedAtUtc null,
+              last segment without a stop event)
+    stats:    session.json "stats" object (None = null, as before the session ends)"""
     os.makedirs(folder)
     u0 = int(time.time() * 1000) - 120_000  # wall clock at T0_UP, 2 minutes ago
+    pre, until = pre or {}, until or {}
 
     def utc(t):
         return int(round(u0 + (t - T0_UP) * 1000.0))
@@ -83,36 +113,43 @@ def make_session(folder, audio_enabled=True, write_audio=True, gyro_gap=None, lo
         n = int(round((end - start) * hz))
         return [T0_UP + start + i / hz for i in range(n)]
 
+    def stream(name, hz, fmt, times=None):
+        ts = times if times is not None else ticks(hz, end=until.get(name, DURATION))
+        ts = [T0_UP - s for s in sorted(pre.get(name, []), reverse=True)] + ts
+        write(name, [fmt(i, t) for i, t in enumerate(ts)],
+              header=location_header if name == "location" else None)
+
     record_audio = audio_enabled and write_audio
+    seg_files = [f"audio_{i:03d}.m4a" for i in range(len(segments))] if record_audio else []
+    seg_t = {f: T0_UP + 0.2 + i * DURATION / len(seg_files) for i, f in enumerate(seg_files)}
     clock = [f"{T0_UP:.6f},{utc(T0_UP)},start"]
-    if record_audio:
-        clock.append(f"{T0_UP + 0.2:.6f},{utc(T0_UP + 0.2)},audio_start")
+    for f in seg_files:
+        clock.append(f"{seg_t[f]:.6f},{utc(seg_t[f])},audio_start")
     for k in range(1, int(DURATION // 10) + 1):
         t = T0_UP + 10 * k
         clock.append(f"{t:.6f},{utc(t)},periodic")
-    write("clock", clock)
+    write("clock", sorted(clock))
 
-    dm = [f"{t:.6f},{utc(t) + utc_offset_ms},0.001,-0.002,0.003,0.0,0.0,-1.0,0.01,0.02,0.03,"
-          f"1.0,0.0,0.0,0.0,0.0,0.0,0.0" for t in ticks(100)]
-    write("device_motion", dm)
-    write("accel_raw", [f"{t:.6f},{utc(t)},0.0,0.0,-1.0" for t in ticks(100)])
+    stream("device_motion", 100, lambda i, t: f"{t:.6f},{utc(t) + utc_offset_ms},0.001,-0.002,0.003,"
+                                              f"0.0,0.0,-1.0,0.01,0.02,0.03,1.0,0.0,0.0,0.0,0.0,0.0,0.0")
+    stream("accel_raw", 100, lambda i, t: f"{t:.6f},{utc(t)},0.0,0.0,-1.0")
     gyro = ticks(100)
     if gyro_gap:
         a, b = gyro_gap
         gyro = [t for t in gyro if not (T0_UP + a < t < T0_UP + b)]
-    write("gyro_raw", [f"{t:.6f},{utc(t)},0.01,0.02,0.03" for t in gyro])
-    write("mag_raw", [f"{t:.6f},{utc(t)},10.0,20.0,-30.0" for t in ticks(50)])
-    write("location", [f"{t:.6f},{utc(t)},{46.77121 + i * 1e-5:.8f},23.62363000,352.1,390.2,4.7,3.0,"
-                       f"8.4,0.5,92.0,10.0,0" for i, t in enumerate(ticks(1))],
-          header=location_header)
-    write("heading", [f"{t:.6f},{utc(t)},91.0,95.0,5.0,10.0,20.0,-30.0" for t in ticks(1)])
-    write("altimeter", [] if empty_altimeter else
-          [f"{t:.6f},{utc(t)},0.1,96.5" for t in ticks(1)])
-    write("abs_altitude", [f"{t:.6f},{utc(t)},352.0,5.0,1.0" for t in ticks(1)])
-    write("activity", [f"{T0_UP + 1:.6f},{utc(T0_UP + 1)},0,0,0,1,0,0,2,{utc(T0_UP)}"])
-    write("audio_level", [f"{t:.6f},{utc(t)},-40.5,-20.1" for t in ticks(10)])
-    write("device", [f"{t:.6f},{utc(t)},0.82,unplugged,nominal,0,50000000000,satisfied,wifi"
-                     for t in ticks(0.2)])
+    stream("gyro_raw", 100, lambda i, t: f"{t:.6f},{utc(t)},0.01,0.02,0.03", times=gyro)
+    stream("mag_raw", 50, lambda i, t: f"{t:.6f},{utc(t)},10.0,20.0,-30.0")
+    stream("location", 1, lambda i, t: f"{t:.6f},{utc(t)},{46.77121 + i * 1e-5:.8f},23.62363000,352.1,"
+                                       f"390.2,4.7,3.0,8.4,0.5,92.0,10.0,0")
+    stream("heading", 1, lambda i, t: f"{t:.6f},{utc(t)},91.0,95.0,5.0,10.0,20.0,-30.0")
+    stream("altimeter", 1, lambda i, t: f"{t:.6f},{utc(t)},0.1,96.5",
+           times=[] if empty_altimeter else None)
+    stream("abs_altitude", 1, lambda i, t: f"{t:.6f},{utc(t)},352.0,5.0,1.0")
+    stream("activity", 1, lambda i, t: f"{t:.6f},{utc(t)},0,0,0,1,0,0,2,{utc(t) - 1000}",
+           times=[T0_UP + 1])
+    stream("audio_level", 10, lambda i, t: f"{t:.6f},{utc(t)},-40.5,-20.1")
+    stream("device", 0.2, lambda i, t: f"{t:.6f},{utc(t)},0.82,unplugged,nominal,0,50000000000,"
+                                       f"satisfied,wifi")
     labels = [
         f"{T0_UP + 5:.6f},{utc(T0_UP + 5)},pothole,,",
         f"{T0_UP + 10:.6f},{utc(T0_UP + 10)},sickness,4,",
@@ -120,13 +157,15 @@ def make_session(folder, audio_enabled=True, write_audio=True, gyro_gap=None, lo
         f'{T0_UP + 15:.6f},{utc(T0_UP + 15)},note,,"first line, with comma\nsecond ""line"""',
     ]
     write("labels", labels)
-    if record_audio:
-        write("audio_segments", [f"{T0_UP + 0.2:.6f},{utc(T0_UP + 0.2)},start,audio_000.m4a",
-                                 f"{T0_UP + DURATION:.6f},{utc(T0_UP + DURATION)},stop,audio_000.m4a"])
-        with open(os.path.join(folder, "audio_000.m4a"), "wb") as fh:
-            fh.write(b"\x00\x00\x00\x18ftypM4A " + b"\x00" * 4096)
-    else:
-        write("audio_segments", [])
+    seg_rows = []
+    for i, f in enumerate(seg_files):
+        t_stop = seg_t[seg_files[i + 1]] if i + 1 < len(seg_files) else T0_UP + DURATION
+        seg_rows.append(f"{seg_t[f]:.6f},{utc(seg_t[f])},start,{f}")
+        if not (recovered and i == len(seg_files) - 1):  # the app died while recording it
+            seg_rows.append(f"{t_stop:.6f},{utc(t_stop)},stop,{f}")
+        with open(os.path.join(folder, f), "wb") as fh:
+            fh.write(mp4(moov=segments[i]))
+    write("audio_segments", seg_rows)
 
     meta = {
         "sessionId": str(uuid.uuid4()).upper(),
@@ -135,7 +174,7 @@ def make_session(folder, audio_enabled=True, write_audio=True, gyro_gap=None, lo
         "timezone": "Europe/Bucharest",
         "startedAtUtc": iso(u0),
         "startUptimeSec": T0_UP,
-        "endedAtUtc": iso(utc(T0_UP + DURATION)),
+        "endedAtUtc": None if recovered else iso(utc(T0_UP + DURATION)),
         "vehicle": {"type": "car", "makeModel": "Test Car", "line": None, "notes": ""},
         "mount": {"location": "taped flat on center console", "phoneOrientation": "screen up",
                   "rigid": True, "handheld": False, "seatOverAxle": False, "photoFile": None},
@@ -145,13 +184,15 @@ def make_session(folder, audio_enabled=True, write_audio=True, gyro_gap=None, lo
         "audioEnabled": audio_enabled,
         "requestedRatesHz": {"deviceMotion": 100, "accel": 100, "gyro": 100, "mag": 50,
                              "audioLevel": 10},
-        "recovered": False,
+        "recovered": recovered,
         "syntheticSensors": False,
         "folderName": os.path.basename(folder),
         "deviceId": str(uuid.uuid4()).upper(),
         "preflight": {"completedAtUtc": iso(u0 - 5000), "overridden": False, "checks": []},
-        "stats": None,
+        "stats": stats,
     }
+    if recovered:
+        meta["recoveredAtUtc"] = iso(u0 + 600_000)
     if legacy_meta:
         del meta["audioEnabled"]
         del meta["vehicle"]["line"]
@@ -161,6 +202,16 @@ def make_session(folder, audio_enabled=True, write_audio=True, gyro_gap=None, lo
     with open(os.path.join(folder, "session.json"), "w", encoding="utf-8") as fh:
         json.dump(meta, fh, indent=2)
     return folder
+
+
+def patch_meta(folder, **changes):
+    p = os.path.join(folder, "session.json")
+    with open(p, encoding="utf-8") as fh:
+        meta = json.load(fh)
+    meta.update(changes)
+    with open(p, "w", encoding="utf-8") as fh:
+        json.dump(meta, fh)
+    return meta
 
 
 def run_quick_check(folder):
@@ -275,6 +326,174 @@ class QuickCheckTests(unittest.TestCase):
         code, out = run_quick_check(folder)
         self.assertRan(out)
         self.assertEqual(code, 1, out)
+
+    # -- helpers for the timeline / audio-playability checks ------------------------------------
+
+    def run_ok(self, folder):
+        """Runs quick_check, expects exit 0 (PASS or WARN); returns (out, warn lines, info lines)."""
+        code, out = run_quick_check(folder)
+        self.assertRan(out)
+        self.assertEqual(code, 0, out)
+        lines = out.splitlines()
+        return (out, [ln for ln in lines if "[WARN]" in ln], [ln for ln in lines if "[INFO]" in ln])
+
+    def assertLine(self, lines, out, *needles):
+        self.assertTrue(any(all(n in ln for n in needles) for ln in lines),
+                        f"no line containing all of {needles!r}:\n{out}")
+
+    def assertNoLine(self, lines, out, needle):
+        self.assertFalse(any(needle in ln for ln in lines), f"unexpected line with {needle!r}:\n{out}")
+
+    # -- 1. rows before the session start --------------------------------------------------------
+
+    def test_location_cached_fix_within_5s_is_info(self):
+        out, warns, infos = self.run_ok(self.session("cached", pre={"location": [3.0]}))
+        self.assertIn("OVERALL: PASS", out)
+        self.assertLine(infos, out, "location.csv: 1 row(s) up to 5 s before session start")
+        self.assertNoLine(warns, out, "before session start")
+
+    def test_location_older_than_5s_before_start_warns(self):
+        out, warns, infos = self.run_ok(self.session("stale", pre={"location": [8.0, 2.0]}))
+        self.assertLine(warns, out, "location.csv: 1 row(s) more than 5 s before session start",
+                        "earliest -8.0 s")
+        self.assertLine(infos, out, "location.csv: 1 row(s) up to 5 s before session start")
+
+    def test_prestart_rows_in_other_stream_warn(self):
+        out, warns, _ = self.run_ok(self.session("preheading", pre={"heading": [2.5, 1.0]}))
+        self.assertLine(warns, out, "heading.csv: 2 row(s) before session start", "earliest -2.5 s")
+
+    def test_prestart_activity_is_exempt(self):
+        out, warns, _ = self.run_ok(self.session("preact", pre={"activity": [60.0]}))
+        self.assertIn("OVERALL: PASS", out)
+        self.assertIn("activity.csv: 1 row(s) before session start (earliest -60.0 s) - expected", out)
+        self.assertNoLine(warns, out, "before session start")
+
+    # -- 2. stream coverage ----------------------------------------------------------------------
+
+    def test_gps_that_stops_after_one_second_warns(self):
+        out, warns, _ = self.run_ok(self.session("gps1s", until={"location": 2.0}))
+        self.assertLine(warns, out, "location covers only 1 s of 30 s session")
+        self.assertNoLine(warns, out, "audio_level covers only")
+
+    def test_short_audio_level_coverage_warns(self):
+        out, warns, _ = self.run_ok(self.session("lvl", until={"audio_level": 5.0}))
+        self.assertLine(warns, out, "audio_level covers only 5 s of 30 s session")
+
+    def test_coverage_not_checked_for_sessions_under_30s(self):
+        folder = self.session("short", until={"location": 2.0})
+        started = dt.datetime.fromisoformat(patch_meta(folder)["startedAtUtc"].replace("Z", "+00:00"))
+        ended = started + dt.timedelta(seconds=20)  # a 20 s session
+        patch_meta(folder, endedAtUtc=ended.strftime("%Y-%m-%dT%H:%M:%S.%f")[:-3] + "Z")
+        out, warns, _ = self.run_ok(folder)
+        self.assertIn("session duration: 20.0 s", out)
+        self.assertNoLine(warns, out, "covers only")
+
+    # -- 3. audio playability --------------------------------------------------------------------
+
+    def test_audio_without_moov_fails(self):
+        self.assertFail(self.session("nomoov", segments=(False,)), "audio_000.m4a unplayable")
+
+    def test_recovered_last_segment_without_moov_warns(self):
+        stats = {"durationSec": DURATION - 0.01, "audioFilesIncomplete": ["audio_001.m4a"]}
+        out, warns, _ = self.run_ok(self.session("crash", segments=(True, False), recovered=True,
+                                                 stats=stats))
+        self.assertLine(warns, out, "audio_001.m4a unplayable (no index): it was being recorded "
+                                    "when the app died", "expected after a crash")
+        self.assertNoLine(warns, out, "audio_000.m4a")
+        self.assertIn("stats.audioFilesIncomplete: audio_001.m4a", out)
+        self.assertIn("[PASS] stats.audioFilesIncomplete agrees with the 'moov' scan", out)
+        self.assertIn("[PASS] session.json: stats.durationSec 30.0 s vs last row t_up", out)
+
+    def test_recovered_earlier_segment_without_moov_fails(self):
+        self.assertFail(self.session("crash0", segments=(False, True), recovered=True),
+                        "audio_000.m4a unplayable")
+
+    def test_finished_session_last_segment_without_moov_fails(self):
+        self.assertFail(self.session("nomoov2", segments=(True, False)), "audio_001.m4a unplayable")
+
+    def test_audio_files_incomplete_disagreement_warns(self):
+        stats = {"durationSec": DURATION, "audioFilesIncomplete": ["audio_000.m4a"]}
+        out, warns, _ = self.run_ok(self.session("disagree", stats=stats))
+        self.assertLine(warns, out, "stats.audioFilesIncomplete (audio_000.m4a) disagrees",
+                        "scan (none)")
+
+    def test_largesize_mdat_with_moov_is_playable(self):
+        folder = self.session("large")
+        with open(os.path.join(folder, "audio_000.m4a"), "wb") as fh:
+            fh.write(mp4(largesize=True))
+        out, _, _ = self.run_ok(folder)
+        self.assertIn("OVERALL: PASS", out)
+        self.assertIn("playable ('moov' box present)", out)
+
+    # -- 4. duration consistency -----------------------------------------------------------------
+
+    def test_finished_duration_matches(self):
+        out, warns, _ = self.run_ok(self.session("dur", stats={"durationSec": DURATION + 1.5}))
+        self.assertIn("OVERALL: PASS", out)
+        self.assertIn("[PASS] session.json: stats.durationSec 31.5 s vs endedAtUtc", out)
+
+    def test_finished_duration_mismatch_warns(self):
+        out, warns, _ = self.run_ok(self.session("durbad", stats={"durationSec": DURATION + 10}))
+        self.assertLine(warns, out, "stats.durationSec 40.0 s vs endedAtUtc - startedAtUtc 30.0 s",
+                        "diff +10.0 s")
+
+    def test_recovered_duration_mismatch_warns(self):
+        out, warns, _ = self.run_ok(self.session("recdur", recovered=True,
+                                                 stats={"durationSec": 12.0}))
+        self.assertLine(warns, out, "stats.durationSec 12.0 s vs last row t_up - startUptimeSec 30.0 s")
+
+
+def load_quick_check():
+    spec = importlib.util.spec_from_file_location("quick_check", QUICK_CHECK)
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
+
+
+class QuickCheckModuleTests(unittest.TestCase):
+    """quick_check imported as a module (by path): schema pinning and the MP4 box walker."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.qc = load_quick_check()
+
+    def test_headers_match_swift_fixture(self):
+        if not os.path.exists(HEADERS_FIXTURE):
+            self.skipTest(f"{os.path.relpath(HEADERS_FIXTURE, HERE)} missing - it is written by the "
+                          f"Swift unit tests from StreamFile.header (xcodebuild ... "
+                          f"-only-testing:SensorRecorderTests test); header contract not checked")
+        with open(HEADERS_FIXTURE, encoding="utf-8") as fh:
+            swift = json.load(fh)
+        self.assertEqual(self.qc.EXPECTED_HEADER_LINES, swift,
+                         "quick_check.EXPECTED_HEADERS differs from the app's StreamFile headers")
+
+    def test_synthetic_session_headers_match_quick_check(self):
+        self.assertEqual(HEADERS, self.qc.EXPECTED_HEADER_LINES)
+        self.assertEqual(len(self.qc.EXPECTED_HEADER_LINES), 14)
+
+    def test_has_moov_box(self):
+        tmp = tempfile.mkdtemp(prefix="qc-mp4-")
+        try:
+            cases = {
+                "plain_moov": (mp4(), True),
+                "no_moov": (mp4(moov=False), False),
+                "largesize_moov": (mp4(largesize=True), True),
+                "largesize_no_moov": (mp4(largesize=True, moov=False), False),
+                "mdat_to_eof": (mp4(mdat_to_eof=True), False),
+                "empty": (b"", False),
+                "truncated_header": (b"\x00\x00\x00", False),
+                "zero_size_garbage": (b"\x00" * 64, False),
+                "bad_size": (b"\x00\x00\x00\x04ftyp" + b"\x00" * 32, False),
+                "moov_first": (b"\x00\x00\x00\x08moov", True),
+            }
+            for name, (data, expected) in cases.items():
+                with self.subTest(name=name):
+                    p = os.path.join(tmp, name + ".m4a")
+                    with open(p, "wb") as fh:
+                        fh.write(data)
+                    self.assertEqual(self.qc.has_moov_box(p), expected)
+        finally:
+            shutil.rmtree(tmp, ignore_errors=True)
 
 
 # ----------------------------------------------------------------------------------------------

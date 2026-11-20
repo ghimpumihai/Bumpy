@@ -27,7 +27,7 @@ Signal processing (roughness, potholes, motion-sickness dose, H3 segments, chart
 
 ## Database logins
 
-On Azure there is no password: `PGUSER` is the role name and the password is an Entra token for the identity in `AZURE_CLIENT_ID`, requested when a connection opens. Locally, `PGPASSWORD` is used instead (see `docker-compose.yml`).
+On Azure there is no password: `PGUSER` is the role name and the password is an Entra token for the identity in `AZURE_CLIENT_ID`, requested when a connection opens. Locally and in CI, `AZURE_CLIENT_ID` isn't set and the throwaway PostGIS uses trust login on localhost, so no password exists anywhere (see `docker-compose.yml`).
 
 ## Run locally
 
@@ -35,7 +35,7 @@ On Azure there is no password: `PGUSER` is the role name and the password is an 
 docker compose up -d db
 ```
 ```powershell
-cd services/processor; $env:PGHOST='localhost'; $env:PGPORT='5433'; $env:PGUSER='postgres'; $env:PGPASSWORD='postgres'; $env:PGDATABASE='roadride'
+cd services/processor; $env:PGHOST='localhost'; $env:PGPORT='5433'; $env:PGUSER='postgres'; $env:PGDATABASE='roadride'
 ```
 ```powershell
 $env:RUN_MODE='migrate'; python -m roadride
@@ -44,7 +44,7 @@ $env:RUN_MODE='migrate'; python -m roadride
 python -m pytest -q tests
 ```
 
-Without `PGHOST`/`PGPASSWORD`, the database tests are skipped and only the unit tests run.
+Without `PGHOST`, the database tests are skipped and only the unit tests run.
 
 ## Deploy
 

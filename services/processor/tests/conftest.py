@@ -47,7 +47,7 @@ def session_meta(batch):
 # --- Integration tests: a real PostGIS (CI service container or docker-compose) ------------
 
 def _have_db() -> bool:
-    if not os.environ.get("PGHOST") or not os.environ.get("PGPASSWORD"):
+    if not os.environ.get("PGHOST"):
         return False
     try:
         import psycopg  # noqa: F401
@@ -56,7 +56,7 @@ def _have_db() -> bool:
     return True
 
 
-requires_db = pytest.mark.skipif(not _have_db(), reason="needs PGHOST/PGPASSWORD and psycopg")
+requires_db = pytest.mark.skipif(not _have_db(), reason="needs PGHOST (local PostGIS) and psycopg")
 
 
 @pytest.fixture

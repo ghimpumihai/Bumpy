@@ -1,9 +1,10 @@
 """PostgreSQL connections.
 
 Connection settings come from the standard libpq variables (PGHOST, PGDATABASE, PGUSER, PGPORT,
-PGSSLMODE), set by Terraform on Azure and by docker-compose locally. With PGPASSWORD set (local
-PostGIS) it is used as is; otherwise the password is a Microsoft Entra token for the managed identity
-in AZURE_CLIENT_ID (plan §5 "Database logins"). A token is only needed to open a connection.
+PGSSLMODE), set by Terraform on Azure. There, AZURE_CLIENT_ID names the service's managed identity and
+the password is a Microsoft Entra token for it (plan §5 "Database logins"); a token is only needed to
+open a connection. Without AZURE_CLIENT_ID (local PostGIS, CI) libpq logs in by itself: the test
+databases use trust login on localhost, so no password is written anywhere.
 """
 
 from __future__ import annotations
@@ -29,7 +30,7 @@ def _entra_token() -> str:
 def connect(*, autocommit: bool = False, dbname: str | None = None,
             application_name: str = "roadride") -> psycopg.Connection:
     kwargs: dict = {"autocommit": autocommit, "application_name": application_name}
-    if not os.environ.get("PGPASSWORD"):
+    if os.environ.get("AZURE_CLIENT_ID") and not os.environ.get("PGPASSWORD"):
         kwargs["password"] = _entra_token()
     if dbname:
         kwargs["dbname"] = dbname

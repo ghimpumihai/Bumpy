@@ -1,4 +1,4 @@
-"""Integration tests against a real PostGIS (skipped without PGHOST/PGPASSWORD)."""
+"""Integration tests against a real PostGIS (skipped without PGHOST)."""
 
 import datetime as dt
 

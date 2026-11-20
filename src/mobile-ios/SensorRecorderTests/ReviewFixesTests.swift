@@ -287,10 +287,10 @@ final class UploadRobustnessTests: XCTestCase {
         try await Task.sleep(nanoseconds: 300_000_000) // loop is now sleeping out its 8 s backoff…
         let kickedAt = Date()
         q.kick()
-        while !q.pendingFiles().isEmpty && Date().timeIntervalSince(kickedAt) < 7 { try await Task.sleep(nanoseconds: 20_000_000) }
+        while !q.pendingFiles().isEmpty && Date().timeIntervalSince(kickedAt) < ciTimeout { try await Task.sleep(nanoseconds: 20_000_000) }
         XCTAssertTrue(q.pendingFiles().isEmpty)
         // Bound well below the 8 s backoff but loose enough for slow CI simulators.
-        XCTAssertLessThan(Date().timeIntervalSince(kickedAt), 4, "kick() must cut the 8 s backoff short")
+        XCTAssertLessThan(Date().timeIntervalSince(kickedAt), 7, "kick() must cut the 8 s backoff short")
     }
 
     func testPlainHTTPOnlyForLocalHosts() {
@@ -366,7 +366,7 @@ final class RecordingControllerTests: XCTestCase {
     private func spin(_ seconds: TimeInterval) {
         let e = expectation(description: "spin")
         DispatchQueue.main.asyncAfter(deadline: .now() + seconds) { e.fulfill() }
-        wait(for: [e], timeout: seconds + 2)
+        wait(for: [e], timeout: seconds + ciTimeout)
     }
 
     func testNewProblemAlertsOnceAndAgainOnlyAfterItResolved() throws {
@@ -401,16 +401,16 @@ final class RecordingControllerTests: XCTestCase {
     func testPromptTimesOutAsMissedSkipIsMissedAndStopDuringPromptIsMissed() throws {
         let (c, alerter) = try makeController(interval: 0.3, timeout: 0.3)
         c.start()
-        XCTAssertTrue(waitUntil(3) { c.sicknessPromptActive })
+        XCTAssertTrue(waitUntil(ciTimeout) { c.sicknessPromptActive })
         XCTAssertGreaterThanOrEqual(alerter.prompts, 1)
-        XCTAssertTrue(waitUntil(3) { c.session.labels.sicknessMissed >= 1 }, "unanswered prompt → sickness_missed")
-        XCTAssertTrue(waitUntil(3) { c.sicknessPromptActive })
+        XCTAssertTrue(waitUntil(ciTimeout) { c.session.labels.sicknessMissed >= 1 }, "unanswered prompt → sickness_missed")
+        XCTAssertTrue(waitUntil(ciTimeout) { c.sicknessPromptActive })
         let before = c.session.labels.sicknessMissed
         c.skipSicknessPrompt() // no run-loop turn in between: deterministic
         XCTAssertEqual(c.session.labels.sicknessMissed, before + 1)
         XCTAssertFalse(c.sicknessPromptActive)
         XCTAssertEqual(c.session.labels.sicknessRatings, 0, "skip never fakes a rating")
-        XCTAssertTrue(waitUntil(3) { c.sicknessPromptActive })
+        XCTAssertTrue(waitUntil(ciTimeout) { c.sicknessPromptActive })
         c.stop()
         let labels = try String(contentsOf: c.session.folder.appendingPathComponent("labels.csv"), encoding: .utf8)
         XCTAssertTrue(labels.contains("sickness_missed,,skipped"))
@@ -422,7 +422,7 @@ final class RecordingControllerTests: XCTestCase {
         let (c, _) = try makeController(interval: 0.2, timeout: 5)
         c.start()
         defer { c.stop() }
-        XCTAssertTrue(waitUntil(3) { c.sicknessPromptActive })
+        XCTAssertTrue(waitUntil(ciTimeout) { c.sicknessPromptActive })
         c.rateSickness(4)
         XCTAssertFalse(c.sicknessPromptActive)
         XCTAssertEqual(c.session.labels.sicknessRatings, 1)
@@ -459,7 +459,7 @@ final class AudioSegmentsIntegrationTests: XCTestCase {
             session.start()
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { meta = session.stop(); e.fulfill() }
         }
-        wait(for: [e], timeout: 5)
+        wait(for: [e], timeout: ciTimeout)
         let segs = try readCSV(session.folder.appendingPathComponent("audio_segments.csv")).rows
         XCTAssertEqual(segs.filter { $0[2] == "start" }.map { $0[3] }, ["audio_000.m4a", "audio_001.m4a", "audio_002.m4a"])
         XCTAssertEqual(segs.filter { $0[2] == "stop" }.count, 3)

@@ -12,6 +12,11 @@ final class FakeClock: ClockSource, @unchecked Sendable {
     func jumpWall(_ ms: Double) { state.withLock { $0.utcMs += ms } }
 }
 
+/// Upper bound for waits on real queues/timers. Generous on purpose: GitHub's CI simulators can be
+/// many times slower than a dev Mac (two flaky failures on main came from 2–5 s bounds). A correct
+/// test returns as soon as the condition holds, so a large bound costs nothing when things are fast.
+let ciTimeout: TimeInterval = 60
+
 func makeTempDir(_ name: String = #function) throws -> URL {
     let safe = name.replacingOccurrences(of: "()", with: "")
     let url = FileManager.default.temporaryDirectory

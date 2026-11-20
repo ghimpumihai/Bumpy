@@ -171,7 +171,7 @@ final class WriterTests: XCTestCase {
         w.log(.info, "hello")
         // The 0.5 s timer must get it to disk without any explicit flush. Poll (slow CI simulators).
         let url = dir.appendingPathComponent("s/accel_raw.csv")
-        let deadline = Date().addingTimeInterval(5)
+        let deadline = Date().addingTimeInterval(ciTimeout)
         var text = ""
         while Date() < deadline {
             text = (try? String(contentsOf: url, encoding: .utf8)) ?? ""

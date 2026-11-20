@@ -1,10 +1,25 @@
-/** Static explanations of the method (plan 02 §7–§11), shown on the Method page. */
+/** Static explanations of the method (plan 02 §1, §5, §7–§11), shown on the Method page. */
 export const PIPELINE_STEPS = [
-  { title: "Capture", text: "An iPhone records motion at 100 Hz, GPS, barometer and labels to local files first." },
-  { title: "Transmit", text: "After the trip the session folder is uploaded to S3; live batches go through API Gateway into Kinesis." },
-  { title: "Process", text: "The same Python code (batch and live) aligns clocks and axes, checks quality and computes the metrics." },
-  { title: "Store", text: "Results — not raw samples — go to PostgreSQL + PostGIS; raw data stays in S3 as Parquet." },
-  { title: "Visualize", text: "This dashboard reads the results through a read-only API." },
+  {
+    title: "Capture",
+    text: "An iPhone records motion at 100 Hz, GPS, barometer and labels to local files first, and queues a batch on disk every 2 seconds.",
+  },
+  {
+    title: "Transmit",
+    text: "While driving, the phone sends each batch over HTTPS to an Azure Function, which puts it into Event Hubs and archives it. Without signal the batches wait on the phone and arrive later.",
+  },
+  {
+    title: "Process",
+    text: "A stream processor computes the metrics within seconds; when the trip ends, a finalize job recomputes the whole trip from the archive and updates the shared map.",
+  },
+  {
+    title: "Store",
+    text: "Results — not raw samples — go to PostgreSQL with PostGIS; raw batches and Parquet samples stay in Blob Storage.",
+  },
+  {
+    title: "Visualize",
+    text: "This dashboard polls a read-only API every 2 seconds: the vehicle moves, the road colours in, the sickness dose rises.",
+  },
 ] as const;
 
 export const METHOD_SECTIONS = [
@@ -44,7 +59,7 @@ export const METHOD_SECTIONS = [
     title: "Data quality and privacy",
     points: [
       "Windows are invalid when “phone moved” was tapped, gravity drifts in the phone frame, or the gyro's turn rate disagrees with GPS.",
-      "Hand-held or loose mounts are excluded from roughness; replays and bad sessions are never counted in the map.",
+      "Only finalized trips count in the map: a trip joins it once the finalize job has processed it. Replays, bad sessions and trips whose context (vehicle, mount) never arrived are left out; hand-held or loose mounts are excluded from roughness.",
       "Tracks are trimmed near the start and end of every trip; audio is never uploaded live and is off on public transport.",
     ],
   },

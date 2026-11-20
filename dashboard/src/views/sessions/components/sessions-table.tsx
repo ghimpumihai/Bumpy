@@ -1,7 +1,7 @@
 import { Link } from "@tanstack/react-router";
 import { Check, Minus } from "lucide-react";
 
-import { MockBadge, QualityBadge, SourceBadge } from "@/components/status/session-badges";
+import { IncompleteBadge, MockBadge, QualityBadge, SourceBadge, StatusBadge } from "@/components/status/session-badges";
 import { VehicleLabel } from "@/components/status/vehicle-label";
 import { Table, TableBody, TableCaption, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
@@ -63,8 +63,10 @@ export function SessionsTable({ sessions }: { sessions: SessionSummary[] }) {
               <VehicleLabel type={session.vehicle.type} line={session.vehicle.line} detail={session.vehicle.makeModel} />
             </TableCell>
             <TableCell>
-              <span className="horizontal gap-1">
+              <span className="horizontal flex-wrap gap-1">
                 <SourceBadge source={session.source} />
+                <StatusBadge status={session.status} />
+                {session.incomplete && <IncompleteBadge />}
                 {session.isMock && <MockBadge />}
               </span>
             </TableCell>

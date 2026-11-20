@@ -16,12 +16,13 @@ const COLOR_VARS = ["--scale-1", "--scale-2", "--scale-3", "--scale-4", "--scale
 
 interface TrackMapProps {
   sessionId: string;
-  isLive: boolean;
+  /** Recording or processing trips are re-polled until finalized. */
+  finalized: boolean;
 }
 
-export function TrackMap({ sessionId, isLive }: TrackMapProps) {
-  const track = sessionsApi.useSessionTrack(sessionId, isLive);
-  const events = sessionsApi.useSessionEvents(sessionId, isLive);
+export function TrackMap({ sessionId, finalized }: TrackMapProps) {
+  const track = sessionsApi.useSessionTrack(sessionId, finalized);
+  const events = sessionsApi.useSessionEvents(sessionId, finalized);
   const colors = useThemeColors(COLOR_VARS);
   const bounds = track.data ? boundsOf(track.data.geometry.coordinates as Position[]) : null;
   const layers: SourceLayer[] = [

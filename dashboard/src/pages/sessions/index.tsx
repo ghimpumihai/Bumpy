@@ -11,7 +11,7 @@ export function SessionsPage() {
       </Helmet>
       <PageWrapper
         title="Sessions"
-        description="Every recorded trip. Uploaded session folders are the main dataset; replays and live-only sessions are shown but never counted in the aggregated map."
+        description="Every trip. Trips are streamed from the phone while driving and count in the aggregated map once they are finalized; laptop uploads are the fallback for trips that never reached the cloud, and replays never count."
       >
         <SessionsView />
       </PageWrapper>

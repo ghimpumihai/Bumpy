@@ -37,11 +37,36 @@ General rules:
 | `GET /api/segments?vehicle=all\|car\|bus\|tram` | `SegmentCollection` (segments) | One H3 hexagon polygon per segment with its `segment_agg` row for that vehicle filter |
 | `GET /api/segments/{h3}` | `SegmentDetail` (segments) | Per-vehicle aggregates, sickness split by seat/posture, every pass |
 | `GET /api/events?vehicle=&type=` | `RoadEventCollection` (sessions) | Detected events of aggregated sessions only |
-| `GET /api/live` | `LiveResponse` (live) | `live_state` of devices that sent data in the last 60 s, with the last ~2 min of track. Polled every 2 s |
+| `GET /api/live` | `LiveResponse` (live) | `live_state` of devices the ingest function heard from in the last 60 s, with the last ~2 min of track, `receivedAt` (arrival of the newest processed batch) and the latest MISC rating. Polled every 2 s; `serverTime` lets the dashboard measure ages on the server's clock |
 | `GET /api/quality` | `QualityListResponse` (sessions) | The data-quality panel for every session |
 
 The ingest routes (`POST /api/ingest`, and `PUT /api/ingest/sessions/{id}` from spec §6.1) belong to the ingest
 function, on a different host, and are not used by the dashboard. There is no health route.
+
+## Session status and exclusion reasons (plan §8, §10)
+
+| `status` | Meaning |
+|---|---|
+| `live` | Recording: batches are still arriving through the live path |
+| `processing` | The trip ended (Stop received, or 15 min without batches); the finalize job hasn't finished |
+| `complete` | Finalized: rebuilt from the raw archive (or the uploaded folder) and aggregated |
+
+`incomplete: true` marks a trip closed without the app's Stop message; it is still finalized, with its
+gaps marked. `source` is how the trip reached the cloud: `live` (streamed, the main path), `upload`
+(laptop fallback) or `replay`.
+
+`exclusionReasons` explain why a trip is (partly) kept out of the aggregated map: `replay`, `live_only`
+(streamed, not finalized yet), `processing` (an upload not finalized yet), `bad_quality`,
+`unknown_context` (session.json never arrived, spec §6.1), `not_rigid`, `handheld` (the last two exclude
+it from roughness only).
+
+## Live freshness (plan §5 "Dashboard")
+
+For each live device the dashboard derives, on the server's clock:
+- data age = now − `updatedAt` (sample time): the end-to-end delay to the screen (target < 10 s);
+- silence = now − `receivedAt`: amber after 10 s, red after 30 s (a dead zone);
+- transport delay = `receivedAt` − `updatedAt`: above 10 s while batches are arriving, the phone is
+  sending a backlog after a dead zone, shown as **catching up** rather than live.
 
 ## Where each field comes from (plan §8)
 
@@ -59,11 +84,18 @@ function, on a different host, and are not used by the dashboard. There is no he
 | `roughnessPctl` | mean per-session percentile of raw roughness (fallback when the model can't be fitted) |
 | `potholeHits / potholePasses / potholeConfirmed` | passes > 15 km/h with a detection; confirmed at ≥ k of n passes (per vehicle type) |
 | `sicknessAwRms`, `msi1hPct` | `sqrt(Σ a_w²·dt / Σ dt)` over rigid-mount sessions; `msi1hPct = a_w·√3600 / 3` |
-| `LiveDevice` | `live_state` + the last positions of the live session |
+| `LiveDevice` | `live_state` + the last positions of the live session; `receivedAt` from `ingest_batches` (arrival time); `latestRating` from `labels` |
 
 Implementation note learned while building the mock: measure a segment pass's **speed over the same
 samples as its roughness RMS** (i.e. moving samples only). Mixing stationary samples into the speed
 biases the fitted β low (0.54 instead of 0.60 on the mock data).
+
+## Hosting (Azure Static Web Apps)
+
+`public/staticwebapp.config.json` makes client-side routes work on refresh (fallback to `index.html`),
+serves `config.json` with `Cache-Control: no-store` and outside the fallback, caches `assets/*` for a
+year, and sends the security headers (CSP: scripts only from the site, API and tiles over HTTPS only,
+no framing). `vite preview` serves the same headers, so the e2e tests run under that CSP.
 
 ## Runtime configuration
 

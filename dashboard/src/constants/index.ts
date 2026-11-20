@@ -6,6 +6,8 @@ export const DEFAULT_GC_TIME_MS = 15 * SECONDS_PER_MINUTE * MS_PER_SECOND;
 /** The live view polls the read API every 2–5 s (plan 02 §5). */
 export const LIVE_POLL_INTERVAL_MS = 2 * MS_PER_SECOND;
 export const LIVE_SESSION_POLL_INTERVAL_MS = 5 * MS_PER_SECOND;
+/** Aggregates change whenever a trip is finalized; refresh them while the page is open. */
+export const AGGREGATE_REFRESH_INTERVAL_MS = 60 * MS_PER_SECOND;
 export const API_TIMEOUT_MS = 15 * MS_PER_SECOND;
 export const QUERY_RETRY_COUNT = 2;
 

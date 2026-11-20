@@ -1,5 +1,5 @@
 import { MS_PER_SECOND, SECONDS_PER_MINUTE } from "@/constants/units";
-import type { RoadEventType } from "@/types/common";
+import type { ProcessingStatus, RoadEventType } from "@/types/common";
 import type { ExclusionReason, QualityRow, SessionDetail, SessionQuality, SessionSummary, StreamQuality } from "@/types/sessions";
 
 import { aggregate, type AggregationResult } from "./aggregate";
@@ -13,61 +13,105 @@ const LIVE_HEAD_START_MS: Record<string, number> = {
   "aa61f0d4-3b8e-4c5a-9d27-6f1e4b8c0d76": 7 * SECONDS_PER_MINUTE * MS_PER_SECOND,
   "c3e9a7b1-6d2f-4f80-b4e5-9a1c7e3d5b87": 3 * SECONDS_PER_MINUTE * MS_PER_SECOND,
 };
-/** Processing finishes a few minutes after an upload. */
+/** The finalize job finishes this long after a trip ends (trip-end detection + one pass over the trip). */
 const PROCESSING_DELAY_MS = 4 * SECONDS_PER_MINUTE * MS_PER_SECOND;
+/** Phone → ingest function: the 2 s batch window plus the upload. */
+const UPLOAD_DELAY_S = 2.5;
+/** Ingest → Event Hubs → stream processor → database. */
+const PROCESSING_LAG_S = 1;
 
 export interface MockDataset {
   sims: Map<string, SimulatedSession>;
-  aggregation: AggregationResult;
 }
 
 let cached: MockDataset | null = null;
+
+/** Start time of a spec: fixed, relative to page load (live), or ending just before page load. */
+function startOf(spec: SessionSpec, loadMs: number): number {
+  if (spec.startedAt) return Date.parse(spec.startedAt);
+  if (spec.endedBeforeLoadMs !== null) {
+    const probe = simulateSession(spec, 0);
+    return loadMs - spec.endedBeforeLoadMs - probe.t[probe.t.length - 1];
+  }
+  return loadMs - (LIVE_HEAD_START_MS[spec.sessionId] ?? 0);
+}
 
 export function getDataset(): MockDataset {
   if (cached) return cached;
   const loadMs = Date.now();
   const sims = new Map<string, SimulatedSession>();
-  for (const spec of SESSION_SPECS) {
-    const startMs = spec.startedAt ? Date.parse(spec.startedAt) : loadMs - (LIVE_HEAD_START_MS[spec.sessionId] ?? 0);
-    sims.set(spec.sessionId, simulateSession(spec, startMs));
-  }
-  const completed = [...sims.values()].filter((sim) => !sim.spec.live);
-  const lastUpload = Math.max(...completed.map((sim) => sim.t[sim.t.length - 1]));
-  const aggregation = aggregate(
-    completed
-      .filter((sim) => isIncluded(sim.spec))
-      .map((sim) => ({
-        sim,
-        roughnessEligible: isRoughnessEligible(sim.spec),
-        sicknessEligible: !isSicknessExperimental(sim.spec),
-      })),
-    new Date(lastUpload + PROCESSING_DELAY_MS).toISOString(),
-  );
-  cached = { sims, aggregation };
+  for (const spec of SESSION_SPECS) sims.set(spec.sessionId, simulateSession(spec, startOf(spec, loadMs)));
+  cached = { sims };
   return cached;
 }
 
-const isRoughnessEligible = (spec: SessionSpec) => spec.mount.rigid && !spec.mount.handheld;
-const isSicknessExperimental = (spec: SessionSpec) => !spec.mount.rigid || spec.mount.handheld;
+// ---------------------------------------------------------------------------------------------
+// Live timing: what the backend has received and processed at a given moment.
 
-/** Replays and live-only sessions are never aggregated; bad sessions are kept out automatically (plan 02 §10). */
-function exclusionReasons(spec: SessionSpec): ExclusionReason[] {
-  const reasons: ExclusionReason[] = [];
-  if (spec.source === "replay") reasons.push("replay");
-  if (spec.source === "live") reasons.push("live_only");
-  if (spec.quality === "bad") reasons.push("bad_quality");
-  if (!spec.mount.rigid) reasons.push("not_rigid");
-  if (spec.mount.handheld) reasons.push("handheld");
-  return reasons;
+interface LiveTiming {
+  /** Seconds since trip start of the newest sample the processor has written. */
+  processedS: number;
+  /** Seconds since trip start at which the ingest function received the batch holding that sample. */
+  receivedS: number;
 }
 
-function isIncluded(spec: SessionSpec): boolean {
-  return spec.source === "upload" && spec.quality !== "bad";
+/**
+ * Normally data shows up a few seconds after it was recorded. In a dead zone the phone keeps batches
+ * on disk, so nothing new arrives; when the signal is back the backlog arrives in a burst and is
+ * processed faster than real time until it has caught up (plan 02 §5 "Gaps and late data").
+ */
+function liveTiming(sim: SimulatedSession, nowMs: number): LiveTiming {
+  const elapsedS = (nowMs - sim.startMs) / MS_PER_SECOND;
+  const normal = { processedS: elapsedS - UPLOAD_DELAY_S - PROCESSING_LAG_S, receivedS: elapsedS - PROCESSING_LAG_S };
+  const zone = sim.spec.deadZone;
+  if (!zone) return normal;
+  const cycleStartS = Math.floor(elapsedS / zone.cycleS) * zone.cycleS;
+  const localS = elapsedS - cycleStartS;
+  const lostAtS = cycleStartS + zone.startS - UPLOAD_DELAY_S;
+  if (localS < zone.startS) return normal;
+  if (localS < zone.startS + zone.durationS) return { processedS: lostAtS - PROCESSING_LAG_S, receivedS: lostAtS };
+  const caughtUpS = lostAtS + (localS - zone.startS - zone.durationS) * zone.catchUpFactor;
+  if (caughtUpS >= normal.processedS) return normal;
+  // Catching up: the batches being processed now arrived just now, but hold samples from minutes ago.
+  return { processedS: caughtUpS, receivedS: elapsedS - PROCESSING_LAG_S };
+}
+
+/** Index of the newest sample the backend has processed "now" (live sessions grow in real time). */
+export function lastSampleIndex(sim: SimulatedSession, nowMs: number = Date.now()): number {
+  const total = sim.t.length - 1;
+  if (!sim.spec.live) return total;
+  return Math.max(0, Math.min(total, Math.floor(liveTiming(sim, nowMs).processedS * SERIES_HZ)));
+}
+
+/** When the ingest function received the newest processed sample (epoch ms). */
+export function receivedAtMs(sim: SimulatedSession, nowMs: number = Date.now()): number {
+  if (!sim.spec.live) return sim.t[sim.t.length - 1];
+  const lastSampleMs = sim.t[sim.t.length - 1];
+  return Math.min(sim.startMs + liveTiming(sim, nowMs).receivedS * MS_PER_SECOND, lastSampleMs + UPLOAD_DELAY_S * MS_PER_SECOND);
 }
 
 /** Whether a live session is still being recorded (its simulation has samples left). */
 export function isStillLive(sim: SimulatedSession, nowMs: number = Date.now()): boolean {
   return sim.spec.live && lastSampleIndex(sim, nowMs) < sim.t.length - 1;
+}
+
+/** End of the trip (its last sample), or null while it is still being recorded. */
+function endedAtMs(sim: SimulatedSession, nowMs: number): number | null {
+  return isStillLive(sim, nowMs) ? null : sim.t[sim.t.length - 1];
+}
+
+/** When the finalize job finished with the trip, or null if it hasn't yet. */
+export function processedAt(sim: SimulatedSession, nowMs: number = Date.now()): number | null {
+  const ended = endedAtMs(sim, nowMs);
+  if (ended === null) return null;
+  const done = ended + PROCESSING_DELAY_MS;
+  return done <= nowMs ? done : null;
+}
+
+/** `live` while recording, `processing` until finalized, `complete` after (plan 02 §8). */
+export function processingStatus(sim: SimulatedSession, nowMs: number = Date.now()): ProcessingStatus {
+  if (isStillLive(sim, nowMs)) return "live";
+  return processedAt(sim, nowMs) === null ? "processing" : "complete";
 }
 
 /** Same rule as the read API: the first and last 200 m of a finished trip never leave the database. */
@@ -76,16 +120,61 @@ export function inPrivacyZone(sim: SimulatedSession, sampleIndex: number, nowMs:
   return s < PRIVACY_TRIM_M || (!isStillLive(sim, nowMs) && s > sim.totalDistanceM - PRIVACY_TRIM_M);
 }
 
-/** When the backend finished processing a session (after its upload). */
-export function processedAt(sim: SimulatedSession, nowMs: number = Date.now()): number | null {
-  return isStillLive(sim, nowMs) ? null : sim.t[lastSampleIndex(sim, nowMs)] + PROCESSING_DELAY_MS;
+// ---------------------------------------------------------------------------------------------
+// Aggregation rules (plan 02 §8, §10; dashboard/API.md).
+
+const isRoughnessEligible = (spec: SessionSpec) => spec.contextKnown && spec.mount.rigid && !spec.mount.handheld;
+const isSicknessExperimental = (spec: SessionSpec) => !spec.contextKnown || !spec.mount.rigid || spec.mount.handheld;
+
+/** Why a trip is (partly) kept out of the aggregated map. */
+function exclusionReasons(sim: SimulatedSession, nowMs: number): ExclusionReason[] {
+  const { spec } = sim;
+  const finalized = processingStatus(sim, nowMs) === "complete";
+  const reasons: ExclusionReason[] = [];
+  if (spec.source === "replay") reasons.push("replay");
+  else if (!finalized) reasons.push(spec.source === "live" ? "live_only" : "processing");
+  if (spec.quality === "bad") reasons.push("bad_quality");
+  if (!spec.contextKnown) {
+    reasons.push("unknown_context");
+    return reasons;
+  }
+  if (!spec.mount.rigid) reasons.push("not_rigid");
+  if (spec.mount.handheld) reasons.push("handheld");
+  return reasons;
 }
 
-/** Index of the newest sample that exists "now" (live sessions grow in real time). */
-export function lastSampleIndex(sim: SimulatedSession, nowMs: number = Date.now()): number {
-  const total = sim.t.length - 1;
-  if (!sim.spec.live) return total;
-  return Math.max(0, Math.min(total, Math.floor(((nowMs - sim.startMs) / MS_PER_SECOND) * SERIES_HZ)));
+/** Only finalized trips with known context that pass the quality rules count; replays never do. */
+export function isIncluded(sim: SimulatedSession, nowMs: number = Date.now()): boolean {
+  const { spec } = sim;
+  return (
+    spec.source !== "replay" &&
+    spec.quality !== "bad" &&
+    spec.contextKnown &&
+    processingStatus(sim, nowMs) === "complete"
+  );
+}
+
+let cachedAggregation: { key: string; result: AggregationResult } | null = null;
+
+/**
+ * The aggregation step runs again whenever another trip is finalized (as at the end of every finalize
+ * job), so the result depends on which trips are included at `nowMs`.
+ */
+export function getAggregation(nowMs: number = Date.now()): AggregationResult {
+  const included = [...getDataset().sims.values()].filter((sim) => isIncluded(sim, nowMs));
+  const key = included.map((sim) => sim.spec.sessionId).join(",");
+  if (cachedAggregation?.key === key) return cachedAggregation.result;
+  const fittedAt = Math.max(...included.map((sim) => processedAt(sim, nowMs) ?? 0));
+  const result = aggregate(
+    included.map((sim) => ({
+      sim,
+      roughnessEligible: isRoughnessEligible(sim.spec),
+      sicknessEligible: !isSicknessExperimental(sim.spec),
+    })),
+    new Date(fittedAt).toISOString(),
+  );
+  cachedAggregation = { key, result };
+  return result;
 }
 
 /** Counts only events the API publishes (outside the privacy zone), so counts match the dots on the map. */
@@ -104,7 +193,7 @@ function validFraction(spec: SessionSpec): number {
 export function sessionSummary(sim: SimulatedSession, nowMs: number = Date.now()): SessionSummary {
   const { spec } = sim;
   const last = lastSampleIndex(sim, nowMs);
-  const live = isStillLive(sim, nowMs);
+  const ended = endedAtMs(sim, nowMs);
   const msdv = sim.msdv[last];
   return {
     sessionId: spec.sessionId,
@@ -117,14 +206,15 @@ export function sessionSummary(sim: SimulatedSession, nowMs: number = Date.now()
     people: spec.people,
     audioEnabled: spec.audioEnabled,
     startedAt: new Date(sim.t[0]).toISOString(),
-    endedAt: live ? null : new Date(sim.t[last]).toISOString(),
+    endedAt: ended === null ? null : new Date(ended).toISOString(),
     durationS: (sim.t[last] - sim.t[0]) / MS_PER_SECOND,
     distanceM: sim.s[last],
-    status: live ? "live" : "complete",
+    status: processingStatus(sim, nowMs),
+    incomplete: spec.incomplete,
     qualityStatus: spec.quality,
     validFraction: validFraction(spec),
-    includeInAgg: isIncluded(spec),
-    exclusionReasons: exclusionReasons(spec),
+    includeInAgg: isIncluded(sim, nowMs),
+    exclusionReasons: exclusionReasons(sim, nowMs),
     roughnessEligible: isRoughnessEligible(spec),
     sicknessExperimental: isSicknessExperimental(spec),
     msdvZ: msdv,
@@ -163,7 +253,9 @@ function sessionQuality(sim: SimulatedSession, last: number): SessionQuality {
     device: stream(0.2, durationS, `${id}:dev`),
   };
   const fixes = streams.location.rows;
-  const isLive = spec.live;
+  // Only streamed trips have live batches; a few are rejected, late or repeated on a real network.
+  const streamed = spec.source !== "upload";
+  const batchStat = (salt: string, max: number) => (streamed ? Math.floor(unitHash(`${id}:${salt}`) * (max + 1)) : 0);
   return {
     streams,
     gps: {
@@ -178,9 +270,9 @@ function sessionQuality(sim: SimulatedSession, last: number): SessionQuality {
       gyro_gps_mismatch: Math.round(unitHash(`${id}:gyro`) * 12) + (bad ? 140 : 0),
       gps_poor: bad ? Math.round(durationS * 0.55) : Math.round(unitHash(`${id}:gpspoor`) * 8),
     },
-    rejectedBatches: isLive ? 1 : 0,
-    lateBatches: isLive ? 2 : 0,
-    duplicateBatches: isLive ? 3 : 0,
+    rejectedBatches: batchStat("rejected", 2),
+    lateBatches: batchStat("late", 4),
+    duplicateBatches: batchStat("duplicate", 6),
   };
 }
 
@@ -241,4 +333,3 @@ export function qualityRow(sim: SimulatedSession, nowMs: number = Date.now()): Q
   return { ...sessionSummary(sim, nowMs), quality: sessionQuality(sim, lastSampleIndex(sim, nowMs)) };
 }
 
-export { isIncluded };

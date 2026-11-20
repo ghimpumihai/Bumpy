@@ -19,8 +19,8 @@ import { EVENTS_SOURCE_ID } from "./utils/constants";
 import { metricScale } from "./utils/metric";
 
 export function MapView() {
-  const search = useSearch({ from: "/" });
-  const navigate = useNavigate({ from: "/" });
+  const search = useSearch({ from: "/map" });
+  const navigate = useNavigate({ from: "/map" });
   const overview = overviewApi.useOverview();
   const segments = segmentsApi.useSegments(search.vehicle);
   const events = eventsApi.useEvents(search.vehicle);

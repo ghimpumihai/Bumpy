@@ -13,7 +13,7 @@ export function NotFoundPage() {
       <PageWrapper title="Page not found" description="This page does not exist.">
         <div>
           <Button asChild>
-            <Link to="/">Back to the map</Link>
+            <Link to="/live">Back to the live view</Link>
           </Button>
         </div>
       </PageWrapper>

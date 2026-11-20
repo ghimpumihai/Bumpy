@@ -13,11 +13,15 @@ import type {
 /** Why a session is kept out of the aggregated map (plan 02 §10). */
 export const ExclusionReason = {
   REPLAY: "replay",
+  /** A streamed trip that is not finalized yet (still recording or being processed). */
   LIVE_ONLY: "live_only",
+  /** An uploaded folder that is still being processed. */
+  PROCESSING: "processing",
   BAD_QUALITY: "bad_quality",
+  /** session.json never arrived (spec §6.1), so the vehicle and mount are unknown. */
+  UNKNOWN_CONTEXT: "unknown_context",
   NOT_RIGID: "not_rigid",
   HANDHELD: "handheld",
-  PROCESSING: "processing",
 } as const;
 export type ExclusionReason = (typeof ExclusionReason)[keyof typeof ExclusionReason];
 
@@ -72,6 +76,8 @@ export interface SessionSummary {
   durationS: number;
   distanceM: number;
   status: ProcessingStatus;
+  /** Closed without the app's Stop message (crash, dead phone) after 15 min without batches; gaps are marked. */
+  incomplete: boolean;
   qualityStatus: QualityStatus;
   /** Fraction (0–1) of moving time that passed the quality checks. */
   validFraction: number | null;

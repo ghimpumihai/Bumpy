@@ -18,12 +18,14 @@ import type {
 import { bearingDeg } from "@/utils/geo";
 
 import {
+  getAggregation,
   getDataset,
   inPrivacyZone,
   isIncluded,
   lastSampleIndex,
   processedAt,
   qualityRow,
+  receivedAtMs,
   sessionDetail,
   sessionSummary,
 } from "./dataset";
@@ -101,10 +103,11 @@ function eventsOf(sims: SimulatedSession[], type: string | null): RoadEventColle
 }
 
 function overview(): Overview {
-  const { sims, aggregation } = getDataset();
+  const { sims } = getDataset();
+  const aggregation = getAggregation();
   const all = [...sims.values()];
   const summaries = all.map((sim) => sessionSummary(sim));
-  const included = all.filter((sim) => isIncluded(sim.spec));
+  const included = all.filter((sim) => isIncluded(sim));
   const allSegments = [...aggregation.segments.values()].map((perFilter) => perFilter.get("all"));
   const lastProcessed = all.flatMap((sim) => {
     const at = processedAt(sim);
@@ -130,7 +133,7 @@ function overview(): Overview {
 
 function segments(query: URLSearchParams): SegmentCollection {
   const filter = vehicleFilterOf(query);
-  const { aggregation } = getDataset();
+  const aggregation = getAggregation();
   const features = [...aggregation.segments.entries()].flatMap(([cell, perFilter]) => {
     const properties = perFilter.get(filter);
     if (!properties) return [];
@@ -142,7 +145,8 @@ function segments(query: URLSearchParams): SegmentCollection {
 
 function segmentDetail(h3: string): SegmentDetail {
   if (!isValidCell(h3)) throw new MockHttpError(400, `${h3} is not an H3 cell`);
-  const { aggregation, sims } = getDataset();
+  const { sims } = getDataset();
+  const aggregation = getAggregation();
   const perFilter = aggregation.segments.get(h3);
   if (!perFilter) throw new MockHttpError(404, `segment ${h3} has no observations`);
   const [lat, lon] = cellToLatLng(h3);
@@ -159,7 +163,7 @@ function segmentDetail(h3: string): SegmentDetail {
           roughnessRms: obs.roughnessRms === null ? null : round(obs.roughnessRms, 4),
           awRms: round(obs.awRms, 4),
           potholeCount: obs.potholeCount,
-          includedInAgg: isIncluded(sim.spec),
+          includedInAgg: isIncluded(sim),
         })),
     )
     .sort((a, b) => a.tStart.localeCompare(b.tStart));
@@ -217,7 +221,10 @@ function live(): LiveResponse {
     .flatMap((sim) => {
       // A finished live trip disappears from the live view a minute after its last batch.
       const last = lastSampleIndex(sim, now);
-      if (now - sim.t[last] > LIVE_WINDOW_S * MS_PER_SECOND) return [];
+      // Devices the ingest function heard from in the last minute (a dead zone keeps them listed, stale).
+      const receivedAt = receivedAtMs(sim, now);
+      if (now - receivedAt > LIVE_WINDOW_S * MS_PER_SECOND || last >= sim.t.length - 1) return [];
+      const latest = sim.ratings.filter((rating) => rating.sampleIndex <= last).at(-1);
       const window = ROUGHNESS_NOW_WINDOW_S * SERIES_HZ;
       let sumSquares = 0;
       for (let k = Math.max(0, last - window); k <= last; k++) sumSquares += sim.aVert[k] ** 2;
@@ -234,6 +241,7 @@ function live(): LiveResponse {
           source: sim.spec.source,
           vehicleType: sim.spec.vehicle.type,
           updatedAt: new Date(sim.t[last]).toISOString(),
+          receivedAt: new Date(receivedAt).toISOString(),
           lat: round(sim.lat[last]),
           lon: round(sim.lon[last]),
           speedMs: round(sim.speed[last], 2),
@@ -242,6 +250,7 @@ function live(): LiveResponse {
           roughnessNow: round(Math.sqrt(sumSquares / (window + 1)), 3),
           msdvSoFar: round(sim.msdv[last], 3),
           battery: round(Math.max(0.05, LIVE_BATTERY_START - hoursRunning * LIVE_BATTERY_DRAIN_PER_HOUR), 2),
+          latestRating: latest ? { value: latest.value, tUtc: latest.tUtc } : null,
           thermal: "nominal",
           track: trackPoints,
         },
@@ -268,7 +277,7 @@ function qualityList(): QualityListResponse {
 function allEvents(query: URLSearchParams): RoadEventCollection {
   const filter = vehicleFilterOf(query);
   const sims = [...getDataset().sims.values()].filter(
-    (sim) => isIncluded(sim.spec) && (filter === VehicleFilters.ALL || sim.spec.vehicle.type === filter),
+    (sim) => isIncluded(sim) && (filter === VehicleFilters.ALL || sim.spec.vehicle.type === filter),
   );
   return eventsOf(sims, enumParam(query, "type", Object.values(RoadEventType)));
 }

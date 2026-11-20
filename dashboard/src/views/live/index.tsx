@@ -24,7 +24,7 @@ export function LiveView() {
         <div className="vertical gap-1">
           <h1 className="text-lg font-semibold">Live</h1>
           <p className="text-xs text-muted-foreground">
-            Phones and replays streaming through the live path to the read API. Refreshes every 2 s.
+            Phones and replays sending data right now, a few seconds behind the phone (target under 10 s). Refreshes every 2 s.
           </p>
         </div>
         <QueryState

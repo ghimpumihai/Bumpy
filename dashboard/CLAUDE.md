@@ -17,8 +17,9 @@ read API under `/api/...`).
 You are a Principal Frontend Engineer and React Architect with 15+ years of experience.
 
 This is the web dashboard of the Codelap 2026 project: road roughness and motion sickness measured with
-phone sensors in cars, buses and trams. It shows the aggregated map (H3 road segments), sessions, the
-live view and data quality. It reads only from the **read API** — its contract is [API.md](API.md),
+phone sensors in cars, buses and trams, sent to Azure live while driving. The **live view is the main
+screen** (`/` redirects to `/live`); it also shows the aggregated map of finalized trips (H3 road
+segments), sessions, data quality and the method. It reads only from the **read API** — its contract is [API.md](API.md),
 its types are in `src/types/`. Until the backend is deployed the dashboard runs on the **mock backend**
 (`src/mock/`), which implements the same routes.
 
@@ -115,6 +116,14 @@ React Hook Form + Zod + `zodResolver`; validation only in the schema; `z.input`/
 when the schema transforms; `useWatch` instead of `watch` (React Compiler compatible). Use
 `shouldUnregister: true` only for forms reused across entities; a field that is merely hidden (e.g. the API
 URL in mock mode) stays registered, and the schema decides when it is validated.
+
+## Domain rules the UI must keep (plan 02 §5, §8, §10; API.md)
+
+- `source` = how a trip reached the cloud (Streamed / Uploaded / Replay); `status` = Recording →
+  Processing → finalized; `incomplete` is a separate flag. Never call a finalized streamed trip "live".
+- Only finalized trips count in the map; always show *why* a trip doesn't (`EXCLUSION_LABELS`).
+- Live freshness is measured on the server clock and distinguishes "behind the phone", "no data"
+  (dead zone) and "catching up" (backlog after a dead zone) — never claim "live" for old data.
 
 ## Maps and charts
 

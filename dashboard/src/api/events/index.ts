@@ -1,7 +1,7 @@
 import { keepPreviousData, useQuery } from "@tanstack/react-query";
 
 import { api } from "@/config/api-client";
-import { STATIC_STALE_TIME_MS } from "@/constants";
+import { AGGREGATE_REFRESH_INTERVAL_MS, STATIC_STALE_TIME_MS } from "@/constants";
 import type { RoadEventCollection } from "@/types/sessions";
 import type { VehicleFilter } from "@/types/segments";
 
@@ -16,6 +16,7 @@ const useEvents = (vehicle: VehicleFilter) =>
     queryKey: [EVENTS_QUERY_KEY, vehicle],
     queryFn: () => getEvents(vehicle),
     staleTime: STATIC_STALE_TIME_MS,
+    refetchInterval: AGGREGATE_REFRESH_INTERVAL_MS,
     placeholderData: keepPreviousData,
   });
 

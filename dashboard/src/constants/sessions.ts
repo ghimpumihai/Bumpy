@@ -1,4 +1,4 @@
-import type { QualityStatus, RoadEventType, SessionSource, VehicleType } from "@/types/common";
+import type { ProcessingStatus, QualityStatus, RoadEventType, SessionSource, VehicleType } from "@/types/common";
 import type { ExclusionReason } from "@/types/sessions";
 
 export const VEHICLE_LABELS: Record<VehicleType, string> = {
@@ -10,10 +10,23 @@ export const VEHICLE_LABELS: Record<VehicleType, string> = {
   unknown: "Unknown",
 };
 
+/** How the trip reached the cloud. Streaming is the normal path, so it is labelled plainly. */
 export const SOURCE_LABELS: Record<SessionSource, string> = {
+  live: "Streamed",
   upload: "Uploaded",
-  live: "Live",
   replay: "Replay",
+};
+
+export const SOURCE_DESCRIPTIONS: Record<SessionSource, string> = {
+  live: "Sent by the phone while driving (the main path)",
+  upload: "Session folder uploaded from a laptop (fallback: the trip never reached the cloud)",
+  replay: "A recorded trip re-sent through the live path; never counted in the map",
+};
+
+export const STATUS_LABELS: Record<ProcessingStatus, string> = {
+  live: "Recording",
+  processing: "Processing",
+  complete: "Finalized",
 };
 
 export const QUALITY_LABELS: Record<QualityStatus, string> = {
@@ -31,12 +44,16 @@ export const EVENT_LABELS: Record<RoadEventType, string> = {
 
 export const EXCLUSION_LABELS: Record<ExclusionReason, string> = {
   replay: "Replay — never aggregated",
-  live_only: "Live only — aggregated once the session folder is uploaded",
+  live_only: "Not finalized yet — counts once the finalize job has processed the whole trip",
+  processing: "Upload still being processed",
   bad_quality: "Bad data quality",
+  unknown_context: "Context unknown (session.json never arrived) — can't be compared with other trips",
   not_rigid: "Mount not rigid — no roughness, sickness experimental",
   handheld: "Hand-held — no roughness, sickness experimental",
-  processing: "Still processing",
 };
+
+export const INCOMPLETE_DESCRIPTION =
+  "Closed without the app's Stop message (15 minutes without data); gaps are marked and the rest still counts.";
 
 export const STREAM_LABELS: Record<string, string> = {
   device_motion: "Device motion",

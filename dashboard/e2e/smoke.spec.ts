@@ -13,9 +13,15 @@ function trackErrors(page: Page) {
   return errors;
 }
 
+test("the start page is the live view (plan 02 §5)", async ({ page }) => {
+  await page.goto("/");
+  await expect(page).toHaveURL(/\/live$/);
+  await expect(page.getByRole("link", { name: "Live" })).toHaveAttribute("aria-current", "page");
+});
+
 test("map shows the aggregated segments and the overview", async ({ page }) => {
   const errors = trackErrors(page);
-  await page.goto("/");
+  await page.goto("/map");
   await expect(page.getByRole("region", { name: "Dataset overview" })).toContainText("Confirmed potholes");
   await expect(page.getByRole("region", { name: /Map of road segments/ })).toBeVisible();
   await expect(page.locator(".maplibregl-canvas")).toBeVisible();
@@ -32,7 +38,8 @@ test("sessions list links to a session with its data-quality panel", async ({ pa
   await page.goto("/sessions");
   await expect(page.getByRole("heading", { name: "Sessions" })).toBeVisible();
   const rows = page.getByRole("row");
-  await expect(rows).toHaveCount(18); // header + 17 mock sessions
+  await expect(rows).toHaveCount(20); // header + 19 mock sessions
+  await expect(page.getByText("Incomplete").first()).toBeVisible();
   await expect(page.getByText("Replay").first()).toBeVisible();
 
   await page.goto(`/sessions/${RECORDED_SESSION}`);
@@ -52,10 +59,12 @@ test("live view lists the streaming phone and the replay", async ({ page }) => {
   const errors = trackErrors(page);
   await page.goto("/live");
   const panel = page.getByRole("complementary", { name: "Streaming devices" });
-  // Badges, matched exactly: the panel's description also mentions "replays" and "live".
+  // Badges, matched exactly: the panel's description also mentions "replays".
   await expect(panel.locator('[data-slot="badge"]', { hasText: /^Replay$/ })).toBeVisible();
-  await expect(panel.locator('[data-slot="badge"]', { hasText: /^Live$/ })).toBeVisible();
-  await expect(panel.getByText(/updated \d+ s ago/).first()).toBeVisible();
+  await expect(panel.locator('[data-slot="badge"]', { hasText: /^Streamed$/ })).toBeVisible();
+  // The real end-to-end delay is shown, not just "live" (plan 02 §5).
+  await expect(panel.getByText(/behind the phone|catching up|no data for/).first()).toBeVisible();
+  await expect(panel.getByText("Latest MISC").first()).toBeVisible();
   expect(errors).toEqual([]);
 });
 
@@ -95,10 +104,31 @@ test("the data-source dialog saves a choice and reloads with it", async ({ page 
   await expect(page.getByRole("button", { name: /Mock data: data source settings/ })).toBeVisible();
 });
 
+test("deep links load directly (Static Web Apps falls back to index.html)", async ({ page }) => {
+  const response = await page.goto(`/sessions/${RECORDED_SESSION}`);
+  expect(response?.status()).toBe(200);
+  await expect(page.getByText("Detection vs. manual taps")).toBeVisible();
+});
+
 test("forcing the API without an API URL explains the problem instead of showing mock data", async ({ page }, testInfo) => {
   test.skip(testInfo.project.name === "api", "the API-mode site has an API URL in config.json");
   await page.goto("/sessions?mock=0");
   await expect(page.getByRole("alert")).toContainText("no API URL is configured");
   await page.getByRole("button", { name: "Reset data source and reload" }).click();
   await expect(page.getByRole("heading", { name: "Sessions" })).toBeVisible();
+});
+
+test("a trip being processed updates by itself once it is finalized and joins the map", async ({ page }, testInfo) => {
+  test.skip(testInfo.project.name === "api", "the stand-in API's clock is not controlled by the browser");
+  const RECENTLY_ENDED = "5e8c1a7d-2b9f-4c63-a0d4-8f1e3b6c9a21";
+  await page.clock.install();
+  await page.goto(`/sessions/${RECENTLY_ENDED}`);
+  const header = page.locator("header", { has: page.getByRole("heading", { level: 1 }) });
+  await expect(header.getByText("Processing", { exact: true })).toBeVisible();
+  await expect(page.getByText(/Not counted in the aggregated map: Not finalized yet/)).toBeVisible();
+  // The finalize job finishes a few minutes after the trip ended; the page polls until then.
+  await page.clock.fastForward("05:00");
+  await page.clock.runFor(10_000);
+  await expect(header.getByText("Processing", { exact: true })).toBeHidden();
+  await expect(page.getByText(/Not counted in the aggregated map/)).toBeHidden();
 });

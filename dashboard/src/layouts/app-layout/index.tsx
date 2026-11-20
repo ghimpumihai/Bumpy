@@ -7,16 +7,17 @@ import { DataSourceSettings } from "@/features/data-source-settings";
 import { cn } from "@/lib/utils";
 
 interface NavItem {
-  to: "/" | "/sessions" | "/live" | "/quality" | "/method";
+  to: "/live" | "/map" | "/sessions" | "/quality" | "/method";
   label: string;
   icon: LucideIcon;
 }
 
+/** The dashboard's pages in the order of plan 02 §5: the live view is the main screen. */
 const NAV_ITEMS: NavItem[] = [
-  { to: "/", label: "Map", icon: MapIcon },
-  { to: "/sessions", label: "Sessions", icon: Activity },
   { to: "/live", label: "Live", icon: Radio },
-  { to: "/quality", label: "Data quality", icon: ListChecks },
+  { to: "/map", label: "Map", icon: MapIcon },
+  { to: "/sessions", label: "Sessions", icon: Activity },
+  { to: "/quality", label: "Quality", icon: ListChecks },
   { to: "/method", label: "Method", icon: BookOpen },
 ];
 
@@ -32,7 +33,7 @@ export function AppLayout({ children }: { children: ReactNode }) {
       </a>
       <header className="sticky top-0 z-30 border-b bg-card/95 backdrop-blur">
         <div className="mx-auto flex max-w-7xl flex-wrap items-center gap-x-4 gap-y-2 px-4 py-2 sm:px-6">
-          <Link to="/" className="horizontal gap-2 rounded-md focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring">
+          <Link to="/live" className="horizontal gap-2 rounded-md focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring">
             <span className="gradient-bg grid size-8 place-items-center rounded-lg text-accent-foreground">
               <Gauge className="size-5" aria-hidden="true" />
             </span>
@@ -48,7 +49,7 @@ export function AppLayout({ children }: { children: ReactNode }) {
                   <Link
                     to={to}
                     className={linkClass}
-                    activeOptions={{ exact: to === "/", includeSearch: false }}
+                    activeOptions={{ includeSearch: false }}
                     activeProps={{ className: cn(linkClass, "bg-muted text-foreground"), "aria-current": "page" }}
                   >
                     <Icon className="size-4" aria-hidden="true" />

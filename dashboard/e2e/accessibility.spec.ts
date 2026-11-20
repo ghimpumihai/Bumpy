@@ -1,7 +1,7 @@
 import { AxeBuilder } from "@axe-core/playwright";
 import { expect, test } from "@playwright/test";
 
-const ROUTES = ["/", "/sessions", "/sessions/3f1c2b9e-0d4a-4e7b-9c51-6a2d8e0f4b11", "/live", "/quality", "/method"];
+const ROUTES = ["/live", "/map", "/sessions", "/sessions/3f1c2b9e-0d4a-4e7b-9c51-6a2d8e0f4b11", "/quality", "/method"];
 const WCAG_TAGS = ["wcag2a", "wcag2aa", "wcag21a", "wcag21aa"];
 
 for (const colorScheme of ["light", "dark"] as const) {

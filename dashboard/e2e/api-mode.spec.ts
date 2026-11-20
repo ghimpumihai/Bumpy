@@ -9,7 +9,7 @@ test("reads config.json and talks to the read API over HTTP, without loading the
     if (request.url().startsWith(API_ORIGIN)) apiRequests.push(new URL(request.url()).pathname);
     if (request.url().includes("mock-adapter")) mockChunks.push(request.url());
   });
-  await page.goto("/");
+  await page.goto("/map");
   await expect(page.getByRole("button", { name: /Read API: data source settings/ })).toBeVisible();
   await expect(page.getByRole("region", { name: "Dataset overview" })).toContainText("Confirmed potholes");
   expect(apiRequests).toEqual(expect.arrayContaining(["/api/overview", "/api/segments", "/api/events"]));

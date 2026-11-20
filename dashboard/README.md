@@ -2,12 +2,15 @@
 
 Web dashboard of the Codelap 2026 project (plan: [02-infrastructure-plan.md](../decisions/02-infrastructure-plan.md)
 §5 "Dashboard", §15). React + Vite + MapLibre (OpenFreeMap tiles) + uPlot, hosted as static files on
-Azure Static Web Apps, reading the **read API** ([API.md](API.md)).
+Azure Static Web Apps (`public/staticwebapp.config.json`: SPA fallback, caching, security headers), reading the **read API** ([API.md](API.md)).
 
 The backend pipeline is not deployed yet, so the dashboard ships with an in-browser **mock backend**
-that implements the same API with generated sessions on real Cluj-Napoca streets (cars, bus 35, tram 101,
-a winding hill road; potholes, speed bumps, cobblestones; a live car and a live replay). Every mock
-session is labelled **Mock**. As soon as `config.json` has an `apiBase`, real data is shown instead.
+that implements the same API with generated trips on real Cluj-Napoca streets (cars, bus 35, tram 101,
+a winding hill road; potholes, speed bumps, cobblestones). It follows the live-first plan: most trips are
+streamed and finalized, two are laptop uploads, a live car crosses a dead zone (stale, then catching up),
+a replay streams bus 35, and one trip ends just before the page loads, so it moves from *Processing* to
+the map. Every mock trip is labelled **Mock**. As soon as `config.json` has an `apiBase`, real data is
+shown instead.
 
 ## Run it
 
@@ -26,10 +29,10 @@ Data source precedence: `?mock=1` / `?mock=0` in the URL → the browser overrid
 
 | Route | What it shows |
 |---|---|
-| `/` | Aggregated map: H3 road segments coloured by normalized roughness (ISO 2631-1 comfort bands) or by predicted motion sickness, detected events, crowd-confirmed potholes, per-vehicle filter, segment details |
-| `/sessions` | Every session: vehicle, source (uploaded / live / replay), quality, whether it counts in the map and why not |
+| `/live` (start page) | The main screen (plan 02 §5): phones and replays sending data right now, polled every 2 s — moving markers, recent track, speed, roughness now, MSDV so far, the latest MISC rating, and how far behind the phone the data is (or "catching up" after a dead zone) |
+| `/map` | Aggregated map of every finalized trip: H3 road segments coloured by normalized roughness (ISO 2631-1 comfort bands) or by predicted motion sickness, detected events, crowd-confirmed potholes, per-vehicle filter, segment details |
+| `/sessions` | Every trip: vehicle, how it reached the cloud (streamed / uploaded / replay), status (recording → processing → finalized, incomplete), quality, whether it counts in the map and why not |
 | `/sessions/{id}` | One trip: track coloured by speed, events, synchronized charts (road band, sway, speed, MSDV + MISC ratings), detection precision/recall vs. taps, prediction vs. ratings, context, data-quality panel |
-| `/live` | Phones and replays streaming right now (polled every 2 s): moving markers, recent track, speed, roughness, MSDV, battery, staleness |
 | `/quality` | Data-quality panel of every session: rates, gaps, GPS accuracy, valid share, invalid windows, rejected/late/duplicate live batches |
 | `/method` | How the metrics are computed, with the current cross-vehicle fit (β, vehicle factors) |
 
@@ -37,8 +40,9 @@ Data source precedence: `?mock=1` / `?mock=0` in the URL → the browser overrid
 
 ```bash
 npm run check      # typecheck + oxlint + depcruise (no import cycles) + unit tests
-npm run test:e2e   # Playwright against the production build: smoke tests on every route
-                   # + axe-core WCAG 2.1 AA scan of every route in light and dark mode
+npm run test:e2e   # Playwright against the production build, under the production CSP:
+                   # mock mode + API mode over real HTTP (scripts/contract-api-server.mjs),
+                   # smoke tests on every route, axe-core WCAG 2.1 AA in light and dark mode
 ```
 
 Conventions are in [CLAUDE.md](CLAUDE.md).

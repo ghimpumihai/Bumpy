@@ -1,9 +1,8 @@
-import { createFileRoute } from "@tanstack/react-router";
+import { createFileRoute, redirect } from "@tanstack/react-router";
 
-import { MapPage } from "@/pages/map";
-import { mapSearchSchema } from "@/views/map/schema";
-
+/** The live view is the main screen (plan 02 §5): the vehicle moving while the trip is driven. */
 export const Route = createFileRoute("/")({
-  validateSearch: mapSearchSchema,
-  component: MapPage,
+  beforeLoad: () => {
+    throw redirect({ to: "/live", replace: true });
+  },
 });

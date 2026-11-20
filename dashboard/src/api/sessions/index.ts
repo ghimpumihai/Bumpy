@@ -2,6 +2,7 @@ import { useQuery } from "@tanstack/react-query";
 
 import { api } from "@/config/api-client";
 import { LIVE_SESSION_POLL_INTERVAL_MS, STATIC_STALE_TIME_MS } from "@/constants";
+import { ProcessingStatus } from "@/types/common";
 import type {
   RoadEventCollection,
   SessionDetail,
@@ -25,50 +26,56 @@ const getEvents = async (sessionId: string) => (await api.get<RoadEventCollectio
 const getLabels = async (sessionId: string) =>
   (await api.get<SessionLabelsResponse>(sessionPath(sessionId, "/labels"))).data.labels;
 
-/** Finished sessions never change; live ones are re-polled. */
-const pollWhileLive = (isLive: boolean) => (isLive ? LIVE_SESSION_POLL_INTERVAL_MS : false);
+/** Finalized sessions never change; recording and processing ones are re-polled until they are finalized. */
+const pollUntilFinalized = (finalized: boolean) => (finalized ? false : LIVE_SESSION_POLL_INTERVAL_MS);
+const isFinalized = (status: ProcessingStatus | undefined) => status === ProcessingStatus.COMPLETE;
 
 const useSessions = (filters: SessionListFilters = {}) =>
-  useQuery({ queryKey: [SESSIONS_QUERY_KEY, "list", filters], queryFn: () => getSessions(filters), staleTime: STATIC_STALE_TIME_MS });
+  useQuery({
+    queryKey: [SESSIONS_QUERY_KEY, "list", filters],
+    queryFn: () => getSessions(filters),
+    staleTime: STATIC_STALE_TIME_MS,
+    refetchInterval: (query) => pollUntilFinalized(query.state.data?.every((session) => isFinalized(session.status)) ?? true),
+  });
 
 const useSession = (sessionId: string) =>
   useQuery({
     queryKey: [SESSIONS_QUERY_KEY, "detail", sessionId],
     queryFn: () => getSession(sessionId),
     staleTime: STATIC_STALE_TIME_MS,
-    refetchInterval: (query) => pollWhileLive(query.state.data?.status === "live"),
+    refetchInterval: (query) => pollUntilFinalized(query.state.data ? isFinalized(query.state.data.status) : true),
   });
 
-const useSessionSeries = (sessionId: string, isLive: boolean) =>
+const useSessionSeries = (sessionId: string, finalized: boolean) =>
   useQuery({
     queryKey: [SESSIONS_QUERY_KEY, "series", sessionId],
     queryFn: () => getSeries(sessionId),
     staleTime: STATIC_STALE_TIME_MS,
-    refetchInterval: pollWhileLive(isLive),
+    refetchInterval: pollUntilFinalized(finalized),
   });
 
-const useSessionTrack = (sessionId: string, isLive: boolean) =>
+const useSessionTrack = (sessionId: string, finalized: boolean) =>
   useQuery({
     queryKey: [SESSIONS_QUERY_KEY, "track", sessionId],
     queryFn: () => getTrack(sessionId),
     staleTime: STATIC_STALE_TIME_MS,
-    refetchInterval: pollWhileLive(isLive),
+    refetchInterval: pollUntilFinalized(finalized),
   });
 
-const useSessionEvents = (sessionId: string, isLive: boolean) =>
+const useSessionEvents = (sessionId: string, finalized: boolean) =>
   useQuery({
     queryKey: [SESSIONS_QUERY_KEY, "events", sessionId],
     queryFn: () => getEvents(sessionId),
     staleTime: STATIC_STALE_TIME_MS,
-    refetchInterval: pollWhileLive(isLive),
+    refetchInterval: pollUntilFinalized(finalized),
   });
 
-const useSessionLabels = (sessionId: string, isLive: boolean) =>
+const useSessionLabels = (sessionId: string, finalized: boolean) =>
   useQuery({
     queryKey: [SESSIONS_QUERY_KEY, "labels", sessionId],
     queryFn: () => getLabels(sessionId),
     staleTime: STATIC_STALE_TIME_MS,
-    refetchInterval: pollWhileLive(isLive),
+    refetchInterval: pollUntilFinalized(finalized),
   });
 
 export const sessionsApi = {

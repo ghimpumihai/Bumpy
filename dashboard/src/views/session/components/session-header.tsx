@@ -1,7 +1,7 @@
 import { Link } from "@tanstack/react-router";
 import { ArrowLeft } from "lucide-react";
 
-import { MockBadge, QualityBadge, SourceBadge } from "@/components/status/session-badges";
+import { IncompleteBadge, MockBadge, QualityBadge, SourceBadge, StatusBadge } from "@/components/status/session-badges";
 import { VehicleLabel } from "@/components/status/vehicle-label";
 import { Alert, AlertDescription } from "@/components/ui/alert";
 import { Button } from "@/components/ui/button";
@@ -25,12 +25,14 @@ export function SessionHeader({ session }: { session: SessionDetail }) {
           <VehicleLabel type={session.vehicle.type} line={session.vehicle.line} className="gap-2" />
         </h1>
         <SourceBadge source={session.source} />
+        <StatusBadge status={session.status} />
         <QualityBadge status={session.qualityStatus} />
+        {session.incomplete && <IncompleteBadge />}
         {session.isMock && <MockBadge />}
       </div>
       <p className="text-sm text-muted-foreground">
         {formatDateTime(session.startedAt)}
-        {session.endedAt ? ` – ${formatDateTime(session.endedAt)}` : " · recording"} ·{" "}
+        {session.endedAt ? ` – ${formatDateTime(session.endedAt)}` : " · recording now"} ·{" "}
         <span className="font-mono text-xs">{session.sessionId}</span>
       </p>
       {session.exclusionReasons.length > 0 && (

@@ -1,6 +1,15 @@
 import { describe, expect, it } from "vitest";
 
-import { getDataset, sessionDetail, sessionSummary } from "@/mock/dataset";
+import {
+  getAggregation,
+  getDataset,
+  isIncluded,
+  lastSampleIndex,
+  processingStatus,
+  receivedAtMs,
+  sessionDetail,
+  sessionSummary,
+} from "@/mock/dataset";
 import { handleMockRequest, MockHttpError } from "@/mock/handlers";
 import { PRIVACY_TRIM_M, TRUE_SPEED_EXPONENT } from "@/mock/simulate";
 import { getWorld } from "@/mock/world";
@@ -20,7 +29,7 @@ describe("mock dataset", () => {
   });
 
   it("recovers the true speed exponent and vehicle effects with the fixed-effects fit", () => {
-    const { info } = getDataset().aggregation;
+    const { info } = getAggregation();
     expect(info.method).toBe("model");
     expect(info.beta).toBeCloseTo(TRUE_SPEED_EXPONENT, 1);
     expect(info.vehicleEffects.car).toBe(0);
@@ -28,11 +37,17 @@ describe("mock dataset", () => {
     expect(info.vehicleEffects.tram).toBeCloseTo(Math.log(1.18), 1);
   });
 
-  it("never aggregates replays, live-only or bad sessions", () => {
+  it("aggregates only finalized trips with known context; never replays or bad sessions", () => {
     const { sessions } = get<SessionListResponse>("/api/sessions");
     for (const s of sessions) {
-      if (s.source !== "upload" || s.qualityStatus === "bad") expect(s.includeInAgg).toBe(false);
+      const expected =
+        s.status === "complete" && s.source !== "replay" && s.qualityStatus !== "bad" && !s.exclusionReasons.includes("unknown_context");
+      expect(s.includeInAgg, s.sessionId).toBe(expected);
+      if (s.source === "live" && s.status !== "complete") expect(s.exclusionReasons).toContain("live_only");
     }
+    // Streamed trips are the main dataset (plan 02 D32); uploads are only the fallback.
+    const included = sessions.filter((s) => s.includeInAgg);
+    expect(included.filter((s) => s.source === "live").length).toBeGreaterThan(included.filter((s) => s.source === "upload").length);
     expect(sessions.find((s) => s.source === "replay")?.exclusionReasons).toContain("replay");
     expect(sessions.every((s) => s.isMock)).toBe(true);
   });
@@ -83,13 +98,14 @@ describe("mock dataset", () => {
     }
   });
 
-  it("ends live trips when their recording ends", () => {
+  it("ends live trips when their recording ends, then finalizes them", () => {
     const sim = getDataset().sims.get("c3e9a7b1-6d2f-4f80-b4e5-9a1c7e3d5b87");
     if (!sim) throw new Error("live replay missing");
-    const afterEnd = sim.t[sim.t.length - 1] + 120_000;
-    const summary = sessionSummary(sim, afterEnd);
-    expect(summary.status).toBe("complete");
-    expect(summary.endedAt).not.toBeNull();
+    const end = sim.t[sim.t.length - 1];
+    expect(sessionSummary(sim, end + 120_000)).toMatchObject({ status: "processing" });
+    expect(sessionSummary(sim, end + 120_000).endedAt).not.toBeNull();
+    expect(sessionSummary(sim, end + 10 * 60_000)).toMatchObject({ status: "complete", includeInAgg: false });
+    expect(sessionSummary(sim, end + 10 * 60_000).exclusionReasons).toEqual(["replay"]);
   });
 
   it("trims the public track at both ends for privacy", () => {
@@ -111,6 +127,48 @@ describe("mock dataset", () => {
     expect(early.endedAt).toBeNull();
     expect(later.distanceM).toBeGreaterThan(early.distanceM);
     expect(sessionDetail(sim, now).detection).not.toBeNull();
+  });
+
+  it("finalizes a trip a few minutes after it ends, and only then adds it to the map", () => {
+    const sim = getDataset().sims.get("5e8c1a7d-2b9f-4c63-a0d4-8f1e3b6c9a21");
+    if (!sim) throw new Error("recently ended session missing");
+    const now = Date.now();
+    expect(processingStatus(sim, now)).toBe("processing");
+    expect(sessionSummary(sim, now).exclusionReasons).toEqual(["live_only"]);
+    expect(isIncluded(sim, now)).toBe(false);
+    const later = now + 10 * 60_000;
+    expect(processingStatus(sim, later)).toBe("complete");
+    expect(isIncluded(sim, later)).toBe(true);
+    // The aggregation step re-runs: one more trip, more passes on the shared loop.
+    const passes = (at: number) => [...getAggregation(at).segments.values()].reduce((sum, f) => sum + (f.get("all")?.nPasses ?? 0), 0);
+    expect(passes(later)).toBeGreaterThan(passes(now));
+  });
+
+  it("keeps trips with unknown context off the map but finalizes incomplete ones", () => {
+    const sessions = get<SessionListResponse>("/api/sessions").sessions;
+    const unknown = sessions.find((s) => s.sessionId === "91d4b7e2-6a3c-4f58-9b0e-2c7a5d8f1e43");
+    expect(unknown?.includeInAgg).toBe(false);
+    expect(unknown?.exclusionReasons).toEqual(["unknown_context"]);
+    expect(unknown?.vehicle.type).toBe("unknown");
+    const crashed = sessions.find((s) => s.sessionId === "0e6b9a4f-3c27-4d85-b1e9-8c5a2d4f7b44");
+    expect(crashed?.incomplete).toBe(true);
+    expect(crashed?.includeInAgg).toBe(true);
+  });
+
+  it("lets a live device go stale in a dead zone, then catch up faster than real time", () => {
+    const sim = getDataset().sims.get("aa61f0d4-3b8e-4c5a-9d27-6f1e4b8c0d76");
+    const zone = sim?.spec.deadZone;
+    if (!sim || !zone) throw new Error("live car with a dead zone missing");
+    const at = (seconds: number) => sim.startMs + seconds * 1000;
+    const before = lastSampleIndex(sim, at(zone.startS - 5));
+    const inZone = [at(zone.startS + 5), at(zone.startS + zone.durationS - 1)].map((t) => lastSampleIndex(sim, t));
+    expect(inZone[0]).toBe(inZone[1]); // nothing new arrives in the dead zone
+    expect(receivedAtMs(sim, at(zone.startS + 30))).toBeLessThan(at(zone.startS));
+    const catchingUp = at(zone.startS + zone.durationS + 4);
+    expect(receivedAtMs(sim, catchingUp) - sim.t[lastSampleIndex(sim, catchingUp)]).toBeGreaterThan(10_000);
+    expect(lastSampleIndex(sim, at(zone.startS + zone.durationS + 60))).toBeGreaterThan(before);
+    const caughtUp = at(zone.startS + zone.durationS + 60);
+    expect(receivedAtMs(sim, caughtUp) - sim.t[lastSampleIndex(sim, caughtUp)]).toBeLessThan(5_000);
   });
 
   it("answers unknown sessions and bad filters with HTTP errors", () => {

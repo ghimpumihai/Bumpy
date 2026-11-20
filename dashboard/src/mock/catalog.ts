@@ -10,6 +10,15 @@ export const MockQuality = {
 } as const;
 export type MockQuality = (typeof MockQuality)[keyof typeof MockQuality];
 
+/** A stretch without mobile signal, repeating every `cycleS`: batches wait on the phone, then arrive in a burst. */
+export interface DeadZone {
+  startS: number;
+  durationS: number;
+  cycleS: number;
+  /** How much faster than real time the backlog is processed once the signal is back. */
+  catchUpFactor: number;
+}
+
 export interface SessionSpec {
   sessionId: string;
   deviceId: string;
@@ -17,8 +26,15 @@ export interface SessionSpec {
   laps: number;
   vehicle: Vehicle;
   cruiseKmh: number;
-  /** Fixed start for recorded sessions; live sessions start relative to page load. */
+  /** Fixed start for recorded sessions; `null` = placed relative to page load (live or `endedBeforeLoadMs`). */
   startedAt: string | null;
+  /** For a trip that ended just before the page loaded, so it is still being finalized. */
+  endedBeforeLoadMs: number | null;
+  /** session.json reached the backend (spec §6.1); without it vehicle and mount are unknown. */
+  contextKnown: boolean;
+  /** Closed after 15 min without batches because the app's Stop message never came. */
+  incomplete: boolean;
+  deadZone: DeadZone | null;
   source: SessionSource;
   mount: Mount;
   people: People;
@@ -65,14 +81,22 @@ const TRAM_101: Vehicle = { type: "tram", makeModel: "Pesa Swing", line: "101" }
 const IPHONE_A = "5d7c3a1e-6f0b-4b4a-9a43-0c1f8e2b7d10";
 const IPHONE_B = "a2e9b4c7-1d38-4f6e-8b25-7e4c9d0a3f61";
 
+/** Trips are streamed live by default: that is the main path to the cloud (plan 02 §7, D32). */
 const base = {
   laps: 1,
-  source: "upload",
+  source: "live",
   audioEnabled: true,
   quality: "ok",
   replayOf: null,
   live: false,
+  endedBeforeLoadMs: null,
+  contextKnown: true,
+  incomplete: false,
+  deadZone: null,
 } as const satisfies Partial<SessionSpec>;
+
+const UNKNOWN_VEHICLE: Vehicle = { type: "unknown", makeModel: "", line: null };
+const UNKNOWN_MOUNT: Mount = { location: "unknown", phoneOrientation: "unknown", rigid: false, handheld: false };
 
 /** Every mock session. Dates are fixed so the dataset is reproducible. */
 export const SESSION_SPECS: SessionSpec[] = [
@@ -113,6 +137,8 @@ export const SESSION_SPECS: SessionSpec[] = [
   {
     ...base,
     sessionId: "0e6b9a4f-3c27-4d85-b1e9-8c5a2d4f7b44",
+    // The app was killed before Stop: closed after 15 min of silence and finalized as incomplete.
+    incomplete: true,
     deviceId: IPHONE_B,
     routeId: "cityLoop",
     vehicle: GOLF,
@@ -182,6 +208,8 @@ export const SESSION_SPECS: SessionSpec[] = [
   {
     ...base,
     sessionId: "b5f1d9c3-8e6a-4d07-a2b4-0f7c3e9d1a10",
+    // No mobile signal in the tram that day: the folder was uploaded from a laptop (fallback).
+    source: "upload",
     deviceId: IPHONE_B,
     routeId: "tram101",
     vehicle: TRAM_101,
@@ -229,6 +257,7 @@ export const SESSION_SPECS: SessionSpec[] = [
   {
     ...base,
     sessionId: "d0a5e3c1-7f9b-4c2a-8e6d-1b4f7a9c3e54",
+    source: "upload",
     deviceId: IPHONE_B,
     routeId: "cityLoop",
     vehicle: GOLF,
@@ -261,10 +290,11 @@ export const SESSION_SPECS: SessionSpec[] = [
     vehicle: LOGAN,
     cruiseKmh: 36,
     startedAt: null,
-    source: "live",
     mount: RIGID_MOUNT,
     people: people("rear left"),
     live: true,
+    // The loop crosses a spot without signal: the live view goes stale, then catches up.
+    deadZone: { startS: 9 * 60, durationS: 45, cycleS: 12 * 60, catchUpFactor: 5 },
   },
   {
     ...base,
@@ -282,5 +312,32 @@ export const SESSION_SPECS: SessionSpec[] = [
     audioEnabled: false,
     replayOf: "e4c7b2a9-6d1f-4e38-8b0a-3c9e5d2f1b77",
     live: true,
+  },
+  {
+    ...base,
+    // Ended one minute before the page loaded: still being finalized, then joins the map.
+    sessionId: "5e8c1a7d-2b9f-4c63-a0d4-8f1e3b6c9a21",
+    deviceId: IPHONE_B,
+    routeId: "cityLoop",
+    vehicle: GOLF,
+    cruiseKmh: 34,
+    startedAt: null,
+    endedBeforeLoadMs: 60_000,
+    mount: RIGID_MOUNT,
+    people: people("rear right", "seated", 2),
+  },
+  {
+    ...base,
+    // Streamed, but session.json never arrived (older app build): context unknown, kept off the map.
+    sessionId: "91d4b7e2-6a3c-4f58-9b0e-2c7a5d8f1e43",
+    deviceId: IPHONE_B,
+    routeId: "cityLoop",
+    vehicle: UNKNOWN_VEHICLE,
+    cruiseKmh: 35,
+    startedAt: "2026-11-17T16:20:00.000Z",
+    mount: UNKNOWN_MOUNT,
+    people: { operatorSeat: "unknown", raterSeat: "unknown", raterPosture: "seated", passengerCount: 0 },
+    contextKnown: false,
+    incomplete: true,
   },
 ];

@@ -1,7 +1,7 @@
 import { keepPreviousData, useQuery } from "@tanstack/react-query";
 
 import { api } from "@/config/api-client";
-import { STATIC_STALE_TIME_MS } from "@/constants";
+import { AGGREGATE_REFRESH_INTERVAL_MS, STATIC_STALE_TIME_MS } from "@/constants";
 import type { SegmentCollection, SegmentDetail, VehicleFilter } from "@/types/segments";
 
 export const SEGMENTS_QUERY_KEY = "segments";
@@ -15,6 +15,7 @@ const useSegments = (vehicle: VehicleFilter) =>
     queryKey: [SEGMENTS_QUERY_KEY, "list", vehicle],
     queryFn: () => getSegments(vehicle),
     staleTime: STATIC_STALE_TIME_MS,
+    refetchInterval: AGGREGATE_REFRESH_INTERVAL_MS,
     // Keep the previous hexagons on screen while another vehicle filter loads.
     placeholderData: keepPreviousData,
   });

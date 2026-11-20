@@ -1,0 +1,12 @@
+/** One y-series of a time-series chart. */
+export interface ChartSeries {
+  label: string;
+  /** CSS custom property of the line colour, e.g. `--chart-1`. */
+  colorVar: string;
+  values: (number | null)[];
+  /** Draw points only (e.g. sparse MISC ratings). */
+  pointsOnly?: boolean;
+  /** Secondary y axis on the right. */
+  axis?: "left" | "right";
+  unit?: string;
+}

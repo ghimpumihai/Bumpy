@@ -15,6 +15,9 @@ FIXTURE = ROOT / "src" / "mobile-ios" / "tools" / "fixtures" / "ingest_batch_v1.
 MOCK = ROOT / "src" / "mobile-ios" / "tools" / "mock_ingest_server.py"
 
 DEVICE_KEY = "test-device-key"
+DEVICE_ID = "FIXTURE-DEVICE"  # the deviceId in the app-encoded fixture batch
+OTHER_KEY = "other-device-key"  # a valid key, bound to another phone
+REPLAY_KEY = "replay-key"
 
 
 @pytest.fixture(scope="session")
@@ -65,7 +68,10 @@ class FakeSinks:
     def archive(self, blob_name, gz_body):
         if self.fail:
             raise RuntimeError("storage down")
+        if blob_name in self.blobs:  # overwrite=False: the first copy stays
+            return False
         self.blobs[blob_name] = gz_body
+        return True
 
 
 @pytest.fixture
@@ -75,8 +81,10 @@ def sinks():
 
 @pytest.fixture
 def keys():
-    from ingest_core.keys import KeyStore, hash_key
-    return KeyStore(lambda: [hash_key(DEVICE_KEY)])
+    from ingest_core.keys import KeyStore, hash_key, parse_secret
+    secret = json.dumps({DEVICE_ID: hash_key(DEVICE_KEY), "OTHER-PHONE": hash_key(OTHER_KEY),
+                         "replay": hash_key(REPLAY_KEY)})
+    return KeyStore(lambda: parse_secret(secret))
 
 
 def gz(obj) -> bytes:

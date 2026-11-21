@@ -6,16 +6,19 @@ The dashboard's only backend (plan §5, contract in [`dashboard/API.md`](../../d
 
 | Route | Data |
 |---|---|
-| `/api/live` | Devices heard from in the last 60 s (`live_state`), with the last 2 minutes of track and the latest MISC rating. A device is hidden during its trip's first 200 m, and as soon as the trip has ended (its position is then inside the last 200 m). |
-| `/api/sessions`, `/api/sessions/{id}`, `/api/quality` | Built from `sessions`, `track_points` and `labels`. Missing context gets the defaults the dashboard expects. Distance is the length of the track; GPS accuracy, late and duplicate batch counts are filled in. |
+| `/api/live` | Devices heard from in the last 60 s (`live_state`), with the last 2 minutes of track, `roughnessNow`, `msdvSoFar` and the latest MISC rating. A device is hidden during its trip's first 200 m, and as soon as the trip has ended (its position is then inside the last 200 m). |
+| `/api/sessions`, `/api/sessions/{id}`, `/api/quality` | Built from `sessions`, `track_points`, `labels` and `events`. Missing context gets the defaults the dashboard expects. Fills in distance (track length), `msdvZ`/`msiPct`, event counts, GPS accuracy, and late and duplicate batch counts. |
 | `/api/sessions/{id}/track` | 1 Hz track, minus the first 200 m, and minus the last 200 m once the trip has ended (plan §11). |
+| `/api/sessions/{id}/series` | The 5 Hz chart series from the signal processing. |
+| `/api/sessions/{id}/events` | Detected potholes, minus those inside the private first/last 200 m. |
 | `/api/sessions/{id}/labels` | The trip's labels. |
+| `/api/events` | Events of **aggregated** (finalized) trips only, so it stays empty until the finalize job exists. |
 | `/api/overview` | Session counts; everything else is zero and `aggregation.method` is `none`. |
-| `/api/sessions/{id}/series`, `/events`, `/api/segments`, `/api/segments/{h3}`, `/api/events` | Valid but empty: they come with the signal processing and aggregation. `/api/segments/{h3}` answers 404 for a valid cell and 400 for anything else. |
+| `/api/segments`, `/api/segments/{h3}` | Valid but empty until the finalize job and aggregation exist. `/api/segments/{h3}` answers 404 for a valid cell and 400 for anything else. |
 
 Errors are always `{"error": "..."}`: 404 for an unknown session, segment or route, 400 for a bad query parameter (same allowed values as the mock). Times are `2026-11-21T09:12:03.512Z`; epoch milliseconds are integers.
 
-Not computed yet: `validFraction`, `msdvZ`/`msiPct`, per-stream rates, `roughnessNow`, `msdvSoFar`, `detection`. They're `null` (or empty) until the processing step writes them.
+Not computed yet: `validFraction`, per-stream rates, `detection`, speed bumps and rail joints. They're `null` (or empty) until the finalize job and the quality checks write them.
 
 ## Database login
 

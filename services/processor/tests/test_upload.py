@@ -317,3 +317,14 @@ def test_upload_message_without_a_folder_or_container(db, tmp_path):
     assert fz.handle(db, lake, event_grid(), None)[0] == "dead_letter"
     outcome, reason = fz.handle(db, lake, event_grid("nobody"), up.DirUploads(tmp_path / "empty"))
     assert outcome == "dead_letter" and "no _complete.json" in reason
+
+
+@requires_db
+def test_a_failed_parquet_write_does_not_block_the_trip(db, uploaded, tmp_path):
+    class ReadOnlyLake(fz.DirArchive):
+        def write(self, name, data):
+            raise PermissionError("This request is not authorized to perform this operation")
+
+    assert fz.handle(db, ReadOnlyLake(tmp_path / "lake"), event_grid(), uploaded) == ("complete", SID)
+    status, q = _one(db, "SELECT status, quality FROM sessions")
+    assert status == "complete" and q["parquet"] == [] and "not authorized" in q["parquetError"]

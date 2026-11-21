@@ -485,7 +485,13 @@ def finalize_session(conn: Connection, archive: Archive, session_id: str,
     checks = trip_checks(trip, sig, fix_objs)
     events = [e for e in sig.events if not checks.handled_at(e.t)]  # the phone being handled, not the road
     detection, matched = quality.score_detections([(e.t, e.type) for e in events], checks.taps)
-    parquet = write_parquet(archive, trip, sig)  # before the commit: `complete` means the files exist
+    # A secondary output: a failed write must not keep the trip from being finalized (5 failures would
+    # dead-letter it). It's logged and recorded in quality.parquetError; the next finalize writes it.
+    try:
+        parquet, parquet_error = write_parquet(archive, trip, sig), None
+    except Exception as e:  # noqa: BLE001
+        log.exception("Parquet output of %s failed; finalizing without it", session_id)
+        parquet, parquet_error = [], f"{type(e).__name__}: {e}"[:500]
     store = Store(conn)
 
     with conn.transaction():
@@ -561,6 +567,8 @@ def finalize_session(conn: Connection, archive: Archive, session_id: str,
         status, valid, q = assess(trip, sig, expected, fixes, checks.masks)
         q["detection"] = detection
         q["parquet"] = parquet
+        if parquet_error:
+            q["parquetError"] = parquet_error
         missing = q["missingBatches"]
         incomplete = trip.incomplete if trip.incomplete is not None else expected is None or (missing or 0) > 0
         last_t = sig.series[-1].t if sig.series else trip.batches[-1].end_utc.timestamp()

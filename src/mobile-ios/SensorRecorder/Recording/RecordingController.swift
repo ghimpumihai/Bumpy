@@ -24,11 +24,10 @@ struct DashboardSnapshot: Equatable {
     var lateral: [Double] = []
     var roughness: Double = 0
     var msdv: Double = 0
-    var lastSickness: Int?
 }
 
 /// Main-thread view model for the recording dashboard. Refreshes at 8 Hz (spec: 5–10 Hz, never
-/// per sample), evaluates the warning rules, alerts on new problems, drives the sickness prompt.
+/// per sample), evaluates the warning rules, alerts on new problems.
 @MainActor
 @Observable
 final class RecordingController {
@@ -37,16 +36,12 @@ final class RecordingController {
     private(set) var issues: [HealthIssue] = []
     private(set) var overall: HealthLevel = .ok
     private(set) var toast: String?
-    private(set) var sicknessPromptActive = false
-    private(set) var sicknessManualOpen = false
-    private(set) var sicknessRemaining: Int = 0
     private(set) var activeSurface: SurfaceKind?
     private(set) var activeSegments: Set<SegmentKind> = []
     private(set) var finished: SessionMetadata?
     private(set) var trackPoints: [TrackBuffer.Point] = []
 
     @ObservationIgnored private var timer: Timer?
-    @ObservationIgnored private var scheduler: SicknessScheduler
     @ObservationIgnored private var issueTracker = IssueTracker()
     @ObservationIgnored private var toastExpiry: Date?
     @ObservationIgnored private var trackVersion = -1
@@ -59,11 +54,9 @@ final class RecordingController {
     static let levelFloorDbfs = -60.0
     static let dbPerBar = 10.0
 
-    init(session: RecordingSession, sicknessInterval: TimeInterval = 120, sicknessTimeout: TimeInterval = 30,
-         alerter: Alerter? = nil) {
+    init(session: RecordingSession, alerter: Alerter? = nil) {
         self.session = session
         self.alerter = alerter ?? SystemAlerter()
-        scheduler = SicknessScheduler(start: session.startUp, interval: sicknessInterval, timeout: sicknessTimeout)
     }
 
     // MARK: Lifecycle
@@ -84,11 +77,6 @@ final class RecordingController {
         guard finished == nil else { return }
         timer?.invalidate()
         timer = nil
-        if scheduler.isPromptActive {
-            session.addLabel(.sicknessMissed, note: "recording stopped")
-        }
-        sicknessPromptActive = false
-        sicknessManualOpen = false
         finished = session.stop()
         UIApplication.shared.isIdleTimerDisabled = false
         alerter.stopped()
@@ -115,33 +103,6 @@ final class RecordingController {
         confirm(l.type == .segmentStart ? "\(s.shortName) START" : "\(s.shortName) END", at: l.date)
     }
 
-    func openManualSickness() {
-        sicknessManualOpen = true
-    }
-
-    func closeManualSickness() {
-        sicknessManualOpen = false
-    }
-
-    /// The rater declined / the operator needs the screen: logged as missed, never as a rating.
-    func skipSicknessPrompt() {
-        guard sicknessPromptActive else { return }
-        session.addLabel(.sicknessMissed, note: "skipped")
-        scheduler.answered()
-        sicknessPromptActive = false
-        confirm("Sickness prompt skipped", at: Date())
-    }
-
-    func rateSickness(_ value: Int) {
-        let prompted = sicknessPromptActive
-        session.addLabel(.sickness, value: String(value), note: prompted ? "prompt" : "manual")
-        scheduler.answered()
-        sicknessPromptActive = false
-        sicknessManualOpen = false
-        snapshot.lastSickness = value
-        confirm("Sickness \(value) logged", at: Date())
-    }
-
     private func confirm(_ text: String, at date: Date) {
         alerter.labelConfirmed()
         let f = DateFormatter()
@@ -163,22 +124,6 @@ final class RecordingController {
         handleIssueTransitions(newIssues)
         issues = newIssues
         overall = HealthEvaluator.overall(newIssues)
-
-        // Sickness prompt
-        switch scheduler.tick(now: now) {
-        case .prompt:
-            session.addLabel(.sicknessPrompt)
-            sicknessPromptActive = true
-            sicknessManualOpen = false
-            alerter.sicknessPrompt()
-        case .missed:
-            session.addLabel(.sicknessMissed)
-            session.log(.info, "sickness prompt missed")
-            sicknessPromptActive = false
-        case nil:
-            break
-        }
-        sicknessRemaining = Int((scheduler.remaining(now: now) ?? 0).rounded(.up))
 
         if let exp = toastExpiry, Date() > exp { toast = nil; toastExpiry = nil }
 
@@ -204,7 +149,6 @@ final class RecordingController {
     private func buildSnapshot(now: TimeInterval, inputs: HealthInputs) -> DashboardSnapshot {
         var s = DashboardSnapshot()
         s.elapsed = now - session.startUp
-        s.lastSickness = session.labels.lastSickness?.value
         let st = inputs.streams
 
         func fmtRate(_ r: Double) -> String { r >= 10 ? String(format: "%.1f Hz", r) : String(format: "%.2f Hz", r) }
@@ -307,7 +251,6 @@ final class RecordingController {
 protocol Alerter {
     func prepare()
     func labelConfirmed()
-    func sicknessPrompt()
     func newProblem()
     func stopped()
 }
@@ -319,10 +262,6 @@ final class SystemAlerter: Alerter {
 
     func prepare() { haptics.prepare(); impact.prepare() }
     func labelConfirmed() { impact.impactOccurred() }
-    func sicknessPrompt() {
-        haptics.notificationOccurred(.warning)
-        AudioServicesPlaySystemSound(1007)
-    }
     func newProblem() {
         // spec: strong haptic + sound on PROBLEM
         haptics.notificationOccurred(.error)

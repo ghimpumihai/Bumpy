@@ -20,12 +20,12 @@ are in [`decisions/01-initial-plan.md`](../../decisions/01-initial-plan.md) (bac
    killed when the cable or wireless-debug link drops.
 
 On first use the preflight asks for Motion & Fitness, Location (choose **Precise**) and Microphone.
-Turn the ring/silent switch **off silent**, so the sickness-prompt sound is audible (haptics work either way).
+Turn the ring/silent switch **off silent**, so the PROBLEM alert sound is audible (haptics work either way).
 
 ## Using it (operator)
 
 Sessions → **New session** → setup (pre-filled with your last values, plus a mount photo; for
-**bus/tram** also the line number, seat, rater posture, and **audio recording defaults to OFF**) →
+**bus/tram** also the line number, seat, passenger posture, and **audio recording defaults to OFF**) →
 **Preflight** (must be all green; *Override* exists for emergencies and is recorded) →
 **Recording dashboard** → hold **Stop** for 2 s → **Summary** (red rows = gaps > 1 s) →
 **Export**. The full drive protocol is in the app (the **?** button) and in spec §9.
@@ -47,7 +47,7 @@ Sessions → **New session** → setup (pre-filled with your last values, plus a
 | `audio_segments.csv` | `t_up,t_utc_ms,event,file`: start/stop/interrupted/reset per segment; `blocked_background` (empty `file`) when iOS refuses to restart the mic while the app is in the background — the gap lasts until the next `start` |
 | `audio_level.csv` | RMS and peak dBFS at 10 Hz |
 | `device.csv` | battery, thermal, Low Power Mode, free disk, network, every 5 s |
-| `labels.csv` | `t_up,t_utc_ms,type,value,note` (all human labels and sickness ratings) |
+| `labels.csv` | `t_up,t_utc_ms,type,value,note` (all human labels) |
 | `app_log.txt` | warnings, problems, permission state, interruptions, upload rejections (also those after Stop: the file can grow past the size in `session.json` stats) |
 | `mount.jpg` | mount photo |
 
@@ -59,9 +59,10 @@ NaN is written as an empty field. Location keeps iOS's native `-1` for invalid s
 Label `type` values: `pothole`, `speed_bump`, `phone_moved`, `surface_start/surface_end`
 (`cobblestones|rough_asphalt|smooth_asphalt|gravel|tram_rails`, mutually exclusive),
 `segment_start/segment_end` (`winding|roundabout|stop_and_go|highway|idle`, independent),
-`sync_tap`, `note` (text in `note`), `sickness` (value 0–10, note `prompt`|`manual`),
-`sickness_prompt`, `sickness_missed`. Open toggles are closed automatically at Stop
-(note `auto at stop`).
+`sync_tap`, `note` (text in `note`). Open toggles are closed automatically at Stop
+(note `auto at stop`). The MISC rating types `sickness`, `sickness_prompt` and `sickness_missed`
+are no longer written (D47: motion sickness is only the backend's MSDV); folders from older
+builds may still contain them, and `session.json` `stats.sicknessRatings/sicknessMissed` stay as 0.
 
 ### Deliberate deviations from the spec (and why)
 
@@ -195,8 +196,7 @@ SensorRecorder/
               HealthEvaluator (warning rules)
   Sensors/    CoreMotion / synthetic motion, CoreLocation, AVAudioRecorder, device health
   Recording/  RecordingSession (wires everything to disk), RecordingController (8 Hz dashboard),
-              PreflightModel, LiveSignals (plots, roughness, ISO 2631-1 Wf MSDV estimate),
-              SicknessScheduler
+              PreflightModel, LiveSignals (plots, roughness, ISO 2631-1 Wf MSDV estimate)
   Upload/     IngestBatch + accumulator, gzip (Compression + CRC32), disk UploadQueue, settings
   UI/         SwiftUI screens
 ```
@@ -216,10 +216,10 @@ xcodebuild -project SensorRecorder.xcodeproj -scheme SensorRecorder \
 
 - **Unit tests** cover CSV formatting, schemas, the clock math, concurrent writers, periodic flush,
   gap/rate stats, every warning rule, session.json, crash recovery, gzip/CRC, the batch payload
-  shape, every upload-queue rule, the Wf filter response vs ISO values, sickness scheduling, zip
+  shape, every upload-queue rule, the Wf filter response vs ISO values, zip
   export, and a full 3-second recording that checks every file on disk.
 - **UI tests** drive the real app: setup → preflight → dashboard → every label control →
-  periodic and missed sickness prompts → short tap doesn't stop → hold-to-stop → summary →
+  short tap doesn't stop → hold-to-stop → summary →
   session list, plus kill-while-recording → relaunch → RECOVERED.
 - **The Simulator has no motion or barometer hardware.** Motion and barometer show "n/a" there,
   preflight can't be all green (the UI tests use the recorded *override*), GPS comes from

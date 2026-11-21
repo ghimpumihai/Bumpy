@@ -120,7 +120,6 @@ struct HelpView: View {
                 bullet("Stop-and-go traffic (longitudinal sway)")
                 bullet("Some faster road segment if possible")
                 bullet("If possible, drive one rough segment twice at different speeds (e.g. 20 and 40 km/h). This lets us prove the speed normalization works.")
-                bullet("Sickness ratings every 2 min from a rear passenger (the app prompts).")
                 bullet("The operator is a passenger, never the driver.")
             }
             Section("After the drive") {

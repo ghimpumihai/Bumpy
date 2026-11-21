@@ -37,7 +37,7 @@ final class SessionMetadataTests: XCTestCase {
         m.endedAtUtc = "2026-11-21T10:00:00.000Z"
         m.stats = .init(durationSec: 10, streams: ["accel": .init(samples: 1000, meanRateHz: 99.9, maxGapSec: 0.02,
                                                                    gapsOver1s: 0, droppedEstimate: 0, fileBytes: 100)],
-                        labelsCount: 3, sicknessRatings: 1, sicknessMissed: 0, audioFiles: ["audio_000.m4a"],
+                        labelsCount: 3, audioFiles: ["audio_000.m4a"],
                         fileSizes: [:], totalBytes: 100, writeErrors: 0, uploadBatchesCreated: 5)
         let dir = try makeTempDir()
         let url = dir.appendingPathComponent("session.json")
@@ -88,8 +88,7 @@ final class SessionStoreTests: XCTestCase {
         let accel = try XCTUnwrap(r.stats?.streams["accel"])
         XCTAssertEqual(accel.samples, 200)
         XCTAssertEqual(accel.meanRateHz, 100, accuracy: 0.01)
-        XCTAssertEqual(r.stats?.labelsCount, 2)
-        XCTAssertEqual(r.stats?.sicknessRatings, 1)
+        XCTAssertEqual(r.stats?.labelsCount, 2, "rows of the removed sickness type (pre-D47 folders) still count")
 
         let text = try String(contentsOf: crashed.appendingPathComponent("accel_raw.csv"), encoding: .utf8)
         XCTAssertTrue(text.hasSuffix("0.1,0.2,0.3\n"))

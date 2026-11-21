@@ -60,7 +60,7 @@ export const METHOD_SECTIONS = [
     points: [
       "Windows are invalid when “phone moved” was tapped, gravity drifts in the phone frame, or the gyro's turn rate disagrees with GPS.",
       "Only finalized trips count in the map: a trip joins it once the finalize job has processed it. Replays, bad sessions and trips whose context (vehicle, mount) never arrived are left out; hand-held or loose mounts are excluded from roughness.",
-      "Tracks are trimmed near the start and end of every trip; audio is never uploaded live and is off on public transport.",
+      "Tracks are shown whole, start and end included; audio is never uploaded live and is off on public transport.",
     ],
   },
 ] as const;

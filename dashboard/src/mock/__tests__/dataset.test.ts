@@ -12,7 +12,7 @@ import {
 } from "@/mock/dataset";
 import { aggregate } from "@/mock/aggregate";
 import { handleMockRequest, MockHttpError } from "@/mock/handlers";
-import { PRIVACY_TRIM_M, TRUE_SPEED_EXPONENT } from "@/mock/simulate";
+import { TRUE_SPEED_EXPONENT } from "@/mock/simulate";
 import { getWorld } from "@/mock/world";
 import type { Overview } from "@/types/overview";
 import type { SegmentCollection } from "@/types/segments";
@@ -74,13 +74,14 @@ describe("mock dataset", () => {
     expect(values[Math.floor(values.length / 2)]).toBeLessThan(0.8);
   });
 
-  it("trims the end of a finished trip too (open route, so start and end differ)", () => {
+  it("keeps the end of a finished trip (no privacy trim, D40)", () => {
     const id = "e4c7b2a9-6d1f-4e38-8b0a-3c9e5d2f1b77";
     const sim = getDataset().sims.get(id);
     if (!sim) throw new Error("bus session missing");
     const track = get<SessionTrack>(`/api/sessions/${id}/track`);
     const lastSample: [number, number] = [sim.lon[sim.lon.length - 1], sim.lat[sim.lat.length - 1]];
-    expect(haversineM(lastSample, track.geometry.coordinates.at(-1) as [number, number])).toBeGreaterThan(PRIVACY_TRIM_M * 0.6);
+    // The track is 1 Hz, so its last point is within a second of driving of the last 5 Hz sample.
+    expect(haversineM(lastSample, track.geometry.coordinates.at(-1) as [number, number])).toBeLessThan(20);
   });
 
   it("counts only the events the API publishes", () => {
@@ -109,11 +110,12 @@ describe("mock dataset", () => {
     expect(sessionSummary(sim, end + 10 * 60_000).exclusionReasons).toEqual(["replay"]);
   });
 
-  it("trims the public track at both ends for privacy", () => {
+  it("serves the whole track from where the trip started (no privacy trim, D40)", () => {
     const sim = getDataset().sims.get("3f1c2b9e-0d4a-4e7b-9c51-6a2d8e0f4b11");
     const track = get<SessionTrack>("/api/sessions/3f1c2b9e-0d4a-4e7b-9c51-6a2d8e0f4b11/track");
     const start: [number, number] = [sim?.lon[0] ?? 0, sim?.lat[0] ?? 0];
-    expect(haversineM(start, track.geometry.coordinates[0] as [number, number])).toBeGreaterThan(PRIVACY_TRIM_M * 0.6);
+    expect(haversineM(start, track.geometry.coordinates[0] as [number, number])).toBeLessThan(1);
+    expect(track.properties.trimmedM).toBe(0);
     expect(track.properties.times).toHaveLength(track.geometry.coordinates.length);
     expect(cumulativeDistances(track.geometry.coordinates as [number, number][]).at(-1)).toBeGreaterThan(5000);
   });
@@ -178,17 +180,17 @@ describe("mock dataset", () => {
     expect(empty.segments.size).toBe(0);
   });
 
-  it("never publishes a live position inside the privacy zone at the start of a trip", () => {
+  it("shows a live device right from the start of its trip (no privacy trim, D40)", () => {
     const sim = getDataset().sims.get("aa61f0d4-3b8e-4c5a-9d27-6f1e4b8c0d76");
     if (!sim) throw new Error("live car missing");
     // A moment when the newest processed sample is within the first 200 m.
     const early = sim.startMs + 20_000;
-    expect(sim.s[lastSampleIndex(sim, early)]).toBeLessThan(PRIVACY_TRIM_M);
+    expect(sim.s[lastSampleIndex(sim, early)]).toBeLessThan(200);
     const realNow = Date.now;
     Date.now = () => early;
     try {
       const live = get<{ devices: { sessionId: string }[] }>("/api/live");
-      expect(live.devices.map((d) => d.sessionId)).not.toContain(sim.spec.sessionId);
+      expect(live.devices.map((d) => d.sessionId)).toContain(sim.spec.sessionId);
     } finally {
       Date.now = realNow;
     }
@@ -198,7 +200,7 @@ describe("mock dataset", () => {
     const liveId = "aa61f0d4-3b8e-4c5a-9d27-6f1e4b8c0d76";
     const sim = getDataset().sims.get(liveId);
     if (!sim) throw new Error("live car missing");
-    const passed = sim.observations.find((obs) => !obs.inPrivacyZone && obs.firstSample <= lastSampleIndex(sim));
+    const passed = sim.observations.find((obs) => obs.firstSample <= lastSampleIndex(sim));
     if (!passed) throw new Error("live car has no pass yet");
     const detail = get<{ observations: { sessionId: string; includedInAgg: boolean }[] }>(`/api/segments/${passed.cell}`);
     const own = detail.observations.filter((obs) => obs.sessionId === liveId);

@@ -13,7 +13,6 @@ The method is a port of the dashboard's mock (dashboard/src/mock/aggregate.ts), 
 - Potholes are crowd-confirmed: at least k passes with a detection and a ratio of all passes above
   15 km/h, with thresholds per vehicle type.
 - Sickness is not normalized: a_w RMS weighted by duration, over rigid-mount trips with known context.
-Observations in a trip's first or last 200 m (privacy) never count.
 """
 
 from __future__ import annotations
@@ -224,7 +223,7 @@ def load_observations(conn: Connection) -> list[Obs]:
                COALESCE(NULLIF(s.people->>'raterSeat', ''), 'unknown'),
                COALESCE(NULLIF(s.people->>'raterPosture', ''), 'unknown')
         FROM segment_observations o JOIN sessions s USING (session_id)
-        WHERE s.include_in_agg AND NOT o.in_privacy_zone
+        WHERE s.include_in_agg
         ORDER BY o.session_id, o.pass_idx
         """
     ).fetchall()

@@ -124,8 +124,9 @@ def test_live_trip_end_to_end(client, seed, fixture_batch):
     coords, times = track["geometry"]["coordinates"], track["properties"]["times"]
     assert len(coords) == len(times) == len(track["properties"]["speeds"])
     assert all(isinstance(t, int) for t in times)
-    # Live trip: only the first 200 m are hidden (≈ 4 fixes), the end is still public.
-    assert 15 <= len(coords) <= 16 and coords[-1][1] == pytest.approx(46.77 + 19 * STEP_DEG)
+    # No privacy trim (D40): every accurate fix, from the very first one.
+    assert len(coords) == 20 and coords[0][1] == pytest.approx(46.77)
+    assert coords[-1][1] == pytest.approx(46.77 + 19 * STEP_DEG)
 
     (dev,) = _ok(client, "/api/live")["devices"]
     assert set(dev) == LIVE_DEVICE_KEYS
@@ -145,9 +146,10 @@ def test_live_trip_end_to_end(client, seed, fixture_batch):
     assert ov["sessions"]["total"] == 1 and ov["sessions"]["live"] == 1
 
 
-def test_device_hidden_during_first_200_m(client, seed, fixture_batch):
-    seed(batches=_trip(fixture_batch, 3))  # ≈ 110 m
-    assert _ok(client, "/api/live")["devices"] == []
+def test_device_shown_from_the_start(client, seed, fixture_batch):
+    seed(batches=_trip(fixture_batch, 3))  # ≈ 110 m from where it started
+    (dev,) = _ok(client, "/api/live")["devices"]
+    assert len(dev["track"]) == 3
 
 
 def test_silent_device_drops_off_live_view(client, seed, fixture_batch):
@@ -156,7 +158,7 @@ def test_silent_device_drops_off_live_view(client, seed, fixture_batch):
     assert _ok(client, "/api/live")["devices"] == []
 
 
-def test_ended_trip_trims_both_ends_and_leaves_live_view(client, seed, fixture_batch):
+def test_ended_trip_keeps_its_whole_track_and_stays_on_live_view(client, seed, fixture_batch):
     stop = session_meta(SID, batchCount=20, endedAtUtc="2026-11-21T09:30:00.000Z")
     seed(meta=[session_meta(SID)], batches=_trip(fixture_batch, 20))
     seed(meta=[stop])
@@ -164,8 +166,10 @@ def test_ended_trip_trims_both_ends_and_leaves_live_view(client, seed, fixture_b
     s = _ok(client, f"/api/sessions/{SID}")
     assert s["status"] == "processing" and s["endedAt"] == "2026-11-21T09:30:00.000Z"
     coords = _ok(client, f"/api/sessions/{SID}/track")["geometry"]["coordinates"]
-    assert 11 <= len(coords) <= 13  # ≈ 4 fixes hidden at each end
-    assert _ok(client, "/api/live")["devices"] == []
+    assert len(coords) == 20
+    # Still heard from in the last minute, so still listed, now with its new status.
+    (dev,) = _ok(client, "/api/live")["devices"]
+    assert dev["sessionStatus"] == "processing"
 
 
 def test_filters(client, seed, fixture_batch):
@@ -203,7 +207,7 @@ def test_signal_results_are_served(client, seed, fixture_batch):
     import numpy as np
 
     start = dt.datetime.now(UTC) - dt.timedelta(seconds=60)
-    pothole_at = start.timestamp() + 2 * 15 + 1.0  # batch 15, ≈ 830 m in: outside the privacy zones
+    pothole_at = start.timestamp() + 2 * 15 + 1.0  # batch 15, ≈ 830 m in
 
     def vert(t):
         return 0.8 * np.sin(2 * np.pi * 0.2 * t) + 15.0 * np.exp(-((t - pothole_at) / 0.01) ** 2)

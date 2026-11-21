@@ -22,11 +22,13 @@ interface LiveDeviceCardProps {
   now: number;
   /** The dashboard lost the read API: show when the data is from, without judging the phone. */
   apiUnreachable: boolean;
-  /** Fly the map to this vehicle. */
-  onLocate: () => void;
+  /** The map is following this vehicle. */
+  following: boolean;
+  /** Fly the map to this vehicle and follow it, or stop following it. */
+  onToggleFollow: () => void;
 }
 
-export function LiveDeviceCard({ device, now, apiUnreachable, onLocate }: LiveDeviceCardProps) {
+export function LiveDeviceCard({ device, now, apiUnreachable, following, onToggleFollow }: LiveDeviceCardProps) {
   const freshness = liveFreshness(device, now);
   const metrics = [
     { label: "Speed", value: formatSpeedFromMs(device.speedMs) },
@@ -72,9 +74,11 @@ export function LiveDeviceCard({ device, now, apiUnreachable, onLocate }: LiveDe
           )}
           <button
             type="button"
-            onClick={onLocate}
-            aria-label="Show on map"
-            className="ml-auto rounded-md p-1 text-muted-foreground transition-colors hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+            onClick={onToggleFollow}
+            aria-label="Follow on map"
+            aria-pressed={following}
+            title={following ? "Following on the map: drag the map or click again to stop" : "Follow on the map"}
+            className="ml-auto rounded-md p-1 text-muted-foreground transition-colors hover:text-foreground aria-pressed:bg-primary aria-pressed:text-primary-foreground aria-pressed:hover:text-primary-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
           >
             <Crosshair className="size-4" aria-hidden="true" />
           </button>

@@ -16,12 +16,14 @@ import type { RoadEventCollection } from "@/types/sessions";
 import {
   LIVE_FOCUS_MS,
   LIVE_FOCUS_ZOOM,
+  LIVE_FRAME_MS,
   LIVE_PING_GROWTH_PX,
   LIVE_PING_MS,
   LIVE_TRACK_GLOW_PX,
   LIVE_TRACK_WIDTH_PX,
   LIVE_TRACKS_SOURCE_ID,
 } from "../utils/constants";
+import { followCenter, isPanKey } from "../utils/follow";
 import { EMPTY_PINGS, livePings, liveTrails, type LivePing } from "../utils/geojson";
 import { mergeTail } from "../utils/tail";
 import { useLiveAnimation } from "../utils/use-live-animation";
@@ -90,18 +92,71 @@ function VehicleMarkers({ positions, stale }: { positions: Record<string, Positi
   return null;
 }
 
-/** Glides the camera to the vehicle whose card was picked: out a little, then in, like switching character. */
-function FocusCamera({ device, nonce }: { device: LiveDevice | undefined; nonce: number }) {
+/**
+ * Glides the camera to the vehicle whose card was picked (out a little, then in, like switching character), then keeps
+ * it centred on the marker as it drives, until the user pans, rotates or tilts the map. Zooming keeps following,
+ * around the vehicle.
+ */
+function FollowCamera({ position, nonce, now, onStop }: { position: Position | undefined; nonce: number; now: number; onStop: () => void }) {
   const map = useMapState()?.map ?? null;
-  const target = useRef(device);
+  const following = position !== undefined;
+  const target = useRef(position);
+  const stop = useRef(onStop);
+  const lastStep = useRef<number | null>(null);
   useEffect(() => {
-    target.current = device;
+    target.current = position;
+    stop.current = onStop;
   });
+
   useEffect(() => {
-    const device = target.current;
-    if (!map || nonce === 0 || !device) return;
-    map.flyTo({ center: [device.lon, device.lat], zoom: Math.max(map.getZoom(), LIVE_FOCUS_ZOOM), duration: LIVE_FOCUS_MS, curve: 1.2, essential: false });
+    const position = target.current;
+    if (!map || nonce === 0 || !position) return;
+    map.flyTo({ center: position, zoom: Math.max(map.getZoom(), LIVE_FOCUS_ZOOM), duration: LIVE_FOCUS_MS, curve: 1.2, essential: false });
   }, [map, nonce]);
+
+  // The camera goes back to the user as soon as they move the map themselves.
+  useEffect(() => {
+    if (!map || !following) return;
+    const release = () => stop.current();
+    const onPitch = (event: { originalEvent?: unknown }) => {
+      if (event.originalEvent) release();
+    };
+    const onMove = (event: { originalEvent?: unknown }) => {
+      if (isPanKey(event.originalEvent)) release();
+    };
+    map.on("dragstart", release);
+    map.on("rotatestart", release);
+    map.on("pitchstart", onPitch);
+    map.on("movestart", onMove);
+    // Wheel and pinch zoom around the vehicle instead of the pointer, so it stays in the middle.
+    map.scrollZoom.enable({ around: "center" });
+    map.touchZoomRotate.enable({ around: "center" });
+    return () => {
+      map.off("dragstart", release);
+      map.off("rotatestart", release);
+      map.off("pitchstart", onPitch);
+      map.off("movestart", onMove);
+      // The map may already be destroyed when the whole canvas unmounts.
+      if (!map.style) return;
+      map.scrollZoom.enable();
+      map.touchZoomRotate.enable();
+    };
+  }, [map, following]);
+
+  // Every animation frame: towards the marker, unless the camera is busy (the glide in, a zoom in progress).
+  useEffect(() => {
+    if (!map || !position) {
+      lastStep.current = null;
+      return;
+    }
+    const elapsedMs = lastStep.current === null ? LIVE_FRAME_MS : now - lastStep.current;
+    lastStep.current = now;
+    if (map.isMoving()) return;
+    const center = map.getCenter();
+    const here = map.project(center);
+    const there = map.project(position);
+    map.jumpTo({ center: followCenter([center.lng, center.lat], position, elapsedMs, Math.hypot(there.x - here.x, there.y - here.y)) });
+  });
   return null;
 }
 
@@ -109,11 +164,13 @@ interface LiveMapProps {
   devices: LiveDevice[];
   /** Trips whose phone has gone quiet: their marker dims and stops breathing. */
   stale: ReadonlySet<string>;
-  /** The vehicle to fly to, and a counter that changes each time one is picked. */
+  /** The vehicle the camera follows (none: the user drives the camera), and a counter that changes each time one is picked. */
   focus: { sessionId: string | undefined; nonce: number };
+  /** The user moved the map, which ends following. */
+  onUnfollow: () => void;
 }
 
-export function LiveMap({ devices, stale, focus }: LiveMapProps) {
+export function LiveMap({ devices, stale, focus, onUnfollow }: LiveMapProps) {
   const [pings, setPings] = useState<LivePing[]>([]);
   const addPings = (events: RoadEventCollection) => {
     const startedAt = performance.now();
@@ -137,6 +194,7 @@ export function LiveMap({ devices, stale, focus }: LiveMapProps) {
   const bounds = boundsOf(points);
   // Re-fit only when the set of devices changes, so the map doesn't jump on every 2 s poll.
   const boundsKey = devices.map((device) => device.deviceId).sort().join(",");
+  const followed = focus.sessionId === undefined ? undefined : positions[focus.sessionId];
 
   // Same look as the heat map: a thin line in the ramp with a soft glow.
   const trackLayers: SourceLayer[] = [
@@ -167,14 +225,22 @@ export function LiveMap({ devices, stale, focus }: LiveMapProps) {
     },
   ];
   return (
-    <MapCanvas styleUrl={MAP_STYLE_DARK_URL} ariaLabel="Live positions of the phones that are streaming" className="absolute inset-0" bounds={bounds} boundsKey={bounds ? boundsKey : undefined}>
+    <MapCanvas
+      styleUrl={MAP_STYLE_DARK_URL}
+      ariaLabel="Live positions of the phones that are streaming"
+      className="absolute inset-0"
+      bounds={bounds}
+      boundsKey={bounds ? boundsKey : undefined}
+      // A phone starting or stopping must not pull the camera off the one being followed.
+      autoFit={followed === undefined}
+    >
       <GeoJsonLayer id={LIVE_TRACKS_SOURCE_ID} data={liveTrails(trails)} layers={trackLayers} />
       {devices.map((device) => (
         <LiveEvents key={device.sessionId} device={device} onDetect={addPings} />
       ))}
       <GeoJsonLayer id={PING_SOURCE_ID} data={pings.length === 0 ? EMPTY_PINGS : livePings(pings, now, LIVE_PING_MS)} layers={pingLayers} />
       <VehicleMarkers positions={positions} stale={stale} />
-      <FocusCamera device={devices.find((device) => device.sessionId === focus.sessionId)} nonce={focus.nonce} />
+      <FollowCamera position={followed} nonce={focus.nonce} now={now} onStop={onUnfollow} />
     </MapCanvas>
   );
 }

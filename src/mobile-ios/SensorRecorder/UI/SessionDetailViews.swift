@@ -18,6 +18,7 @@ struct SessionSummaryView: View {
                     .font(.subheadline.weight(.semibold))
             }
             SessionStatsSections(metadata: metadata, folder: folder)
+            // Counts only once a share activity completed: a cancelled sheet is not an export.
             ExportSection(folder: folder, sessionId: metadata.sessionId, onExported: { exported = true })
         }
         .navigationTitle("Session summary")
@@ -222,11 +223,10 @@ private struct FilesSection: View {
 struct ExportSection: View {
     let folder: URL
     let sessionId: String?
+    /// Called when a share activity completed (not when the zip is merely built).
     var onExported: () -> Void = {}
     @Environment(AppModel.self) private var app
-    @State private var exporting = false
-    @State private var lastExport: (name: String, bytes: Int64)?
-    @State private var error: String?
+    @State private var exportState: ExportState = .idle
     @State private var queued = 0
 
     var body: some View {
@@ -236,11 +236,11 @@ struct ExportSection: View {
             } label: {
                 HStack {
                     Label("Export session (zip)", systemImage: "square.and.arrow.up")
-                    if exporting { Spacer(); ProgressView() }
+                    if exportState.isBusy { Spacer(); ProgressView() }
                 }
                 .font(.headline)
             }
-            .disabled(exporting)
+            .disabled(exportState.isBusy)
             .accessibilityIdentifier("exportButton")
 
             Button {
@@ -259,14 +259,7 @@ struct ExportSection: View {
                 }
                 .disabled(!AppSettings.uploadConfig.isEnabled)
             }
-            if let lastExport {
-                Label("Ready: \(lastExport.name) · \(ByteFormat.string(lastExport.bytes))", systemImage: "checkmark.seal.fill")
-                    .font(.footnote)
-                    .foregroundStyle(Theme.ok)
-                    .accessibilityElement(children: .combine) // one element, not icon + text
-                    .accessibilityIdentifier("exportResult")
-            }
-            if let error { Text(error).foregroundStyle(Theme.problem).font(.footnote) }
+            exportStatus
             if AppSettings.uploadConfig.isEnabled {
                 let st = app.uploadQueue.status
                 LabeledContent("Upload status",
@@ -286,22 +279,58 @@ struct ExportSection: View {
         }
     }
 
+    @ViewBuilder private var exportStatus: some View {
+        switch exportState {
+        case .idle, .zipping:
+            EmptyView()
+        case let .sharing(name, bytes, error):
+            exportResultLabel("Ready: \(name) · \(ByteFormat.string(bytes))", icon: "checkmark.seal.fill", color: Theme.ok)
+            if let error { Text("Last attempt failed: \(error)").foregroundStyle(Theme.problem).font(.footnote) }
+        case let .exported(name, bytes):
+            exportResultLabel("Exported: \(name) · \(ByteFormat.string(bytes))", icon: "checkmark.seal.fill", color: Theme.ok)
+        case let .cancelled(name, _):
+            exportResultLabel("Not exported: share cancelled (\(name))", icon: "exclamationmark.triangle.fill", color: Theme.warn)
+        case let .failed(message):
+            Text(message).foregroundStyle(Theme.problem).font(.footnote)
+        }
+    }
+
+    private func exportResultLabel(_ text: String, icon: String, color: Color) -> some View {
+        Label(text, systemImage: icon)
+            .font(.footnote)
+            .foregroundStyle(color)
+            .accessibilityElement(children: .combine) // one element, not icon + text
+            .accessibilityIdentifier("exportResult")
+    }
+
     private func export() {
-        exporting = true
-        error = nil
+        exportState = .zipping
         let folder = self.folder
         Task.detached(priority: .userInitiated) {
-            let result = Result { try FolderZipper.zip(folder) }
+            let result = Result { () throws -> (URL, Int64) in
+                let url = try FolderZipper.zip(folder)
+                return (url, FileManager.default.fileSize(url))
+            }
             await MainActor.run {
-                exporting = false
                 switch result {
-                case .success(let url):
-                    lastExport = (url.lastPathComponent, FileManager.default.fileSize(url))
-                    onExported()
-                    SharePresenter.share(url)
-                case .failure(let e): error = "Export failed: \(e.localizedDescription)"
+                case let .success((url, bytes)):
+                    exportState = .sharing(name: url.lastPathComponent, bytes: bytes)
+                    SharePresenter.share(url) { completed, activity, error in
+                        shareFinished(zip: url, completed: completed, activity: activity, error: error)
+                    }
+                case .failure(let e):
+                    exportState = .failed("Export failed: \(e.localizedDescription)")
                 }
             }
+        }
+    }
+
+    private func shareFinished(zip: URL, completed: Bool, activity: String?, error: String?) {
+        let (next, sheetClosed) = exportState.shareFinished(completed: completed, activity: activity, error: error)
+        exportState = next
+        if case .exported = next { onExported() }
+        if sheetClosed {
+            Task.detached(priority: .utility) { FolderZipper.removeExport(zip) }
         }
     }
 
@@ -320,15 +349,26 @@ struct ExportSection: View {
 /// within the recording `fullScreenCover`, that presentation tore down the cover (seen in the
 /// end-to-end run: the summary vanished and the app fell back to Preflight).
 enum SharePresenter {
+    /// `completion(completed, activityType, error)` runs on the main thread each time an activity
+    /// ends, and once with `activityType == nil` when the sheet is dismissed without one.
     @MainActor
-    static func share(_ url: URL) {
+    static func share(_ url: URL, completion: @escaping @MainActor (Bool, String?, String?) -> Void) {
         let scenes = UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }
         let scene = scenes.first { $0.activationState == .foregroundActive } ?? scenes.first
-        guard let root = scene?.keyWindow?.rootViewController ?? scene?.windows.first?.rootViewController else { return }
+        guard let root = scene?.keyWindow?.rootViewController ?? scene?.windows.first?.rootViewController else {
+            completion(false, nil, "no window to present the share sheet")
+            return
+        }
         var top = root
         while let next = top.presentedViewController, !next.isBeingDismissed { top = next }
         let vc = UIActivityViewController(activityItems: [url], applicationActivities: nil)
         vc.popoverPresentationController?.sourceView = top.view
+        vc.completionWithItemsHandler = { activity, completed, _, error in
+            let activityName = activity?.rawValue, message = error?.localizedDescription
+            DispatchQueue.main.async {
+                MainActor.assumeIsolated { completion(completed, activityName, message) }
+            }
+        }
         top.present(vc, animated: true)
     }
 }

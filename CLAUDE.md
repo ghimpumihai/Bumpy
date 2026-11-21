@@ -12,7 +12,7 @@ Additive fields may land one side at a time; a breaking change updates every sid
 ## Never
 - Commit secrets, device keys or a `.env`. Device keys go into Key Vault with `infra/scripts/add-device-key.ps1`.
 - On Azure, use password or key logins. Services use Entra managed identities; the Event Hubs key fallback (`eventhub_local_auth_enabled`) needs the user's OK.
-- Change Azure outside Terraform, except image and code deploys done by the workflows and device keys added by the script. Never run `terraform apply/destroy`, a deploy workflow or a state-changing `az` command without the user's OK. Merging to `main` deploys ingest and services, so it needs the same OK.
+- Change Azure outside Terraform, except image and code deploys done by the workflows and device keys added by the script. Never run `terraform apply/destroy`, a deploy workflow or a state-changing `az` command without the user's OK. Merging to `main` deploys ingest and services, so it needs the same OK. PRs target `staging` (the default branch, tests only, no deploys); `main` only receives `staging` → `main` release PRs.
 - Count replays (`source=replay`) in aggregates, upload raw audio, or return GPS without the 200 m start/end trim.
 
 ## Data safety

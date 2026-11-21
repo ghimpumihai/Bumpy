@@ -137,6 +137,47 @@ def test_gap_resets_filters_but_keeps_the_dose():
     assert out.reset and p.dose > dose
 
 
+def _with_hole(seconds, start, length, **kw):
+    """synth() with the samples of [start, start + length) s removed (a CoreMotion stall)."""
+    t, ua, grav, fixes = synth(seconds, **kw)
+    m = ~((t >= T0 + start) & (t < T0 + start + length))
+    return t[m], ua[m], grav[m], fixes
+
+
+def test_hole_inside_a_batch_resets_and_is_not_bridged():
+    hole = (3.0, 0.6)  # a 0.6 s stall in the middle of one feed
+    t, ua, grav, fixes = _with_hole(6, *hole, vert=lambda t: np.sin(2 * np.pi * 5 * t))
+    out, p = run_whole(t, ua, grav, fixes)
+    assert out.reset
+    lo, hi = T0 + hole[0], T0 + hole[0] + hole[1]
+    # The 5 Hz series lands on grid points: none of them may lie inside the hole (interpolated).
+    times = [s.t for s in out.series]
+    assert times and not any(lo < x < hi for x in times)
+    assert all(b > a for a, b in zip(times, times[1:]))
+
+
+def test_hole_inside_a_batch_equals_a_hole_between_batches():
+    t, ua, grav, fixes = _with_hole(8, 3.0, 0.6, vert=lambda t: np.sin(2 * np.pi * 5 * t))
+    whole, _ = run_whole(t, ua, grav, fixes)
+
+    cut = int(np.searchsorted(t, T0 + 3.0))  # the first sample after the hole starts a new batch
+    p = dsp.Pipeline()
+    a = p.feed(t[:cut], ua[:cut], grav[:cut], [f for f in fixes if f[0] < t[cut]])
+    p = dsp.Pipeline(json.loads(json.dumps(p.to_state())))
+    b = p.feed(t[cut:], ua[cut:], grav[cut:], [f for f in fixes if f[0] >= t[cut]])
+    assert b.reset
+    split = a.series + b.series
+    assert [round(s.t, 9) for s in split] == [round(s.t, 9) for s in whole.series]
+    assert [s.a_vert for s in split] == pytest.approx([s.a_vert for s in whole.series], abs=1e-9)
+    assert b.msdv == pytest.approx(whole.msdv, rel=1e-9)
+
+
+def test_jitter_below_the_gap_threshold_does_not_reset():
+    t, ua, grav, fixes = _with_hole(4, 2.0, dsp.MAX_GAP_S / 2)
+    out, _ = run_whole(t, ua, grav, fixes)
+    assert not out.reset
+
+
 def test_forward_axis_learned_from_speed_changes():
     # Accelerate and brake every 10 s: dv/dt and the longitudinal acceleration agree.
     lon = lambda t: 1.5 * np.sign(np.sin(2 * np.pi * t / 20))  # noqa: E731

@@ -3,3 +3,5 @@ uvicorn[standard]>=0.32,<1
 psycopg[binary]>=3.2,<4
 psycopg-pool>=3.2,<4
 azure-identity>=1.19,<2
+# Application Insights (only configured when APPLICATIONINSIGHTS_CONNECTION_STRING is set)
+azure-monitor-opentelemetry==1.8.12

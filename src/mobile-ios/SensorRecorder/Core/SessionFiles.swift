@@ -127,15 +127,19 @@ final class BufferedFileWriter: @unchecked Sendable {
     private let closedFlag = Locked(false)
     private(set) var droppedAfterClose = Locked(0)
 
-    func append(line: String) {
-        guard !closedFlag.current else {
-            droppedAfterClose.withLock { $0 += 1 }
-            return
+    /// - Returns: false if the writer is already closed (the line is counted, not written).
+    /// The closed check happens under the `pending` lock that `close()` also takes, so a line is
+    /// either part of the final flush or refused — never left in a buffer nobody flushes.
+    @discardableResult
+    func append(line: String) -> Bool {
+        let accepted = pending.withLock { buf -> Bool in
+            guard !closedFlag.current else { return false }
+            buf.append(line)
+            buf.append("\n")
+            return true
         }
-        pending.withLock {
-            $0.append(line)
-            $0.append("\n")
-        }
+        if !accepted { droppedAfterClose.withLock { $0 += 1 } }
+        return accepted
     }
 
     /// Bytes on disk so far (excluding what is still buffered).
@@ -193,7 +197,7 @@ final class BufferedFileWriter: @unchecked Sendable {
 
     func close() throws {
         guard !closed else { return }
-        closedFlag.withLock { $0 = true }
+        pending.withLock { _ in closedFlag.withLock { $0 = true } } // same lock order as append()
         defer { closed = true; try? handle.close() }
         try flush()
         try handle.synchronize()
@@ -241,16 +245,42 @@ final class SessionWriter: @unchecked Sendable {
     }
 
     /// Timestamped line in `app_log.txt`, mirrored to the unified log.
+    ///
+    /// After `close()` the line is still appended (spec §4: app_log.txt holds upload failures, and
+    /// the final batches and the Stop metadata upload after Stop). Late lines are rare, so each one
+    /// opens the file in append mode on the writer queue (keeps the order) instead of keeping a
+    /// buffered writer and its flush timer alive. `session.json` stats are a snapshot taken at Stop,
+    /// so its `app_log.txt` size may be smaller than the file; recovery never touches a session with
+    /// `endedAtUtc`, and app_log.txt is not a CSV, so no integrity check depends on it.
     func log(_ level: LogLevel, _ message: String) {
         let up = uptime()
         let line = "\(ISO8601.string(Date())) t_up=\(CSV.f6(up)) [\(level.rawValue)] \(message)"
-        logWriter.append(line: line)
+        if !logWriter.append(line: line) {
+            let url = logWriter.url
+            queue.async { Self.appendLateLine(line, to: url) }
+        }
         switch level {
         case .error, .problem: appLogger.error("\(message, privacy: .public)")
         case .warn: appLogger.warning("\(message, privacy: .public)")
         default: appLogger.info("\(message, privacy: .public)")
         }
     }
+
+    /// Appends to an existing file only: if the session folder was deleted meanwhile, nothing is
+    /// recreated (the line is still in the unified log).
+    private static func appendLateLine(_ line: String, to url: URL) {
+        do {
+            let h = try FileHandle(forWritingTo: url)
+            defer { try? h.close() }
+            try h.seekToEnd()
+            try h.write(contentsOf: Data((line + "\n").utf8))
+        } catch {
+            appLogger.error("late app_log line not written: \(error.localizedDescription, privacy: .public)")
+        }
+    }
+
+    /// Waits until every late log line queued so far is on disk (used by tests).
+    func drainLateLog() { queue.sync {} }
 
     var writeErrors: (count: Int, last: String?, lastAtUp: TimeInterval?) { errorState.current }
 

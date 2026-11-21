@@ -75,3 +75,71 @@ def test_unknown_keys_cannot_hammer_key_vault():
 ])
 def test_may_send_as(names, device_id, ok):
     assert may_send_as(names, device_id) is ok
+
+
+def test_renamed_key_gets_its_new_binding_on_the_next_mismatch():
+    # add-device-key.ps1 -RenameFrom keeps the hash, so a known key must reload when its binding fails.
+    stored = {hash_key("k"): {"iphone-mihai"}}
+    clock = Clock()
+    store = KeyStore(lambda: dict(stored), min_reload_s=60, clock=clock)
+    assert store.identify("k") == {"iphone-mihai"}
+    stored[hash_key("k")] = {"8C3F1A2B-0000-4000-8000-000000000001"}
+    clock.t = 30
+    assert store.identify("k", refresh=True) == {"iphone-mihai"}  # rate-limited
+    clock.t = 61
+    assert store.identify("k", refresh=True) == {"8C3F1A2B-0000-4000-8000-000000000001"}
+
+
+def test_revoked_key_stops_working_without_a_restart():
+    stored = {hash_key("k"): {"PHONE-1"}}
+    clock = Clock()
+    store = KeyStore(lambda: dict(stored), min_reload_s=60, max_age_s=300, clock=clock)
+    assert store.check("k")
+    del stored[hash_key("k")]
+    clock.t = 299
+    assert store.check("k")  # still cached
+    clock.t = 301
+    assert not store.check("k")
+
+
+def test_periodic_reload_failure_keeps_the_cached_keys_and_retries_later():
+    loads = []
+    state = {"fail": False}
+
+    def loader():
+        loads.append(1)
+        if state["fail"]:
+            raise RuntimeError("vault blip")
+        return {hash_key("k"): {"PHONE-1"}}
+
+    clock = Clock()
+    store = KeyStore(loader, min_reload_s=60, max_age_s=300, clock=clock)
+    assert store.check("k")
+    state["fail"] = True
+    clock.t = 301
+    for _ in range(50):
+        assert store.identify("k") == {"PHONE-1"}  # served from the cache, no 503
+    assert len(loads) == 2  # one failed attempt, not one per request
+    state["fail"] = False
+    clock.t = 362
+    assert store.check("k") and len(loads) == 3
+
+
+def test_failed_reload_for_an_unknown_key_or_a_mismatch_raises():
+    state = {"fail": False}
+
+    def loader():
+        if state["fail"]:
+            raise RuntimeError("vault down")
+        return {hash_key("k"): {"PHONE-1"}}
+
+    clock = Clock()
+    store = KeyStore(loader, min_reload_s=60, clock=clock)
+    assert store.check("k")
+    state["fail"] = True
+    clock.t = 61
+    with pytest.raises(RuntimeError):  # the handler answers 503, so the app retries
+        store.identify("unknown")
+    clock.t = 122
+    with pytest.raises(RuntimeError):
+        store.identify("k", refresh=True)

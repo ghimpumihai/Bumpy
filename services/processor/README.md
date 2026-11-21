@@ -42,7 +42,7 @@ The pipeline keeps all its memory in a JSON state saved in `signal_state`, in th
 It runs on the phone's **uptime clock** (`t0Up + t`), which only moves forward during a recording. Each batch's UTC time comes from the app's latest clock anchor, which is refreshed periodically, so consecutive batches can overlap by a few milliseconds in UTC. Results are converted to UTC with each batch's own offset. Samples that overlap the previous batch are dropped rather than interleaved.
 
 - **Late batches** skip the signal processing.
-- **A missing batch or a time gap** restarts the filters (counted in `signal_state.gaps`) and keeps the dose.
+- **A missing batch or a time gap** restarts the filters (counted in `signal_state.gaps`) and keeps the dose. A gap is a hole of more than 0.25 s in the motion samples, between two batches or inside one (CoreMotion can stall for a moment): the samples on each side are never interpolated across it.
 
 Each series window also carries the RMS of the band-passed vertical and its share of the dose (`rough_rms`, `dose_inc`); they aren't stored in `session_series`, but the finalize job builds segment passes from them.
 

@@ -77,7 +77,7 @@ Everything it writes is replaced per trip, so a repeated message is harmless. A 
 - replaces the trip's track points and labels (a live label's time can differ from the CSV's by a millisecond);
 - keeps `source = live` if part of it streamed, else gets `source = upload`;
 - has no batch count, so `incomplete` means the app crashed or never wrote `endedAtUtc`;
-- gets per-stream quality for the extra CSVs too (accelerometer, gyro, magnetometer, barometer, audio level).
+- gets per-stream quality for the extra CSVs too (accelerometer, gyro, magnetometer, barometer).
 
 Its CSVs are read with pyarrow, streamed in blocks, with a forgiving fallback for unparseable values; torn last lines are dropped. A 3-hour trip needs about 0.6 GB.
 

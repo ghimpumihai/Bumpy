@@ -53,7 +53,7 @@ def phone_batches(step_ms=0.0, seconds=120, fix_latency=0.1, sid="S", device="D"
             "deviceMotion": {"t": [round(x - start, 6) for x in t_up[m]], "ua_x": z, "ua_y": z,
                              "ua_z": list(vert[m] / 9.80665), "g_x": z, "g_y": z, "g_z": [-1.0] * len(z),
                              "rr_x": z, "rr_y": z, "rr_z": z},
-            "accelRaw": {"t": []}, "gyroRaw": {"t": []}, "altimeter": {"t": []}, "audioLevel": {"t": []},
+            "accelRaw": {"t": []}, "gyroRaw": {"t": []}, "altimeter": {"t": []},
             "location": [{"tUtcMs": int(round(float(_wall_ms(ft, step_ms)))), "lat": 46.77 + i * 1e-4,
                           "lon": 23.6, "speed": float(v), "course": 0.0, "hAcc": 5.0}
                          for i, (ft, v) in enumerate(zip(fix_t[f], fix_v[f]))],

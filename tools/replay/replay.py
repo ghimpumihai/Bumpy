@@ -58,7 +58,6 @@ FIELD_UNITS = {  # IngestBatch.allFieldUnits
     "location.alt": "m", "location.hAcc": "m", "location.speed": "m/s (-1 = invalid)",
     "location.speedAcc": "m/s", "location.course": "deg (-1 = invalid)",
     "altimeter.relAltM": "m", "altimeter.pressureKpa": "kPa",
-    "audioLevel.avgDbfs": "dBFS", "audioLevel.peakDbfs": "dBFS",
     "device.battery": "fraction 0-1 (-1 = unknown)",
 }
 
@@ -70,7 +69,6 @@ COLUMNAR = {
     "accelRaw": ("accel_raw", [("x", "x"), ("y", "y"), ("z", "z")]),
     "gyroRaw": ("gyro_raw", [("x", "x"), ("y", "y"), ("z", "z")]),
     "altimeter": ("altimeter", [("relAltM", "rel_alt_m"), ("pressureKpa", "pressure_kpa")]),
-    "audioLevel": ("audio_level", [("avgDbfs", "avg_dbfs"), ("peakDbfs", "peak_dbfs")]),
 }
 LOCATION_COLS = [("lat", "lat", 8), ("lon", "lon", 8), ("alt", "alt", 6), ("hAcc", "h_acc", 6),
                  ("speed", "speed", 6), ("speedAcc", "speed_acc", 6), ("course", "course", 6)]

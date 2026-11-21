@@ -62,7 +62,6 @@ export const STREAM_LABELS: Record<string, string> = {
   mag_raw: "Magnetometer",
   location: "GPS",
   altimeter: "Barometer",
-  audio_level: "Audio level",
   device: "Device health",
 };
 

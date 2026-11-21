@@ -409,7 +409,7 @@ Raw values are always stored as measured; normalization happens only in the aggr
 - **A rigid mount is required for roughness.** Tape or clamp the phone; run the stillness preflight. Sessions with `mount.rigid = false` or `handheld = true` are excluded from roughness and marked "experimental" for sickness.
 - **Buses.** Frequent stops, door cycles, kneeling and idling engines are separated using speed near zero and the activity data.
 - **Trams.** Rail joints cause regular, repeating impacts. They are labelled as rail joints so they don't count as potholes.
-- **Audio is off on public transport** (other passengers, GDPR).
+- **No audio** (D48): the backend ignores the sound level, and the app stops recording audio.
 - **Only finalized trips count in aggregates.** A trip still recording, or one whose context (vehicle, mount) never arrived, shows on the live view but not in the aggregated map. Replays never count.
 - A **data-quality panel** on the dashboard shows per session: sample rates, gaps, GPS accuracy, valid fraction and rejected batches.
 
@@ -426,7 +426,7 @@ Raw values are always stored as measured; normalization happens only in the aggr
 | Permissions | One managed identity per service, least privilege; key-based access off on Storage, Event Hubs and Service Bus |
 | CI/CD credentials | GitHub OIDC with federated credentials; no stored Azure secrets; deploy identity usable only from the protected `prod` environment |
 | Secrets in the repo | None; gitleaks scans every push |
-| Privacy | Raw audio never uploaded live; audio off on public transport; GPS shown whole, start and end included (D40: the start/end trim hid every short test drive and isn't wanted; everyone recording accepts that their routes are visible to anyone with the dashboard link) |
+| Privacy | No audio (D48); GPS shown whole, start and end included (D40: the start/end trim hid every short test drive and isn't wanted; everyone recording accepts that their routes are visible to anyone with the dashboard link) |
 
 ---
 

@@ -107,7 +107,6 @@ def session_meta(session_id: str, *, device_id: str = "PHONE-1", vehicle: str = 
     m = {
         "sessionId": session_id, "deviceId": device_id, "startedAtUtc": "2026-11-21T09:00:00.000Z",
         "startUptimeSec": 10.0, "endedAtUtc": None, "recovered": False, "syntheticSensors": False,
-        "audioEnabled": False,
         "vehicle": {"type": vehicle, "makeModel": "Solaris Urbino 12", "line": "24", "notes": ""},
         "mount": {"location": "dash", "phoneOrientation": "flat", "rigid": True, "handheld": False},
         "people": {"operatorSeat": "front", "raterSeat": "rear left", "raterPosture": "seated",

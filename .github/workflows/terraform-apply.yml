@@ -36,6 +36,8 @@ env:
 
 jobs:
   apply:
+    # Like the deploys: production changes only from main, never from staging or a feature branch.
+    if: github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     environment: prod
     env:

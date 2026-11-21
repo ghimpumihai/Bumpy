@@ -11,6 +11,7 @@ import numpy as np
 from psycopg import Connection
 from psycopg.types.json import Jsonb
 
+from . import clock
 from .db import is_connection_loss, is_retryable_conflict
 from .dsp import Pipeline
 from .live import BatchFacts, SessionFacts, exclusion_reasons
@@ -265,13 +266,15 @@ class Store:
         reset = row is not None and f.batch_seq != row[1] + 1
         pipeline = Pipeline(row[0] if row else None)
         # The pipeline runs on the phone's uptime clock; GPS fixes (UTC) are moved onto it and the
-        # outputs back to UTC with this batch's offset.
-        off = f.clock_offset
+        # outputs back to UTC with the trip clock's offset, which never runs backwards (clock.py).
+        trip_clock = clock.TripClock.from_state((row[0] or {}).get("clock") if row else None)
+        off = trip_clock.offset(f.clock_offset)
+        shift = off - f.clock_offset  # derived time − phone time, for looking up the stored fixes
         out = pipeline.feed(
             np.asarray(f.motion_t, dtype=float),
             np.asarray(f.motion_ua, dtype=float).reshape(-1, 3),
             np.asarray(f.motion_g, dtype=float).reshape(-1, 3),
-            [(x.t.timestamp() - off, x.speed_ms) for x in f.fixes],
+            [(clock.fix_uptime(f, x), x.speed_ms) for x in f.fixes],
             reset=reset,
             rr=np.asarray(f.motion_rr, dtype=float).reshape(-1, 3),
         )
@@ -295,7 +298,7 @@ class Store:
                         %s, %s, %s)
                 ON CONFLICT (session_id, type, t) DO NOTHING
                 """,
-                (f.session_id, e.type, from_epoch(e.t), f.session_id, from_epoch(e.t), e.speed,
+                (f.session_id, e.type, from_epoch(e.t), f.session_id, from_epoch(e.t - shift), e.speed,
                  e.magnitude, e.confidence),
             )
         self.conn.execute(
@@ -306,7 +309,8 @@ class Store:
               state = EXCLUDED.state, last_batch_seq = EXCLUDED.last_batch_seq,
               gaps = signal_state.gaps + EXCLUDED.gaps, updated_at = now()
             """,
-            (f.session_id, Jsonb(pipeline.to_state()), f.batch_seq, int(out.reset)),
+            (f.session_id, Jsonb({**pipeline.to_state(), "clock": trip_clock.to_state()}), f.batch_seq,
+             int(out.reset)),
         )
         self.conn.execute("UPDATE sessions SET msdv_z = %s WHERE session_id = %s", (out.msdv, f.session_id))
         return out.roughness_now, out.msdv
@@ -334,7 +338,9 @@ class Store:
               low_power = EXCLUDED.low_power,
               roughness_now = EXCLUDED.roughness_now,
               msdv_so_far = EXCLUDED.msdv_so_far
-            WHERE EXCLUDED.updated_at >= live_state.updated_at
+            -- By arrival, not by the phone's clock: after a backward step the device would stay frozen,
+            -- into its next trip, until the clock caught up.
+            WHERE EXCLUDED.received_at >= live_state.received_at
             """,
             (f.device_id, f.session_id, f.end_utc, received_at,
              fix.t if fix else None, fix.lat if fix else None, fix.lon if fix else None,

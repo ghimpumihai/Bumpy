@@ -41,6 +41,7 @@ class Fix:
     speed_ms: float | None
     course_deg: float | None
     h_acc_m: float | None
+    t_up: float | None = None  # on the uptime clock, when known (the upload's location.csv; clock.py)
 
 
 @dataclass(frozen=True)

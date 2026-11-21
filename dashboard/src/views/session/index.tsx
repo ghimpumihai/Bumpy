@@ -5,7 +5,6 @@ import { QueryState } from "@/components/query-state";
 import { Skeleton } from "@/components/ui/skeleton";
 import { QualityPanel } from "@/features/data-quality/quality-panel";
 
-import { ContextCard } from "./components/context-card";
 import { DetectionCard } from "./components/detection-card";
 import { SessionCharts } from "./components/session-charts";
 import { SessionHeader } from "./components/session-header";
@@ -38,7 +37,6 @@ export function SessionView() {
             <TrackMap session={session} />
             <SessionCharts session={session} />
             <DetectionCard detection={session.detection} />
-            <ContextCard session={session} />
             <QualityPanel quality={session.quality} />
           </>
         )}

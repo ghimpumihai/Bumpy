@@ -95,7 +95,7 @@ SELECT s.session_id, s.source, s.replay_of, s.device_id, s.status, s.incomplete,
        s.include_in_agg, s.exclusion_reasons, s.context_known, s.vehicle_type, s.vehicle_make_model,
        s.vehicle_line, s.mount, s.people, s.audio_enabled, s.synthetic_sensors,
        COALESCE(s.started_at, s.created_at) AS started_at, s.ended_at,
-       s.late_batches, s.duplicate_batches,
+       s.late_batches, s.duplicate_batches, s.msdv_z,
        (SELECT max(b.end_utc) FROM ingest_batches b WHERE b.session_id = s.session_id) AS last_sample_at,
        COALESCE((SELECT ST_Length(ST_MakeLine(tp.geom::geometry ORDER BY tp.t)::geography)
                  FROM track_points tp WHERE tp.session_id = s.session_id), 0) AS distance_m,
@@ -111,8 +111,9 @@ def _merge(defaults: dict, stored) -> dict:
     return out
 
 
-def _summary(r: dict) -> dict:
+def _summary(r: dict, event_counts: dict | None = None) -> dict:
     mount = _merge(MOUNT_DEFAULTS, r["mount"])
+    msdv = rnd(r["msdv_z"], 4)
     roughness_eligible = bool(r["context_known"]) and mount["rigid"] is True and mount["handheld"] is not True
     end = r["ended_at"] or r["last_sample_at"] or r["started_at"]
     return {
@@ -138,9 +139,9 @@ def _summary(r: dict) -> dict:
         "exclusionReasons": list(r["exclusion_reasons"] or []),
         "roughnessEligible": roughness_eligible,
         "sicknessExperimental": not roughness_eligible,
-        "msdvZ": None,  # comes with the signal processing
-        "msiPct": None,
-        "eventCounts": {"pothole": 0, "speed_bump": 0, "rail_joint": 0},
+        "msdvZ": msdv,  # ISO 2631-1 Wf, vertical, so far (live) or whole trip
+        "msiPct": None if msdv is None else round(msdv / 3, 4),  # API.md: MSI % ≈ MSDV / 3
+        "eventCounts": event_counts or {"pothole": 0, "speed_bump": 0, "rail_joint": 0},
         "ratingsCount": int(r["ratings"]),
     }
 
@@ -191,20 +192,33 @@ def _ratings(conn: Connection, session_id: str) -> list[dict]:
     return out
 
 
+def _counts(features: list[dict]) -> dict:
+    counts = {t: 0 for t in EVENT_TYPES}
+    for f in features:
+        counts[f["properties"]["type"]] += 1
+    return counts
+
+
+def _summary_with_counts(conn: Connection, r: dict) -> dict:
+    return _summary(r, _counts(public_events(conn, r)))
+
+
 def session_list(conn: Connection, source: str | None, vehicle: str | None) -> dict:
     sql = SESSION_SQL + " WHERE (%s::text IS NULL OR s.source = %s) AND (%s::text IS NULL OR s.vehicle_type = %s)" \
                         " ORDER BY COALESCE(s.started_at, s.created_at) DESC"
     rows = _rows(conn, sql, (SICKNESS_LABEL, source, source, vehicle, vehicle))
-    return {"sessions": [_summary(r) for r in rows]}
+    return {"sessions": [_summary_with_counts(conn, r) for r in rows]}
 
 
 def session_detail(conn: Connection, session_id: str) -> dict:
     r = _session_row(conn, session_id)
     return {
-        **_summary(r),
+        **_summary_with_counts(conn, r),
         "quality": _quality(conn, r),
         "detection": None,
-        "sickness": {"msdvZ": None, "msiPct": None, "ratings": _ratings(conn, session_id), "spearman": None},
+        "sickness": {"msdvZ": rnd(r["msdv_z"], 4),
+                     "msiPct": None if r["msdv_z"] is None else round(r["msdv_z"] / 3, 4),
+                     "ratings": _ratings(conn, session_id), "spearman": None},
         "processedAt": None,
         "processorVersion": None,
     }
@@ -212,7 +226,7 @@ def session_detail(conn: Connection, session_id: str) -> dict:
 
 def quality_list(conn: Connection) -> dict:
     rows = _rows(conn, SESSION_SQL + " ORDER BY COALESCE(s.started_at, s.created_at) DESC", (SICKNESS_LABEL,))
-    return {"sessions": [{**_summary(r), "quality": _quality(conn, r)} for r in rows]}
+    return {"sessions": [{**_summary_with_counts(conn, r), "quality": _quality(conn, r)} for r in rows]}
 
 
 def session_track(conn: Connection, session_id: str) -> dict:
@@ -239,12 +253,80 @@ def session_labels(conn: Connection, session_id: str) -> dict:
 
 def session_series(conn: Connection, session_id: str) -> dict:
     _session_row(conn, session_id)
-    return {"t": [], "aVert": [], "aLat": [], "aLon": [], "speed": [], "msdv": []}
+    rows = conn.execute(
+        "SELECT t, a_vert, a_lat, a_lon, speed_ms, msdv FROM session_series WHERE session_id = %s ORDER BY t",
+        (session_id,)).fetchall()
+    return {
+        "t": [epoch_ms(t) for t, *_ in rows],
+        "aVert": [rnd(r[1], 4) for r in rows],
+        "aLat": [rnd(r[2], 4) for r in rows],
+        "aLon": [rnd(r[3], 4) for r in rows],
+        "speed": [rnd(r[4], 2) for r in rows],
+        "msdv": [rnd(r[5], 5) for r in rows],
+    }
+
+
+def public_events(conn: Connection, r: dict) -> list[dict]:
+    """The trip's events as GeoJSON features, minus those inside the private first/last 200 m."""
+    rows = conn.execute(
+        """
+        SELECT type, t, ST_X(geom::geometry), ST_Y(geom::geometry), speed_ms, magnitude, confidence,
+               matched_label
+        FROM events WHERE session_id = %s AND geom IS NOT NULL ORDER BY t
+        """, (r["session_id"],)).fetchall()
+    if not rows:
+        return []
+    pts = track_points(conn, r["session_id"])
+    if not pts:
+        return []
+    ended = r["status"] != "live"
+    total = pts[-1].s
+    features = []
+    for etype, t, lon, lat, speed, magnitude, confidence, matched in rows:
+        s = _distance_at(pts, t)
+        if s < PRIVACY_TRIM_M or (ended and s > total - PRIVACY_TRIM_M):
+            continue
+        features.append({
+            "type": "Feature",
+            "geometry": {"type": "Point", "coordinates": [rnd(lon), rnd(lat)]},
+            "properties": {
+                "id": f"{r['session_id']}:{etype}:{epoch_ms(t)}",
+                "sessionId": r["session_id"],
+                "type": etype,
+                "tUtc": iso(t),
+                "speedKmh": None if speed is None else round(speed * 3.6, 1),
+                "magnitude": rnd(magnitude, 3),
+                "confidence": rnd(confidence, 3),
+                "matchedLabel": bool(matched),
+                "vehicleType": r["vehicle_type"] or "unknown",
+            },
+        })
+    return features
+
+
+def _distance_at(pts: list[TrackPoint], t: dt.datetime) -> float:
+    """Distance travelled at time t, from the nearest earlier fix (the first fix if t is before it)."""
+    best = pts[0].s
+    for p in pts:
+        if p.t > t:
+            break
+        best = p.s
+    return best
 
 
 def session_events(conn: Connection, session_id: str) -> dict:
-    _session_row(conn, session_id)
-    return empty_feature_collection()
+    r = _session_row(conn, session_id)
+    return {"type": "FeatureCollection", "features": public_events(conn, r)}
+
+
+def all_events(conn: Connection, vehicle: str | None, etype: str | None) -> dict:
+    """Events of aggregated trips only (API.md), optionally one vehicle type and one event type."""
+    sql = SESSION_SQL + " WHERE s.include_in_agg AND (%s::text IS NULL OR s.vehicle_type = %s)"
+    vt = None if vehicle in (None, "all") else vehicle
+    features = []
+    for r in _rows(conn, sql, (SICKNESS_LABEL, vt, vt)):
+        features += [f for f in public_events(conn, r) if etype is None or f["properties"]["type"] == etype]
+    return {"type": "FeatureCollection", "features": features}
 
 
 # --- Live ---------------------------------------------------------------------------------

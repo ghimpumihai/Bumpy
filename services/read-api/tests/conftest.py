@@ -96,6 +96,7 @@ def make_batch(template: dict, session_id: str, seq: int, start: dt.datetime, la
     t0 = start + dt.timedelta(seconds=2 * seq)
     t0_ms = int(t0.timestamp() * 1000)
     b.update(sessionId=session_id, deviceId=device_id, batchSeq=seq, t0UtcMs=t0_ms,
+             t0Up=5000.0 + 2 * seq,  # phone uptime advances with the batches
              t0Utc=t0.strftime("%Y-%m-%dT%H:%M:%S.") + f"{t0.microsecond // 1000:03d}Z",
              labels=list(labels))
     b["location"] = [dict(b["location"][0], tUtcMs=t0_ms + 500, lat=lat, lon=lon, speed=10.0)]

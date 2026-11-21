@@ -109,6 +109,21 @@ def test_too_large_is_413(batch, keys, sinks):
     assert handle_batch(headers(), json.dumps(batch).encode(), keys, sinks).status == 413
 
 
+def test_lower_limit_from_the_setting(batch, keys, sinks):
+    size = len(json.dumps(batch).encode())
+    assert handle_batch(headers(), gz(batch), keys, sinks, max_inflated=size - 1).status == 413
+    assert handle_batch(headers(), gz(batch), keys, sinks, max_inflated=size).status == 200
+
+
+@pytest.mark.parametrize("setting, limit", [
+    (None, contract.MAX_INFLATED), ("", contract.MAX_INFLATED), ("204800", 204800),
+    ("100000", 100000), ("10000000", contract.MAX_INFLATED_HARD), ("abc", contract.MAX_INFLATED),
+    ("0", contract.MAX_INFLATED), ("-5", contract.MAX_INFLATED),
+])
+def test_inflated_limit_setting(setting, limit):
+    assert contract.inflated_limit(setting) == limit
+
+
 def test_broken_gzip_and_json_are_400(keys, sinks):
     assert handle_batch(headers(), b"\x1f\x8b\x08\x00broken", keys, sinks).status == 400
     assert handle_batch(headers(), gzip.compress(b"{nope"), keys, sinks).status == 400

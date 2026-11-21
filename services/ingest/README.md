@@ -10,6 +10,7 @@ The phone's front door (plan §5, "Azure Functions"). Python 3.12 on Flex Consum
 Every request is checked in the same order as [`mock_ingest_server.py`](../../src/mobile-ios/tools/mock_ingest_server.py), the server the app was built against: device key (401) → Content-Type (400) → gunzip and size (413/400) → JSON (400) → schema and string limits (400) → the key's device (403) → idempotency header (400). The app's connectivity probe `{"probe":true}` gets a 400 that means "reachable, key accepted".
 
 - **Gzip is decided by the magic bytes** `1f 8b`, not by `Content-Encoding`: the Functions host may inflate the body itself and drop the header (plan §5). A body without them is taken as JSON the host already inflated, within the same size limit.
+- **Size:** at most 200 KB decompressed. The app setting `MAX_BODY_BYTES` can lower it; it can't go above 240 KB (an Event Hubs Basic event is at most 256 KB).
 - **Strings:** `deviceId` at most 128 characters, `labels[].type` at most 64, every other string and object key at most 2000; no NUL character or unpaired surrogate anywhere (PostgreSQL text/jsonb can't store them; IDs and label types are in primary keys). The app sends UUIDs, label types of at most 15 characters and short notes.
 
 Then the message:
@@ -39,6 +40,10 @@ deploy.ps1           deploy from a laptop
 A key may only send batches and session metadata whose `deviceId` is the name it is stored under (case-insensitive), so one key can't post as another phone. Otherwise the answer is `403`, which the app retries with backoff, so nothing is lost while a key's name is fixed. For [the replay tool](../../tools/replay/README.md): a key stored as `replay` (or `replay-<anything>`) may send any `replay-…` device ID but never a phone's, and a phone's key may send `replay-<its own ID>`.
 
 To rename an existing entry to the phone's Device ID without issuing a new key: `add-device-key.ps1 -DeviceId <Device ID> -RenameFrom <old name>`.
+
+## Telemetry
+
+Terraform sets `APPLICATIONINSIGHTS_CONNECTION_STRING` (`site_config.application_insights_connection_string`). The Functions host reads it itself: requests, failures and the function's `logging` lines (one per request, with status and reason) go to Application Insights without any SDK in `requirements.txt`. Sampling is set in `host.json` and never drops requests or exceptions.
 
 ## Test and deploy
 

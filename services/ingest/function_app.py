@@ -7,6 +7,10 @@ Settings (set by Terraform, infra/modules/compute):
   EVENTHUB_FULLY_QUALIFIED_NAMESPACE, EVENTHUB_NAME
   STORAGE_BLOB_ENDPOINT, LAKE_CONTAINER
   KEY_VAULT_URI, DEVICE_KEYS_SECRET_NAME
+  MAX_BODY_BYTES                      decompressed body limit; default and upper bound in
+                                      ingest_core/contract.py (200 KB, at most 240 KB)
+  APPLICATIONINSIGHTS_CONNECTION_STRING  read by the Functions host itself: requests, failures and
+                                      the `logging` lines below go to Application Insights
 """
 
 from __future__ import annotations
@@ -23,10 +27,16 @@ from azure.identity import DefaultAzureCredential
 from azure.keyvault.secrets import SecretClient
 from azure.storage.blob import BlobServiceClient, ContentSettings
 
+from ingest_core import contract
 from ingest_core.handler import Response, handle_batch, handle_session
 from ingest_core.keys import KeyStore, parse_secret
 
 app = func.FunctionApp(http_auth_level=func.AuthLevel.ANONYMOUS)  # auth is the device key
+
+_MAX_INFLATED = contract.inflated_limit(os.environ.get("MAX_BODY_BYTES"))
+if str(_MAX_INFLATED) != os.environ.get("MAX_BODY_BYTES", str(contract.MAX_INFLATED)):
+    logging.warning("MAX_BODY_BYTES=%r is invalid or above %d: using %d",
+                    os.environ.get("MAX_BODY_BYTES"), contract.MAX_INFLATED_HARD, _MAX_INFLATED)
 
 _credential = DefaultAzureCredential(exclude_interactive_browser_credential=True)
 
@@ -98,14 +108,16 @@ def _to_http(resp: Response, route: str) -> func.HttpResponse:
 
 @app.route(route="ingest", methods=["POST"])
 def ingest_batch(req: func.HttpRequest) -> func.HttpResponse:
-    resp = handle_batch(dict(req.headers), req.get_body(), _keys, _LazySinks())
+    resp = handle_batch(dict(req.headers), req.get_body(), _keys, _LazySinks(),
+                        max_inflated=_MAX_INFLATED)
     return _to_http(resp, "POST /api/ingest")
 
 
 @app.route(route="ingest/sessions/{sessionId}", methods=["PUT"])
 def ingest_session(req: func.HttpRequest) -> func.HttpResponse:
     path_id = req.route_params.get("sessionId", "")
-    resp = handle_session(path_id, dict(req.headers), req.get_body(), _keys, _LazySinks())
+    resp = handle_session(path_id, dict(req.headers), req.get_body(), _keys, _LazySinks(),
+                          max_inflated=_MAX_INFLATED)
     return _to_http(resp, "PUT /api/ingest/sessions/{id}")
 
 

@@ -61,7 +61,7 @@ def _error(status: int, reason: str, info: str = "") -> Response:
     return Response(status, {"error": reason}, (info + " " if info else "") + f"reason={reason}")
 
 
-def _decode(headers: Mapping[str, str], raw: bytes | None, keys: KeyChecker):
+def _decode(headers: Mapping[str, str], raw: bytes | None, keys: KeyChecker, max_inflated: int):
     """Steps 1-4. Returns (parsed JSON, decompressed bytes, gzip bytes, key's device IDs) or a
     Response."""
     try:
@@ -80,7 +80,7 @@ def _decode(headers: Mapping[str, str], raw: bytes | None, keys: KeyChecker):
     # The Functions host doesn't document whether it inflates gzip bodies itself, or whether it
     # then drops Content-Encoding (plan §5), so the magic bytes decide, not the header.
     try:
-        body, was_gzip = contract.decode_body(raw)
+        body, was_gzip = contract.decode_body(raw, max_inflated)
     except TooLarge as e:
         return _error(413, str(e))
     except ValueError as e:
@@ -107,10 +107,10 @@ def _lower(headers: Mapping[str, str]) -> dict[str, str]:
 
 
 def handle_batch(headers: Mapping[str, str], raw: bytes | None, keys: KeyChecker, sinks: Sinks,
-                 now: dt.datetime | None = None) -> Response:
+                 now: dt.datetime | None = None, max_inflated: int = contract.MAX_INFLATED) -> Response:
     """POST /api/ingest: one 2-second batch."""
     headers = _lower(headers)
-    decoded = _decode(headers, raw, keys)
+    decoded = _decode(headers, raw, keys, max_inflated)
     if isinstance(decoded, Response):
         return decoded
     b, body, gz, device_ids = decoded
@@ -146,12 +146,13 @@ def handle_batch(headers: Mapping[str, str], raw: bytes | None, keys: KeyChecker
 
 
 def handle_session(path_id: str, headers: Mapping[str, str], raw: bytes | None, keys: KeyChecker,
-                   sinks: Sinks, now: dt.datetime | None = None) -> Response:
+                   sinks: Sinks, now: dt.datetime | None = None,
+                   max_inflated: int = contract.MAX_INFLATED) -> Response:
     """PUT /api/ingest/sessions/{sessionId}: session.json at Start and at Stop."""
     if not contract.SESSION_ID_RE.match(path_id or ""):
         return Response(404, {"message": "Not Found"})
     headers = _lower(headers)
-    decoded = _decode(headers, raw, keys)
+    decoded = _decode(headers, raw, keys, max_inflated)
     if isinstance(decoded, Response):
         return decoded
     m, body, gz, device_ids = decoded

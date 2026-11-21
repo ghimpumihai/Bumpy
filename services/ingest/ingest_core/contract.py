@@ -15,7 +15,10 @@ import re
 import zlib
 
 MAX_BODY = 20 * 1024 * 1024  # compressed (413)
-MAX_INFLATED = 200 * 1024  # decompressed (413), plan §5
+MAX_INFLATED = 200 * 1024  # decompressed (413), plan §5; MAX_BODY_BYTES can lower it
+# Event Hubs Basic takes at most 256 KB per event (body + properties), so MAX_BODY_BYTES can't
+# raise the decompressed limit past this.
+MAX_INFLATED_HARD = 240 * 1024
 
 # String limits (400). The processor keeps IDs and label types in primary keys (a btree row is at
 # most 2704 bytes) and every other string in text/jsonb, which can't hold NUL or a lone surrogate.
@@ -106,6 +109,16 @@ def decode_body(raw: bytes, limit: int = MAX_INFLATED) -> tuple[bytes, bool]:
 def not_gzip_reason(json_error: str) -> str:
     """The 400 reason for a body that is neither gzip nor JSON."""
     return f"body is neither gzip (no 1f 8b magic bytes) nor valid JSON ({json_error})"
+
+
+def inflated_limit(setting: str | None) -> int:
+    """The decompressed limit from the MAX_BODY_BYTES app setting: MAX_INFLATED when unset or
+    invalid, never more than MAX_INFLATED_HARD."""
+    try:
+        v = int(setting) if setting not in (None, "") else MAX_INFLATED
+    except ValueError:
+        return MAX_INFLATED
+    return MAX_INFLATED if v <= 0 else min(v, MAX_INFLATED_HARD)
 
 
 def _reject_constant(name):

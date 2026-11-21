@@ -21,13 +21,12 @@ enum Theme {
     static let speedBuckets: [Color] = [accent, ok, Color(red: 1.0, green: 0.88, blue: 0.10), labelSpeedBump, problem]
 
     // Foregrounds on coloured surfaces, overlays
-    /// Text on bright surfaces: ok/warn/accent/speed-bump/MISC (white there fails WCAG contrast).
+    /// Text on bright surfaces: ok/warn/accent/speed-bump (white there fails WCAG contrast).
     static let onBright = Color.black
     /// Text on dark surfaces and on `problem`/`labelPhoneMoved` (bold/large text only).
     static let onSurface = Color.white
     static let toastBackground = Color.white
     static let toastForeground = Color.black
-    static let scrim = Color.black.opacity(0.92)
     static let hairline = Color.white.opacity(0.08)
     static let plotBackground = Color.white.opacity(0.03)
     static let plotZeroLine = Color.white.opacity(0.2)
@@ -53,31 +52,5 @@ struct StatusDot: View {
     var body: some View {
         Circle().fill(color).frame(width: size, height: size)
             .overlay(Circle().stroke(Color.white.opacity(0.25), lineWidth: 1))
-    }
-}
-
-/// MISC (Misery Scale) labels (spec §3.7).
-enum MISC {
-    static let labels: [String] = [
-        "No problems",
-        "Slight discomfort, no specific symptoms",
-        "Vague symptoms",
-        "Some symptoms",
-        "Medium symptoms",
-        "Severe symptoms",
-        "Some nausea",
-        "Medium nausea",
-        "Severe nausea",
-        "Retching",
-        "Vomiting",
-    ]
-    static let symptomsNote = "2–5 symptoms = dizziness, warmth, headache, stomach awareness, sweating"
-
-    static func color(_ v: Int) -> Color {
-        switch v {
-        case 0...1: return Theme.ok
-        case 2...5: return Theme.warn
-        default: return Theme.problem
-        }
     }
 }

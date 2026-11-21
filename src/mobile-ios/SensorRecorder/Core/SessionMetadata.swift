@@ -129,8 +129,10 @@ struct SessionMetadata: Codable, Equatable {
         var durationSec: Double
         var streams: [String: StreamStats]
         var labelsCount: Int
-        var sicknessRatings: Int
-        var sicknessMissed: Int
+        /// Always 0 since MISC ratings were removed (D47); still written because the committed
+        /// Stop-copy fixture (tools/fixtures/session_meta_stop_v1.json.gz) has them.
+        var sicknessRatings: Int = 0
+        var sicknessMissed: Int = 0
         var audioFiles: [String]
         var fileSizes: [String: Int64]
         var totalBytes: Int64

@@ -184,8 +184,6 @@ enum SessionAnalyzer {
     struct Result {
         var streams: [StreamID: GapTracker] = [:]
         var labelsCount = 0
-        var sicknessRatings = 0
-        var sicknessMissed = 0
         var fileSizes: [String: Int64] = [:]
         var audioFiles: [String] = []
         var totalBytes: Int64 = 0
@@ -210,7 +208,6 @@ enum SessionAnalyzer {
                                        fileBytes: fileSizes[id.file.fileName])
             }
             return .init(durationSec: durationSec, streams: s, labelsCount: labelsCount,
-                         sicknessRatings: sicknessRatings, sicknessMissed: sicknessMissed,
                          audioFiles: audioFiles, fileSizes: fileSizes, totalBytes: totalBytes,
                          writeErrors: 0, uploadBatchesCreated: 0)
         }
@@ -267,14 +264,7 @@ enum SessionAnalyzer {
         }
         let labelsURL = folder.appendingPathComponent(StreamFile.labels.fileName)
         if let text = try? String(contentsOf: labelsURL, encoding: .utf8) {
-            for line in text.split(separator: "\n").dropFirst() {
-                r.labelsCount += 1
-                let cols = line.split(separator: ",", omittingEmptySubsequences: false)
-                if cols.count > 2 {
-                    if cols[2] == "sickness" { r.sicknessRatings += 1 }
-                    if cols[2] == "sickness_missed" { r.sicknessMissed += 1 }
-                }
-            }
+            r.labelsCount = text.split(separator: "\n").dropFirst().count
         }
         return r
     }

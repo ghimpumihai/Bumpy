@@ -19,14 +19,14 @@ SUMMARY_KEYS = {
     "sessionId", "source", "isMock", "replayOf", "deviceId", "vehicle", "mount", "people", "audioEnabled",
     "startedAt", "endedAt", "durationS", "distanceM", "status", "incomplete", "qualityStatus",
     "validFraction", "includeInAgg", "exclusionReasons", "roughnessEligible", "sicknessExperimental",
-    "msdvZ", "msiPct", "eventCounts", "ratingsCount",
+    "msdvZ", "msiPct", "eventCounts",
 }
 DETAIL_KEYS = SUMMARY_KEYS | {"quality", "detection", "sickness", "processedAt", "processorVersion"}
 QUALITY_KEYS = {"streams", "gps", "validFraction", "invalidSeconds", "rejectedBatches", "lateBatches",
                 "duplicateBatches"}
 LIVE_DEVICE_KEYS = {
     "deviceId", "sessionId", "source", "sessionStatus", "vehicleType", "updatedAt", "receivedAt", "lat",
-    "lon", "speedMs", "courseDeg", "hAccM", "roughnessNow", "msdvSoFar", "latestRating", "battery",
+    "lon", "speedMs", "courseDeg", "hAccM", "roughnessNow", "msdvSoFar", "battery",
     "thermal", "track",
 }
 OVERVIEW_KEYS = {"sessions", "distanceKm", "segments", "confirmedPotholes", "speedBumps", "lastProcessedAt",
@@ -103,22 +103,24 @@ def test_unknown_route_is_404_with_error_body(client):
 # --- A live trip --------------------------------------------------------------------------
 
 def test_live_trip_end_to_end(client, seed, fixture_batch):
-    rating = [{"t": 0.5, "type": "sickness", "value": "3", "note": None}]
-    seed(meta=[session_meta(SID)], batches=_trip(fixture_batch, 20, labels_at={15: rating}))
+    # An older app build's MISC rating (D47: no longer used) next to a pothole tap.
+    labels = [{"t": 0.5, "type": "sickness", "value": "3", "note": None},
+              {"t": 0.7, "type": "pothole", "value": None, "note": None}]
+    seed(meta=[session_meta(SID)], batches=_trip(fixture_batch, 20, labels_at={15: labels}))
 
     (s,) = _ok(client, "/api/sessions")["sessions"]
     assert set(s) == SUMMARY_KEYS
     assert (s["sessionId"], s["source"], s["status"], s["vehicle"]["type"]) == (SID, "live", "live", "bus")
     assert s["exclusionReasons"] == ["live_only"] and s["includeInAgg"] is False
     assert s["roughnessEligible"] is True and s["sicknessExperimental"] is False
-    assert s["ratingsCount"] == 1 and s["eventCounts"] == {"pothole": 0, "speed_bump": 0, "rail_joint": 0}
+    assert s["eventCounts"] == {"pothole": 0, "speed_bump": 0, "rail_joint": 0}
     assert 1000 < s["distanceM"] < 1100  # 19 steps of ≈ 55.6 m
     assert ISO.match(s["startedAt"]) and s["endedAt"] is None
 
     d = _ok(client, f"/api/sessions/{SID}")
     assert set(d) == DETAIL_KEYS and set(d["quality"]) == QUALITY_KEYS
     assert d["quality"]["gps"]["fixes"] == 20
-    assert [r["value"] for r in d["sickness"]["ratings"]] == [3]
+    assert set(d["sickness"]) == {"msdvZ", "msiPct"}  # the calculated dose only, no ratings
 
     track = _ok(client, f"/api/sessions/{SID}/track")
     coords, times = track["geometry"]["coordinates"], track["properties"]["times"]
@@ -134,10 +136,10 @@ def test_live_trip_end_to_end(client, seed, fixture_batch):
         ("PHONE-1", SID, "live", "bus")
     assert ISO.match(dev["updatedAt"]) and ISO.match(dev["receivedAt"])
     assert dev["lat"] == pytest.approx(46.77 + 19 * STEP_DEG) and dev["speedMs"] == 10.0
-    assert dev["latestRating"]["value"] == 3 and len(dev["track"]) >= 2
+    assert len(dev["track"]) >= 2
 
     labels = _ok(client, f"/api/sessions/{SID}/labels")["labels"]
-    assert [lab["type"] for lab in labels] == ["sickness"] and ISO.match(labels[0]["tUtc"])
+    assert [lab["type"] for lab in labels] == ["pothole"] and ISO.match(labels[0]["tUtc"])  # ratings hidden
     series = _ok(client, f"/api/sessions/{SID}/series")
     assert set(series) == {"t", "aVert", "aLat", "aLon", "speed", "msdv"}
     assert len({len(v) for v in series.values()}) == 1  # columnar: equal lengths
@@ -212,9 +214,7 @@ def test_signal_results_are_served(client, seed, fixture_batch):
     def vert(t):
         return 0.8 * np.sin(2 * np.pi * 0.2 * t) + 15.0 * np.exp(-((t - pothole_at) / 0.01) ** 2)
 
-    misc = {i: [{"t": 1.0, "type": "sickness", "value": str(v), "note": None}]
-            for i, v in ((5, 1), (12, 2), (20, 2), (27, 5))}
-    batches = [_with_motion(b, vert) for b in _trip(fixture_batch, 30, start=start, labels_at=misc)]
+    batches = [_with_motion(b, vert) for b in _trip(fixture_batch, 30, start=start)]
     seed(meta=[session_meta(SID)], batches=batches)
 
     series = _ok(client, f"/api/sessions/{SID}/series")
@@ -224,19 +224,7 @@ def test_signal_results_are_served(client, seed, fixture_batch):
 
     s = _ok(client, f"/api/sessions/{SID}")
     assert s["msdvZ"] > 0 and s["msiPct"] == pytest.approx(s["msdvZ"] / 3, abs=1e-4)
-    assert s["sickness"]["msdvZ"] == s["msdvZ"]
-    # Each rating carries the dose reached by then (the series point at or before it), so the
-    # prediction can be compared with what the passenger said (plan §9 step 6).
-    ratings = s["sickness"]["ratings"]
-    assert [r["value"] for r in ratings] == [1, 2, 2, 5]
-    for r in ratings:
-        t_ms = int(dt.datetime.fromisoformat(r["tUtc"].replace("Z", "+00:00")).timestamp() * 1000)
-        k = max(i for i, t in enumerate(series["t"]) if t <= t_ms)
-        assert r["msdvSoFar"] == pytest.approx(series["msdv"][k], abs=1e-4)
-    so_far = [r["msdvSoFar"] for r in ratings]
-    assert so_far == sorted(so_far) and so_far[0] > 0 and so_far[-1] <= s["msdvZ"]
-    # The dose only grows, so the ratings' ranks [0, 1.5, 1.5, 3] against [0, 1, 2, 3].
-    assert s["sickness"]["spearman"] == pytest.approx(4.5 / (4.5 * 5.0) ** 0.5, abs=1e-4)
+    assert s["sickness"] == {"msdvZ": s["msdvZ"], "msiPct": s["msiPct"]}  # the calculated dose only (D47)
     assert s["eventCounts"] == {"pothole": 1, "speed_bump": 0, "rail_joint": 0}
 
     (ev,) = _ok(client, f"/api/sessions/{SID}/events")["features"]

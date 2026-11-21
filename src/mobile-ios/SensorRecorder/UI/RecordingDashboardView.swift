@@ -7,7 +7,7 @@ struct RecordingDashboardView: View {
     let controller: RecordingController
     @State private var showNote = false
     @State private var showIssues = false
-    /// Kept here (not in the sheet) so a sickness prompt closing the sheet doesn't lose the text.
+    /// Kept here (not in the sheet) so closing the sheet doesn't lose the text.
     @State private var noteDraft = ""
 
     var body: some View {
@@ -24,18 +24,12 @@ struct RecordingDashboardView: View {
                 .padding(.horizontal, 10)
                 .padding(.vertical, 8)
             }
-            // The prompt covers only the middle area: label buttons and hold-to-stop stay usable.
-            .overlay { SicknessOverlay(controller: controller) }
             LabelPanel(controller: controller, showNote: $showNote)
         }
         .background(Theme.background.ignoresSafeArea())
         .overlay(alignment: .top) { ToastView(controller: controller) }
         .sheet(isPresented: $showNote) { NoteSheet(controller: controller, text: $noteDraft) }
         .sheet(isPresented: $showIssues) { IssuesSheet(controller: controller) }
-        .onChange(of: controller.sicknessPromptActive) { _, active in
-            // Sheets are drawn above the dashboard: close them so the rater sees the prompt.
-            if active { showNote = false; showIssues = false }
-        }
         .persistentSystemOverlays(.hidden)
     }
 }
@@ -362,12 +356,6 @@ private struct EstimatesRow: View {
                 Text("MSDV so far").font(.caption2).foregroundStyle(.secondary)
                 Text(String(format: "%.2f", s.msdv)).font(Theme.mono(15, weight: .bold))
             }
-            Spacer()
-            VStack(alignment: .leading) {
-                Text("Last MISC").font(.caption2).foregroundStyle(.secondary)
-                Text(s.lastSickness.map(String.init) ?? "–").font(Theme.mono(15, weight: .bold))
-                    .foregroundStyle(s.lastSickness.map(MISC.color) ?? Theme.onSurface)
-            }
         }
         .padding(10)
         .background(Theme.panel, in: RoundedRectangle(cornerRadius: 10))
@@ -411,7 +399,6 @@ private struct LabelPanel: View {
                 }
             }
             HStack(spacing: 6) {
-                SmallButton(title: "SICKNESS 0–10", id: "sicknessButton") { controller.openManualSickness() }
                 SmallButton(title: "SYNC TAP", id: "syncTap") {
                     controller.label(.syncTap, toastText: "SYNC: knock firmly 3× now")
                 }
@@ -547,7 +534,7 @@ struct HoldToStopButton: View {
     }
 }
 
-// MARK: - Toast, sickness prompt, note
+// MARK: - Toast, note
 
 private struct ToastView: View {
     let controller: RecordingController
@@ -564,60 +551,6 @@ private struct ToastView: View {
                 .transition(.opacity)
                 .accessibilityIdentifier("toast")
                 .allowsHitTesting(false)
-        }
-    }
-}
-
-private struct SicknessOverlay: View {
-    let controller: RecordingController
-
-    var body: some View {
-        if controller.sicknessPromptActive || controller.sicknessManualOpen {
-            ZStack {
-                Theme.scrim
-                ScrollView {
-                VStack(spacing: 10) {
-                    Text("How do you feel?").font(.title.bold())
-                    Text("MISC rating · rater: glance only").font(.subheadline).foregroundStyle(.secondary)
-                    if controller.sicknessPromptActive {
-                        Text("Auto-dismiss in \(controller.sicknessRemaining) s")
-                            .font(Theme.mono(16, weight: .bold)).foregroundStyle(Theme.warn)
-                            .accessibilityIdentifier("sicknessCountdown")
-                    }
-                    LazyVGrid(columns: [GridItem(.flexible()), GridItem(.flexible())], spacing: 8) {
-                        ForEach(0...10, id: \.self) { v in
-                            Button {
-                                controller.rateSickness(v)
-                            } label: {
-                                HStack(spacing: 8) {
-                                    Text("\(v)").font(.system(size: 28, weight: .heavy)).frame(width: 40)
-                                    Text(MISC.labels[v]).font(.system(size: 12, weight: .semibold))
-                                        .multilineTextAlignment(.leading).lineLimit(2)
-                                    Spacer(minLength: 0)
-                                }
-                                .padding(.horizontal, 8)
-                                .frame(maxWidth: .infinity, minHeight: 54)
-                                .foregroundStyle(Theme.onBright)
-                                .background(MISC.color(v), in: RoundedRectangle(cornerRadius: 10))
-                            }
-                            .accessibilityIdentifier("misc.\(v)")
-                        }
-                    }
-                    Text(MISC.symptomsNote).font(.caption).foregroundStyle(.secondary).multilineTextAlignment(.center)
-                    if controller.sicknessPromptActive {
-                        // Never force a fake rating: skipping is logged as a missed prompt.
-                        Button("Skip (no rating)") { controller.skipSicknessPrompt() }
-                            .font(.headline).padding(.top, 4)
-                            .accessibilityIdentifier("sicknessSkip")
-                    } else {
-                        Button("Cancel") { controller.closeManualSickness() }
-                            .font(.headline).padding(.top, 4)
-                            .accessibilityIdentifier("sicknessCancel")
-                    }
-                }
-                .padding()
-                }
-            }
         }
     }
 }

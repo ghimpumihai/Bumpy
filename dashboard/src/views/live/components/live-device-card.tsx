@@ -5,12 +5,9 @@ import { SourceBadge } from "@/components/status/session-badges";
 import { VehicleLabel } from "@/components/status/vehicle-label";
 import { Badge } from "@/components/ui/badge";
 import { Card, CardContent } from "@/components/ui/card";
-import { PLACEHOLDER } from "@/constants";
-import { MISC_MAX } from "@/constants/sessions";
 import type { LiveDevice } from "@/types/live";
 import { StreamStatus } from "@/types/sessions";
-import { formatTime } from "@/utils/format-date-time";
-import { formatAcceleration, formatFraction, formatMsdv, formatNumber, formatSpeedFromMs } from "@/utils/format-number";
+import { formatAcceleration, formatFraction, formatMsdv, formatSpeedFromMs } from "@/utils/format-number";
 
 import { freshnessLabel, liveFreshness } from "../utils/freshness";
 
@@ -34,11 +31,6 @@ export function LiveDeviceCard({ device, now, apiUnreachable }: LiveDeviceCardPr
     { label: "Speed", value: formatSpeedFromMs(device.speedMs) },
     { label: "Roughness now", value: formatAcceleration(device.roughnessNow) },
     { label: "MSDV so far", value: formatMsdv(device.msdvSoFar) },
-    {
-      label: "Latest MISC",
-      value: device.latestRating ? `${formatNumber(device.latestRating.value)} / ${MISC_MAX}` : PLACEHOLDER,
-      hint: device.latestRating ? `at ${formatTime(device.latestRating.tUtc)}` : "no rating yet",
-    },
   ];
   const freshnessText = freshnessLabel(device, freshness, apiUnreachable);
   return (
@@ -48,12 +40,11 @@ export function LiveDeviceCard({ device, now, apiUnreachable }: LiveDeviceCardPr
           <VehicleLabel type={device.vehicleType} className="font-medium" />
           <SourceBadge source={device.source} />
         </div>
-        <dl className="grid grid-cols-2 gap-x-3 gap-y-2 sm:grid-cols-4 lg:grid-cols-2">
+        <dl className="grid grid-cols-3 gap-x-3 gap-y-2 lg:grid-cols-2">
           {metrics.map((metric) => (
             <div key={metric.label} className="vertical">
               <dt className="text-[11px] text-muted-foreground">{metric.label}</dt>
               <dd className="text-sm font-semibold tabular-nums">{metric.value}</dd>
-              {metric.hint && <dd className="text-[11px] text-muted-foreground">{metric.hint}</dd>}
             </div>
           ))}
         </dl>

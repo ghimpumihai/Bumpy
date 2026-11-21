@@ -92,7 +92,6 @@ export interface SessionSummary {
   /** Predicted motion sickness incidence, % ≈ MSDV / 3. */
   msiPct: number | null;
   eventCounts: RoadEventCounts;
-  ratingsCount: number;
 }
 
 export interface SessionListResponse {
@@ -149,19 +148,10 @@ export interface DetectionMetrics {
   speed_bump: DetectionScore;
 }
 
-export interface SicknessRating {
-  tUtc: IsoDateTime;
-  /** MISC 0–10. */
-  value: number;
-  msdvSoFar: number | null;
-}
-
+/** The calculated motion-sickness dose of the whole trip (ISO 2631-1); no passenger ratings (D47). */
 export interface SicknessSummary {
   msdvZ: number | null;
   msiPct: number | null;
-  ratings: SicknessRating[];
-  /** Spearman rank correlation between MISC ratings and MSDV so far. */
-  spearman: number | null;
 }
 
 /** `GET /api/sessions/{id}`. */

@@ -215,7 +215,6 @@ export function sessionSummary(sim: SimulatedSession, nowMs: number = Date.now()
     msdvZ: msdv,
     msiPct: msdv / 3,
     eventCounts: eventCounts(sim, last),
-    ratingsCount: sim.ratings.filter((r) => r.sampleIndex <= last).length,
   };
 }
 
@@ -271,54 +270,15 @@ function sessionQuality(sim: SimulatedSession, last: number): SessionQuality {
   };
 }
 
-function spearman(xs: number[], ys: number[]): number | null {
-  if (xs.length < 3) return null;
-  const rank = (values: number[]) => {
-    const order = values.map((value, index) => ({ value, index })).sort((a, b) => a.value - b.value);
-    const ranks = new Array<number>(values.length);
-    let i = 0;
-    while (i < order.length) {
-      let j = i;
-      while (j + 1 < order.length && order[j + 1].value === order[i].value) j++;
-      for (let k = i; k <= j; k++) ranks[order[k].index] = (i + j) / 2;
-      i = j + 1;
-    }
-    return ranks;
-  };
-  const rx = rank(xs);
-  const ry = rank(ys);
-  const mean = (values: number[]) => values.reduce((a, b) => a + b, 0) / values.length;
-  const mx = mean(rx);
-  const my = mean(ry);
-  let num = 0;
-  let dx = 0;
-  let dy = 0;
-  for (let i = 0; i < rx.length; i++) {
-    num += (rx[i] - mx) * (ry[i] - my);
-    dx += (rx[i] - mx) ** 2;
-    dy += (ry[i] - my) ** 2;
-  }
-  return dx > 0 && dy > 0 ? num / Math.sqrt(dx * dy) : null;
-}
-
 export function sessionDetail(sim: SimulatedSession, nowMs: number = Date.now()): SessionDetail {
   const last = lastSampleIndex(sim, nowMs);
   const processed = processedAt(sim, nowMs);
   const summary = sessionSummary(sim, nowMs);
-  const ratings = sim.ratings.filter((r) => r.sampleIndex <= last).map(({ tUtc, value, msdvSoFar }) => ({ tUtc, value, msdvSoFar }));
   return {
     ...summary,
     quality: sessionQuality(sim, last),
     detection: detectionMetrics(sim, last),
-    sickness: {
-      msdvZ: summary.msdvZ,
-      msiPct: summary.msiPct,
-      ratings,
-      spearman: spearman(
-        ratings.map((r) => r.msdvSoFar ?? 0),
-        ratings.map((r) => r.value),
-      ),
-    },
+    sickness: { msdvZ: summary.msdvZ, msiPct: summary.msiPct },
     processedAt: processed === null ? null : new Date(processed).toISOString(),
     processorVersion: PROCESSOR_VERSION,
   };

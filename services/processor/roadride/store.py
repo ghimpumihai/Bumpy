@@ -226,15 +226,17 @@ class Store:
             # Late batches skip the signal processing: the filters have moved past them. The
             # finalize job recomputes the whole trip in one pass.
             ok, result = self._optional("signal", f.session_id, lambda: self._process_signal(f))
-            if ok:
+            covered = ok and result is None  # already in the finalize job's state (trip reopened above)
+            if ok and not covered:
                 roughness_now, msdv = result
-            else:
+            elif not ok:
                 # signal_state wasn't advanced, so the next batch restarts the filters (a gap).
                 roughness_now = None
                 msdv = self.conn.execute("SELECT msdv_z FROM sessions WHERE session_id = %s",
                                          (f.session_id,)).fetchone()[0]
-            self._optional("live_state", f.session_id,
-                           lambda: self._update_live_state(f, received_at, roughness_now, msdv))
+            if not covered:
+                self._optional("live_state", f.session_id,
+                               lambda: self._update_live_state(f, received_at, roughness_now, msdv))
         self._mark_processing_when_complete(f.session_id)
         self._refresh_exclusions(f.session_id)
         return "late" if late else "new"
@@ -247,12 +249,18 @@ class Store:
                 [(f.session_id, lab.t, lab.type, lab.value, lab.note) for lab in f.labels],
             )
 
-    def _process_signal(self, f: BatchFacts) -> tuple[float | None, float]:
-        """Runs one batch through the trip's pipeline and saves its results and state."""
+    def _process_signal(self, f: BatchFacts) -> tuple[float | None, float] | None:
+        """Runs one batch through the trip's pipeline and saves its results and state. None: the
+        state already covers this batch."""
         row = self.conn.execute(
             "SELECT state, last_batch_seq FROM signal_state WHERE session_id = %s FOR UPDATE",
             (f.session_id,),
         ).fetchone()
+        if row is not None and row[1] is not None and f.batch_seq <= row[1]:
+            # The finalize job read the archive further than the stream (a trip closed while its
+            # batches were still in the backlog) and saved its one-pass state. Feeding this batch
+            # again would count its dose twice and write a second set of series rows.
+            return None
         # A missing batch means the filters would see a jump: restart them (the dose is kept).
         reset = row is not None and f.batch_seq != row[1] + 1
         pipeline = Pipeline(row[0] if row else None)

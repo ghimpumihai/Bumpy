@@ -61,7 +61,7 @@ def make_folder(root, *, sid=SID, seconds=SECONDS, ended=True):
     rows = {k: [] for k in HEADERS}
     for i in range(n):
         rows["device_motion"].append(_row("device_motion", t[i], {
-            "ua_x": "0.000000", "ua_y": "0.000000", "ua_z": f"{vert[i] / 9.80665:.6f}",
+            "ua_x": "0.000000", "ua_y": "0.000000", "ua_z": f"{-vert[i] / 9.80665:.6f}",
             "g_x": "0.000000", "g_y": "0.000000", "g_z": "-1.000000",
             "rr_x": "0.000000", "rr_y": "0.000000", "rr_z": "" if i == 77 else "0.000000",
             "q_w": "1.000000", "q_x": "0.000000", "q_y": "0.000000", "q_z": "0.000000",
@@ -156,6 +156,62 @@ def test_the_folder_gives_the_same_signal_as_the_streamed_trip(folder, uploaded)
         [("pothole", None, None), ("sickness", "3", "a, b"), ("phone_moved", None, None)]
     assert "raterName" not in trip.meta["people"] and not trip.incomplete
     assert trip.streams["accelRaw"]["rows"] == SECONDS * 100 and trip.streams["audioLevel"]["expectedHz"] == 10.0
+
+
+def _with_speeds(batches):
+    """The same batches with a speed that changes every second, so a fix taken late shows."""
+    import dataclasses
+
+    return [dataclasses.replace(f, fixes=[dataclasses.replace(x, speed_ms=8.0 + (x.t.timestamp() % 7))
+                                          for x in f.fixes]) for f in batches]
+
+
+def test_fixes_that_arrive_after_their_batch_are_taken_at_their_own_time(folder):
+    """The app drains fixes by arrival: with 0.5 s of GPS latency the fix 1.7 s into a window rides
+    in the next batch. Finalizing those batches must give what the folder (cut by t_up) gives."""
+    import dataclasses
+
+    on_time = _with_speeds([parse_batch(b) for b in replay_batches(folder)])
+    late = [dataclasses.replace(f, fixes=list(f.fixes)) for f in on_time]
+    moved = 0
+    for k in range(len(late) - 1):
+        f = late[k]
+        t0 = f.t0_utc.timestamp()
+        keep = [x for x in f.fixes if x.t.timestamp() - t0 < up.BATCH_S - 0.5]
+        moved += len(f.fixes) - len(keep)
+        late[k + 1] = dataclasses.replace(late[k + 1], fixes=[x for x in f.fixes if x not in keep]
+                                          + list(late[k + 1].fixes))
+        late[k] = dataclasses.replace(f, fixes=keep)
+    assert moved > 20
+
+    a, b = fz.run_pipeline(late), fz.run_pipeline(on_time)
+    assert [p.speed for p in a.series] == [p.speed for p in b.series]
+    assert [(e.type, e.t, e.speed) for e in a.events] == [(e.type, e.t, e.speed) for e in b.events]
+    assert a.state["forward_n"] == b.state["forward_n"] and a.msdv == b.msdv
+
+
+def test_fixes_just_before_the_start_are_kept(tmp_path):
+    """iOS's cached first fix, up to 5 s before the start: the app keeps it and sends it in batch 0
+    (RecordingSession.staleFixMargin), so the folder and its replay must too."""
+    d = make_folder(tmp_path / "phone")
+    loc = (d / "location.csv").read_text().splitlines()
+    early = _row("location", START_UP - 2.4, {
+        "lat": "46.76990000", "lon": "23.62000000", "alt": "350", "ell_alt": "390", "h_acc": "6",
+        "v_acc": "3", "speed": "8.000000", "speed_acc": "0.5", "course": "0.0", "course_acc": "5",
+        "is_simulated": "0"})
+    stale = _row("location", START_UP - 6.0, {**dict.fromkeys(("alt", "ell_alt", "v_acc"), "0"),
+                                               "lat": "46.7", "lon": "23.6", "h_acc": "6", "speed": "1"})
+    (d / "location.csv").write_text("\n".join([loc[0], stale, early, *loc[1:]]) + "\n")
+    root = tmp_path / "sessions"
+    uploader.run(d, client=None, dry_run=root, log=lambda m: None)
+    trip = up.load(up.DirUploads(root), SID)
+
+    first = trip.batches[0].fixes
+    assert len([x for f in trip.batches for x in f.fixes]) == SECONDS + 1  # the 6 s old one stays out
+    assert first[0].speed_ms == 8.0 and first[0].t.timestamp() == pytest.approx(UTC0 / 1000 - 2.4, abs=1e-3)
+    assert fz.run_pipeline(trip.batches).series[0].speed == 8.0
+    replayed = parse_batch(replay_batches(d)[0])
+    assert [x.speed_ms for x in replayed.fixes][:1] == [8.0] and len(replayed.fixes) == len(first)
 
 
 def test_unparseable_value_falls_back_to_the_forgiving_reader(folder):

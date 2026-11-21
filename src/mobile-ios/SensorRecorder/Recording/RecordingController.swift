@@ -47,7 +47,7 @@ final class RecordingController {
 
     @ObservationIgnored private var timer: Timer?
     @ObservationIgnored private var scheduler: SicknessScheduler
-    @ObservationIgnored private var knownIssues: [String: HealthLevel] = [:]
+    @ObservationIgnored private var issueTracker = IssueTracker()
     @ObservationIgnored private var toastExpiry: Date?
     @ObservationIgnored private var trackVersion = -1
     @ObservationIgnored private var tickCount = 0
@@ -195,23 +195,10 @@ final class RecordingController {
     }
 
     private func handleIssueTransitions(_ new: [HealthIssue]) {
-        var current: [String: HealthLevel] = [:]
-        var newProblem = false
-        for i in new {
-            current[i.key] = i.level
-            if knownIssues[i.key] != i.level {
-                session.log(i.level == .problem ? .problem : .warn, i.message)
-                if i.level == .problem { newProblem = true }
-            }
-        }
-        for (key, _) in knownIssues where current[key] == nil {
-            session.log(.info, "resolved: \(key)")
-        }
-        knownIssues = current
-        if newProblem {
-            // spec: strong haptic + sound on PROBLEM
-            alerter.newProblem()
-        }
+        let t = issueTracker.update(new)
+        for i in t.appeared { session.log(i.level == .problem ? .problem : .warn, i.message) }
+        for key in t.resolved { session.log(.info, "resolved: \(key)") }
+        if t.alert { alerter.newProblem() } // spec: strong haptic + sound on PROBLEM
     }
 
     private func buildSnapshot(now: TimeInterval, inputs: HealthInputs) -> DashboardSnapshot {
@@ -342,4 +329,34 @@ final class SystemAlerter: Alerter {
         AudioServicesPlayAlertSound(1005)
     }
     func stopped() { haptics.notificationOccurred(.success) }
+}
+
+/// Which health issues are new, changed or resolved between two evaluations, and whether the
+/// operator must be alerted. Pure (no timers, no I/O) so the alert policy is tested exactly.
+struct IssueTracker {
+    struct Transition: Equatable {
+        /// Issues that are new or changed level (logged).
+        var appeared: [HealthIssue] = []
+        /// Keys that disappeared (logged as resolved).
+        var resolved: [String] = []
+        /// A PROBLEM appeared or an issue escalated to PROBLEM: strong haptic + sound.
+        var alert = false
+    }
+
+    private(set) var known: [String: HealthLevel] = [:]
+
+    mutating func update(_ issues: [HealthIssue]) -> Transition {
+        var t = Transition()
+        var current: [String: HealthLevel] = [:]
+        for i in issues {
+            current[i.key] = i.level
+            if known[i.key] != i.level {
+                t.appeared.append(i)
+                if i.level == .problem { t.alert = true }
+            }
+        }
+        t.resolved = known.keys.filter { current[$0] == nil }.sorted()
+        known = current
+        return t
+    }
 }

@@ -370,23 +370,23 @@ final class RecordingControllerTests: XCTestCase {
         wait(for: [e], timeout: seconds + ciTimeout)
     }
 
-    func testNewProblemAlertsOnceAndAgainOnlyAfterItResolved() throws {
+    /// Alert *policy* is tested exactly in IssueTrackerTests. Here only the wiring, asserted on the
+    /// condition this test causes — never on global counts, which unrelated issues (e.g. a lagging
+    /// synthetic sensor on a slow CI simulator) can legitimately change.
+    func testLowPowerModeRaisesAProblemThatClearsWhenTurnedOff() throws {
         let device = FakeDeviceStatus()
         let (c, alerter) = try makeController(device: device)
         c.start()
         defer { c.stop() }
-        spin(0.4)
-        XCTAssertEqual(alerter.problems, 0)
         device.status.lowPowerMode = true
-        c.refresh(); c.refresh(); spin(0.3); c.refresh()
-        XCTAssertEqual(alerter.problems, 1, "persisting problem must not re-alert every tick")
+        let before = alerter.problems
+        c.refresh()
+        XCTAssertTrue(c.issues.contains { $0.key == "lowpower" && $0.level == .problem })
         XCTAssertEqual(c.overall, .problem)
+        XCTAssertGreaterThan(alerter.problems, before, "a new PROBLEM alerts the operator")
         device.status.lowPowerMode = false
         c.refresh()
-        XCTAssertEqual(c.overall, .ok)
-        device.status.lowPowerMode = true
-        c.refresh()
-        XCTAssertEqual(alerter.problems, 2, "a problem that comes back alerts again")
+        XCTAssertFalse(c.issues.contains { $0.key == "lowpower" })
     }
 
     /// Spins the main run loop (the controller's 8 Hz timer keeps firing) until `cond` holds.
@@ -436,7 +436,9 @@ final class RecordingControllerTests: XCTestCase {
         let (c, _) = try makeController(audio: meterOnly)
         c.start()
         spin(0.5)
-        XCTAssertFalse(c.issues.contains { $0.key.hasPrefix("audio") }, "\(c.issues)")
+        // Audio recording is OFF: "recorder not recording" must never be raised (meter health is
+        // timing-dependent and tested exactly in AudioHealthTests).
+        XCTAssertFalse(c.issues.contains { $0.key == "audio.off" }, "\(c.issues)")
         let meta = c.session.stop()
         XCTAssertFalse(meta.audioEnabled)
     }

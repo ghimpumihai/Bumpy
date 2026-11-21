@@ -15,7 +15,7 @@ real-time data capture.
 
 This is the iPhone data-collection app of the Codelap Hackathon 2026 project (Porsche Engineering,
 "Data-Driven Infrastructure Engineering"). It records every useful sensor of an iPhone 14 Pro at
-the highest practical rate, **writes everything to local files first**, optionally uploads gzipped
+the highest practical rate, **writes everything to local files first**, uploads gzipped
 batches to the Azure backend, and shows a live health dashboard. The single source of requirements is
 [`decisions/01-initial-plan.md`](../../decisions/01-initial-plan.md) (backend plan:
 [`02-infrastructure-plan.md`](../../decisions/02-infrastructure-plan.md)); user-facing docs are in

@@ -259,6 +259,10 @@ final class UploadQueue: @unchecked Sendable {
             return .empty
         }
         statusBox.withLock { $0.lastAttemptUp = now }
+        let isMeta: Bool = {
+            if case .sessionMeta = Self.parseItem(fileName: file.lastPathComponent)?.item { return true }
+            return false
+        }()
         let outcome: Outcome
         var serverSide = false
         do {
@@ -269,6 +273,9 @@ final class UploadQueue: @unchecked Sendable {
             case 409: outcome = .duplicate
             case 408, 429: outcome = .retry(reason: "HTTP \(code)"); serverSide = true
             case 401, 403: outcome = .retry(reason: "HTTP \(code) (check device key)")
+            // Session metadata (§6.1) on a backend without the PUT route yet ("until this exists, the
+            // backend creates the trip from its first batch"): set it aside, never block the batches.
+            case 404 where isMeta, 405 where isMeta: outcome = .permanentFailure(status: code) // `where` binds per pattern
             // A wrong base path must not dump the whole queue into upload_failed/ within seconds.
             case 404: outcome = .retry(reason: "HTTP 404 (check the API URL)")
             case 400..<500: outcome = .permanentFailure(status: code)
@@ -327,6 +334,18 @@ final class UploadQueue: @unchecked Sendable {
             return h.count
         }
         guard count >= Self.maxServerErrorsPerBatch, let p = Self.parseItem(fileName: name) else { return }
+        if case .sessionMeta = p.item {
+            // Metadata order matters (02 D33: context first, end after the last batch), so it is never
+            // re-ordered behind batches: set it aside in upload_failed/ (Settings → retry) instead.
+            let dest = failedDirectory.appendingPathComponent(name)
+            try? FileManager.default.removeItem(at: dest)
+            if (try? FileManager.default.moveItem(at: file, to: dest)) != nil {
+                headFailures.withLock { $0 = ("", 0) }
+                statusBox.withLock { $0.failedCount += 1; $0.queueCount = max(0, $0.queueCount - 1) }
+                onEvent?(.warn, "upload: session metadata \(name) failed \(count)× on the server, moved to upload_failed/")
+            }
+            return
+        }
         let nowMs = Int64(Date().timeIntervalSince1970 * 1000)
         let dest = directory.appendingPathComponent(Self.fileName(createdUtcMs: nowMs, sessionId: p.sessionId, item: p.item))
         if (try? FileManager.default.moveItem(at: file, to: dest)) != nil {
@@ -386,7 +405,7 @@ final class UploadQueue: @unchecked Sendable {
     /// Probe `POST {API}/api/ingest` with a deliberately invalid body (`{"probe":true}`, gzipped,
     /// with the device key). The ingest function checks the key first and the schema second, so:
     /// 400/422 = reachable + key accepted (the probe is rejected, never stored); 401/403 = key
-    /// rejected; 404 = wrong base URL. There is no `/api/health` route (02 §6). Never blocks.
+    /// rejected; 404 = wrong base URL. There is no `/api/health` route (02 §5). Never blocks.
     static func testConnection(config: UploadConfig, transport: HTTPTransport = URLSessionTransport()) async -> (ok: Bool, detail: String) {
         guard let url = config.ingestURL else { return (false, "upload off (no URL)") }
         var r = URLRequest(url: url)

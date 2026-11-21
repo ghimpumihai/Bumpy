@@ -300,15 +300,72 @@ final class SessionMetadataUploadTests: XCTestCase {
         XCTAssertTrue(q.pendingFiles().isEmpty)
     }
 
-    func testPoisonRotationKeepsTheItemKind() async throws {
+    func testMetadataIsNeverReorderedBehindBatches() async throws {
         let t = MockTransport()
         let q = UploadQueue(directory: try makeTempDir().appendingPathComponent("q"), transport: t,
                             config: { UploadConfig(baseURL: URL(string: "https://fn.test"), deviceKey: "k") })
-        try q.enqueueSessionMetadata(json: Data("{}".utf8), sessionId: "S", phase: .stop, createdUtcMs: 1)
+        try q.enqueueSessionMetadata(json: Data("{}".utf8), sessionId: "S", phase: .start, createdUtcMs: 1)
+        try q.enqueue(gzippedBody: Gzip.compress(Data("{}".utf8)), sessionId: "S", seq: 0, createdUtcMs: 2)
         t.enqueue(500, 500, 500, 500, 500)
         for _ in 0..<5 { _ = await q.processOnce() }
+        // 02 D33: context first — a failing Start copy is set aside, not moved behind batch 0.
+        XCTAssertEqual(q.failedFiles().compactMap { UploadQueue.parseItem(fileName: $0.lastPathComponent)?.item },
+                       [.sessionMeta(phase: .start)])
         XCTAssertEqual(q.pendingFiles().compactMap { UploadQueue.parseItem(fileName: $0.lastPathComponent)?.item },
-                       [.sessionMeta(phase: .stop)])
+                       [.batch(seq: 0)])
+    }
+
+    /// Spec §6.1 "Until this exists, the backend creates the trip from its first batch": a backend
+    /// without the PUT route must not block the batches behind the Start copy.
+    func testMissingMetadataRouteDoesNotBlockBatches() async throws {
+        for code in [404, 405] {
+            let t = MockTransport()
+            let q = UploadQueue(directory: try makeTempDir().appendingPathComponent("q"), transport: t,
+                                config: { UploadConfig(baseURL: URL(string: "https://fn.test"), deviceKey: "k") })
+            try q.enqueueSessionMetadata(json: Data("{}".utf8), sessionId: "S", phase: .start, createdUtcMs: 1)
+            try q.enqueue(gzippedBody: Gzip.compress(Data("{}".utf8)), sessionId: "S", seq: 0, createdUtcMs: 2)
+            t.enqueue(code, 201)
+            let first = await q.processOnce()
+            XCTAssertEqual(first, .permanentFailure(status: code))
+            let second = await q.processOnce()
+            XCTAssertEqual(second, .uploaded(status: 201), "batch 0 still goes out")
+            XCTAssertEqual(t.requests.map(\.httpMethod), ["PUT", "POST"])
+            XCTAssertTrue(q.pendingFiles().isEmpty)
+        }
+        // …while a batch 404 (wrong API URL) is still retried, never dumped:
+        let t = MockTransport()
+        let q = UploadQueue(directory: try makeTempDir().appendingPathComponent("q"), transport: t,
+                            config: { UploadConfig(baseURL: URL(string: "https://fn.test"), deviceKey: "k") })
+        try q.enqueue(gzippedBody: Gzip.compress(Data("{}".utf8)), sessionId: "S", seq: 0, createdUtcMs: 2)
+        t.enqueue(404, 405)
+        guard case .retry = await q.processOnce() else { return XCTFail("batch 404 must be retried") }
+        let r405 = await q.processOnce()
+        XCTAssertEqual(r405, .permanentFailure(status: 405), "a batch 405 is an ordinary 4xx")
+    }
+
+    func testCloudCopyDropsRaterNameAndTagsSource() throws {
+        var m = SessionMetadataTests.sample()
+        m.people.raterName = "Ana Popescu"
+        let obj = try XCTUnwrap(JSONSerialization.jsonObject(with: RecordingSession.sessionMetadataBody(m, batchCount: nil))
+                                as? [String: Any])
+        XCTAssertNil((obj["people"] as? [String: Any])?["raterName"], "personal data stays on the phone")
+        XCTAssertEqual((obj["people"] as? [String: Any])?["raterSeat"] as? String, m.people.raterSeat)
+        XCTAssertEqual(obj["source"] as? String, "live")
+        XCTAssertNil(obj["batchCount"])
+        XCTAssertTrue(String(decoding: try m.jsonData(), as: UTF8.self).contains("Ana Popescu"), "local session.json keeps it")
+    }
+
+    func testPublicTransportAlwaysStartsWithAudioOff() {
+        var tram = SessionSetup()
+        tram.vehicle.type = "tram"
+        tram.audioEnabled = true // last tram trip had audio switched on
+        SetupDefaults.save(tram)
+        defer { UserDefaults.standard.removeObject(forKey: SetupDefaults.key) }
+        XCTAssertFalse(SetupDefaults.load().audioEnabled, "GDPR: bus/tram never inherit audio ON")
+        var car = SessionSetup()
+        car.audioEnabled = false
+        SetupDefaults.save(car)
+        XCTAssertFalse(SetupDefaults.load().audioEnabled, "a car keeps the operator's choice")
     }
 
     private func runSession(uploadOn: Locked<Bool>, seconds: TimeInterval, toggleOnAfter: TimeInterval? = nil) throws
@@ -362,5 +419,90 @@ final class SessionMetadataUploadTests: XCTestCase {
         for i in 0..<22 { acc.add(AudioLevelSample(t: 100 + Double(i) * 0.1, avgDbfs: -40 + r(), peakDbfs: -20 + r())) }
         let json = try acc.drain(t0Up: 100, t0UtcMs: 1_763_716_532_000, device: FakeDeviceStatus().status).jsonData()
         XCTAssertLessThan(json.count, RecordingSession.maxBatchJSONBytes / 2, "\(json.count) bytes")
+    }
+}
+
+// MARK: - 02 D32: every batch carries the full dataset (only raw audio stays on the phone)
+
+final class FullDatasetBatchTests: XCTestCase {
+    func testBatchCarriesEveryStreamOfTheSessionFolder() throws {
+        let acc = BatchAccumulator(sessionId: "S", deviceId: "D")
+        acc.add(DeviceMotionSample(t: 100.01, userAccel: .zero, gravity: Vec3(x: 0, y: 0, z: -1), rotationRate: .zero,
+                                   quaternion: Quaternion(w: 1, x: 0, y: 0, z: 0), roll: 0.1, pitch: -0.2, yaw: 1.5))
+        acc.addMag(Vec3Sample(t: 100.02, v: Vec3(x: 20, y: -5, z: -40)))
+        acc.add(HeadingSample(utcMs: 1_763_716_532_100, magneticHeading: 91, trueHeading: 95, accuracy: 10,
+                              raw: Vec3(x: 1, y: 2, z: 3)))
+        acc.add(AbsoluteAltitudeSample(t: 100.5, altitudeM: 352, accuracyM: 3.5, precisionM: 0.4))
+        acc.add(ActivitySample(t: 100.6, stationary: false, walking: false, running: false, automotive: true,
+                               cycling: false, unknown: false, confidence: 2, startUtcMs: 1_763_716_500_000))
+        acc.add(LocationSample(utcMs: 1_763_716_532_120, lat: 46.77, lon: 23.62, alt: 352, ellAlt: 390, hAcc: 4.7,
+                               vAcc: 3.1, speed: 8.4, speedAcc: 0.5, course: 92, courseAcc: 4.5, isSimulated: false))
+        let device = DeviceStatus(batteryLevel: 0.8, batteryState: "charging", thermal: .fair, lowPowerMode: false,
+                                  freeDiskBytes: 42_000_000_000, networkStatus: "satisfied", networkType: "cellular")
+        let obj = try XCTUnwrap(JSONSerialization.jsonObject(with: acc.drain(t0Up: 100, t0UtcMs: 1_763_716_532_000,
+                                                                             device: device).jsonData()) as? [String: Any])
+        let dm = try XCTUnwrap(obj["deviceMotion"] as? [String: [Double]])
+        XCTAssertEqual(dm["roll"], [0.1]); XCTAssertEqual(dm["pitch"], [-0.2]); XCTAssertEqual(dm["yaw"], [1.5])
+        let mag = try XCTUnwrap(obj["magRaw"] as? [String: [Double]])
+        XCTAssertEqual(mag["x"], [20]); XCTAssertEqual(mag["t"]?.first ?? -1, 0.02, accuracy: 1e-9)
+        let heading = try XCTUnwrap((obj["heading"] as? [[String: Any]])?.first)
+        XCTAssertEqual(heading["trueHeading"] as? Double, 95)
+        XCTAssertEqual((heading["tUtcMs"] as? NSNumber)?.int64Value, 1_763_716_532_100)
+        let abs = try XCTUnwrap(obj["absAltitude"] as? [String: [Double]])
+        XCTAssertEqual(abs["altitudeM"], [352])
+        let act = try XCTUnwrap((obj["activity"] as? [[String: Any]])?.first)
+        XCTAssertEqual(act["automotive"] as? Bool, true)
+        XCTAssertEqual(act["confidence"] as? Int, 2)
+        let loc = try XCTUnwrap((obj["location"] as? [[String: Any]])?.first)
+        XCTAssertEqual(loc["ellAlt"] as? Double, 390); XCTAssertEqual(loc["vAcc"] as? Double, 3.1)
+        XCTAssertEqual(loc["courseAcc"] as? Double, 4.5)
+        let dev = try XCTUnwrap(obj["device"] as? [String: Any])
+        XCTAssertEqual(dev["batteryState"] as? String, "charging")
+        XCTAssertEqual((dev["freeDiskBytes"] as? NSNumber)?.int64Value, 42_000_000_000)
+        XCTAssertEqual(dev["netType"] as? String, "cellular")
+        let units = try XCTUnwrap(obj["fieldUnits"] as? [String: String])
+        for k in ["magRaw", "deviceMotion.roll", "heading.trueHeading", "absAltitude.altitudeM", "activity.confidence",
+                  "location.ellAlt", "device.freeDiskBytes"] {
+            XCTAssertNotNil(units[k], "unit documented for \(k)")
+        }
+    }
+}
+
+// MARK: - Alert policy (pure, exact)
+
+final class IssueTrackerTests: XCTestCase {
+    private func issue(_ key: String, _ level: HealthLevel) -> HealthIssue { .init(level: level, key: key, message: key) }
+
+    func testAlertsOnNewProblemOnceAndAgainAfterItResolved() {
+        var t = IssueTracker()
+        XCTAssertFalse(t.update([]).alert)
+        let first = t.update([issue("lowpower", .problem)])
+        XCTAssertTrue(first.alert)
+        XCTAssertEqual(first.appeared.map(\.key), ["lowpower"])
+        for _ in 0..<5 { XCTAssertEqual(t.update([issue("lowpower", .problem)]), .init(), "persisting: no re-alert, no log") }
+        let gone = t.update([])
+        XCTAssertEqual(gone.resolved, ["lowpower"])
+        XCTAssertFalse(gone.alert)
+        XCTAssertTrue(t.update([issue("lowpower", .problem)]).alert, "comes back: alerts again")
+    }
+
+    func testWarnDoesNotAlertButEscalationToProblemDoes() {
+        var t = IssueTracker()
+        let warn = t.update([issue("rate.gyro", .warn)])
+        XCTAssertFalse(warn.alert)
+        XCTAssertEqual(warn.appeared.count, 1, "a new WARN is logged")
+        let esc = t.update([issue("rate.gyro", .problem)])
+        XCTAssertTrue(esc.alert, "WARN → PROBLEM alerts")
+        let deesc = t.update([issue("rate.gyro", .warn)])
+        XCTAssertFalse(deesc.alert)
+        XCTAssertEqual(deesc.appeared.map(\.level), [.warn], "de-escalation is logged, not alerted")
+    }
+
+    func testAnUnrelatedProblemAlertsIndependently() {
+        var t = IssueTracker()
+        _ = t.update([issue("lowpower", .problem)])
+        let both = t.update([issue("lowpower", .problem), issue("stale.deviceMotion", .problem)])
+        XCTAssertTrue(both.alert)
+        XCTAssertEqual(both.appeared.map(\.key), ["stale.deviceMotion"])
     }
 }

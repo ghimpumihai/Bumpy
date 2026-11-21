@@ -30,7 +30,8 @@ final class IngestBatchTests: XCTestCase {
         let specKeys: Set<String> = ["schemaVersion", "sessionId", "deviceId", "batchSeq", "t0Utc", "t0Up", "units",
                                      "deviceMotion", "accelRaw", "gyroRaw", "location", "altimeter", "audioLevel",
                                      "labels", "device"]
-        XCTAssertEqual(Set(obj.keys), specKeys.union(["eventType", "source", "t0UtcMs", "fieldUnits"]))
+        XCTAssertEqual(Set(obj.keys), specKeys.union(["eventType", "source", "t0UtcMs", "fieldUnits",
+                                                       "magRaw", "heading", "absAltitude", "activity"]))
         XCTAssertEqual(obj["eventType"] as? String, "sensor_batch")
         XCTAssertEqual(obj["source"] as? String, "live")
         XCTAssertEqual((obj["t0UtcMs"] as? NSNumber)?.int64Value, 1_763_716_532_000)
@@ -42,13 +43,14 @@ final class IngestBatchTests: XCTestCase {
         XCTAssertEqual(obj["units"] as? [String: String], ["accel": "g", "gyro": "rad/s", "speed": "m/s", "pressure": "kPa"])
         let dm = try XCTUnwrap(obj["deviceMotion"] as? [String: [Double]])
         XCTAssertEqual(Set(dm.keys), ["t", "ua_x", "ua_y", "ua_z", "g_x", "g_y", "g_z", "rr_x", "rr_y", "rr_z",
-                                      "q_w", "q_x", "q_y", "q_z"])
+                                      "q_w", "q_x", "q_y", "q_z", "roll", "pitch", "yaw"])
         XCTAssertEqual(dm["t"]?.count, 200)
         XCTAssertEqual(dm["t"]?.first, 0)
         XCTAssertEqual(dm["t"]?[1] ?? 0, 0.01, accuracy: 1e-9)
         XCTAssertEqual(dm["ua_x"]?.first, 0.012346) // rounded to 6 decimals
         let loc = try XCTUnwrap((obj["location"] as? [[String: Any]])?.first)
-        XCTAssertEqual(Set(loc.keys), ["tUtcMs", "lat", "lon", "alt", "hAcc", "speed", "speedAcc", "course", "isSimulated"])
+        XCTAssertEqual(Set(loc.keys), ["tUtcMs", "lat", "lon", "alt", "hAcc", "speed", "speedAcc", "course", "isSimulated",
+                                       "ellAlt", "vAcc", "courseAcc"])
         XCTAssertEqual(loc["isSimulated"] as? Bool, false)
         XCTAssertEqual(loc["tUtcMs"] as? Int64, 1_763_716_532_120)
         XCTAssertEqual(loc["lat"] as? Double, 46.77121235)

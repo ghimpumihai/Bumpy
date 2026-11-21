@@ -36,7 +36,7 @@ export function SessionView() {
           <>
             <SessionHeader session={session} />
             <SessionStats session={session} />
-            <TrackMap sessionId={session.sessionId} status={session.status} />
+            <TrackMap session={session} />
             <SessionCharts session={session} />
             <div className="grid gap-6 lg:grid-cols-2">
               <DetectionCard detection={session.detection} />

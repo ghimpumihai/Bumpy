@@ -102,6 +102,46 @@ def test_batch_matches_mock(name, batch, mock_server):
     assert mine[0] == ("ok" if valid else "invalid"), mine
 
 
+HUGE = 10**400  # math.isfinite raises OverflowError on it
+
+# Values the processor can't turn into datetimes or integer columns: both reject them (400).
+BATCH_RANGES = {
+    "huge int in a column": (lambda b: b["accelRaw"]["x"].__setitem__(0, HUGE), False),
+    "huge int t0Up": (lambda b: b.update(t0Up=HUGE), False),
+    "huge int battery": (lambda b: b["device"].update(battery=HUGE), False),
+    "huge int lat": (lambda b: b["location"][0].update(lat=HUGE), False),
+    "huge int label t": (lambda b: b["labels"][0].update(t=HUGE), False),
+    "huge int batchSeq": (lambda b: b.update(batchSeq=HUGE), False),
+    "batchSeq 2^31-1": (lambda b: b.update(batchSeq=2**31 - 1), True),
+    "batchSeq 2^31": (lambda b: b.update(batchSeq=2**31), False),
+    "t0Utc 2099": (lambda b: b.update(t0Utc="2099-12-31T23:59:59.999Z"), True),
+    "t0Utc 9999-12-31": (lambda b: b.update(t0Utc="9999-12-31T23:59:59.999Z"), False),
+    "t0Utc 1969": (lambda b: b.update(t0Utc="1969-12-31T23:59:59.999Z"), False),
+    "t0UtcMs 0": (lambda b: b.update(t0UtcMs=0), True),  # the processor then reads t0Utc
+    "t0UtcMs negative": (lambda b: b.update(t0UtcMs=-1), False),
+    "t0UtcMs 10^17": (lambda b: b.update(t0UtcMs=10**17), False),
+    "t0UtcMs 2100": (lambda b: b.update(t0UtcMs=4_102_444_800_000), False),
+    "location tUtcMs 10^17": (lambda b: b["location"][0].update(tUtcMs=10**17), False),
+    "location tUtcMs huge": (lambda b: b["location"][0].update(tUtcMs=HUGE), False),
+    "location tUtcMs 2099": (lambda b: b["location"][0].update(tUtcMs=4_102_444_799_999), True),
+    "label t 1e300": (lambda b: b["labels"][0].update(t=1e300), False),
+    "label t -1e300": (lambda b: b["labels"][0].update(t=-1e300), False),
+    "label t 30 days": (lambda b: b["labels"][0].update(t=30 * 86400), True),
+    "label t negative": (lambda b: b["labels"][0].update(t=-1.5), True),
+    "deviceMotion t 1e300": (lambda b: b["deviceMotion"]["t"].__setitem__(-1, 1e300), False),
+    "altimeter t -1e300": (lambda b: b["altimeter"]["t"].__setitem__(0, -1e300), False),
+}
+
+
+@pytest.mark.parametrize("name", list(BATCH_RANGES))
+def test_batch_ranges_match_mock(name, batch, mock_server):
+    mutate, valid = BATCH_RANGES[name]
+    mutate(batch)
+    mine = _outcome(contract.validate_batch, batch)
+    assert mine == _outcome(mock_server.validate, batch)
+    assert mine[0] == ("ok" if valid else "invalid"), mine
+
+
 def test_fixture_batch_is_valid(batch, mock_server):
     contract.validate_batch(batch)
     mock_server.validate(batch)
@@ -174,6 +214,33 @@ def test_session_matches_mock(name, session_meta, mock_server):
     mine = _outcome(contract.validate_session_meta, session_meta, path_id)
     theirs = _outcome(mock_server.validate_session_meta, session_meta, path_id)
     assert mine == theirs
+
+
+SESSION_RANGES = {
+    "startedAtUtc not ISO": (lambda m: m.update(startedAtUtc="yesterday"), False),
+    "startedAtUtc date only": (lambda m: m.update(startedAtUtc="2026-11-21"), True),  # parse_iso reads it
+    "startedAtUtc with offset": (lambda m: m.update(startedAtUtc="2026-11-21T11:12:03.512+02:00"), True),
+    "startedAtUtc no zone": (lambda m: m.update(startedAtUtc="2026-11-21T09:12:03.512"), True),
+    "startedAtUtc impossible": (lambda m: m.update(startedAtUtc="2026-02-30T09:12:03.512Z"), False),
+    "startedAtUtc overflows to UTC": (lambda m: m.update(startedAtUtc="0001-01-01T00:00:00+01:00"), False),
+    "startedAtUtc 9999": (lambda m: m.update(startedAtUtc="9999-12-31T23:59:59.999Z"), False),
+    "endedAtUtc not ISO": (lambda m: m.update(batchCount=3, endedAtUtc="10:00"), False),
+    "endedAtUtc 1900": (lambda m: m.update(batchCount=3, endedAtUtc="1900-01-01T00:00:00.000Z"), False),
+    "huge int startUptimeSec": (lambda m: m.update(startUptimeSec=HUGE), False),
+    "batchCount 2^31-1": (lambda m: m.update(batchCount=2**31 - 1, recovered=True), True),
+    "batchCount 2^31": (lambda m: m.update(batchCount=2**31, recovered=True), False),
+    "huge int batchCount": (lambda m: m.update(batchCount=HUGE, recovered=True), False),
+}
+
+
+@pytest.mark.parametrize("name", list(SESSION_RANGES))
+def test_session_ranges_match_mock(name, session_meta, mock_server):
+    path_id = session_meta["sessionId"]
+    mutate, valid = SESSION_RANGES[name]
+    mutate(session_meta)
+    mine = _outcome(contract.validate_session_meta, session_meta, path_id)
+    assert mine == _outcome(mock_server.validate_session_meta, session_meta, path_id)
+    assert mine[0] == ("ok" if valid else "invalid"), mine
 
 
 def _app_session_copies():

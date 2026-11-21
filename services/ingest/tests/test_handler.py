@@ -315,3 +315,21 @@ def test_session_idempotency_key_must_name_phase(session_meta, keys, sinks):
 def test_session_wrong_key_is_401(session_meta, keys, sinks):
     sid = session_meta["sessionId"]
     assert handle_session(sid, headers(**{"x-device-key": "bad"}), gz(session_meta), keys, sinks).status == 401
+
+
+def test_huge_integer_is_400_not_500(batch, keys, sinks):
+    """10**400 doesn't fit a float: math.isfinite would raise OverflowError (500, retried forever)."""
+    for mutate in (lambda b: b["accelRaw"]["x"].__setitem__(0, 10**400),
+                   lambda b: b.update(t0Up=10**400), lambda b: b.update(batchSeq=10**400),
+                   lambda b: b["location"][0].update(tUtcMs=10**400)):
+        b = json.loads(json.dumps(batch))
+        mutate(b)
+        resp = handle_batch(headers(), gzip.compress(json.dumps(b).encode()), keys, sinks)
+        assert resp.status == 400, resp.body
+    assert not sinks.events and not sinks.blobs
+
+
+def test_huge_integer_in_session_metadata_is_400(session_meta, keys, sinks):
+    session_meta["startUptimeSec"] = 10**400
+    sid = session_meta["sessionId"]
+    assert handle_session(sid, headers(), gz(session_meta), keys, sinks).status == 400

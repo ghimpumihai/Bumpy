@@ -12,6 +12,7 @@ Every request is checked in the same order as [`mock_ingest_server.py`](../../sr
 - **Gzip is decided by the magic bytes** `1f 8b`, not by `Content-Encoding`: the Functions host may inflate the body itself and drop the header (plan §5). A body without them is taken as JSON the host already inflated, within the same size limit.
 - **Size:** at most 200 KB decompressed. The app setting `MAX_BODY_BYTES` can lower it; it can't go above 240 KB (an Event Hubs Basic event is at most 256 KB).
 - **Strings:** `deviceId` at most 128 characters, `labels[].type` at most 64, every other string and object key at most 2000; no NUL character or unpaired surrogate anywhere (PostgreSQL text/jsonb can't store them; IDs and label types are in primary keys). The app sends UUIDs, label types of at most 15 characters and short notes.
+- **Ranges:** every number fits a float (a 400-digit integer is a `400`, not a crash); `batchSeq` and `batchCount` at most 2³¹−1 (PostgreSQL `integer`); `t0Utc`, `t0UtcMs`, `location[].tUtcMs`, `startedAtUtc` and `endedAtUtc` from 1970 to 2099; the `t` of `deviceMotion`, `accelRaw`, `gyroRaw`, `altimeter` and `labels` within ±30 days of the batch start. `startedAtUtc`/`endedAtUtc` must parse as the processor reads them (`roadride/live.py` `parse_iso`: ISO-8601, no zone = UTC). Outside these the processor can't turn the value into a time or a column and would skip the message, leaving the data only in the archive.
 
 Then the message:
 

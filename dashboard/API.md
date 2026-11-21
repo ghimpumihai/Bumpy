@@ -86,6 +86,7 @@ says so and shows each card's last data time, instead of reporting the phones as
 | `quality.*` | per-stream rows/rates/gaps, GPS accuracy, invalid windows, `rejected/late/duplicate` live batches. Per stream, the finalize job's whole-trip numbers where it has them, else the live batches' |
 | `distanceM` | sum of the steps between fixes with a known accuracy ≤ 50 m, counting a step only when either end moves ≥ 1 m/s (or neither has a speed), so GPS jitter while parked adds nothing |
 | `detection` | detections vs. manual taps within ±1.5 s. `truePositives`/`falsePositives` count detections (one with a tap of its type that close, or none), `falseNegatives` counts taps with no detection that close; `precision = TP / (TP + FP)` over detections, `recall` = found taps / all taps |
+| `RoadEvent.magnitude` | m/s²: peak \|band-passed (1–30 Hz) vertical acceleration\| at the jolt (pothole, never below the 5 m/s² detection threshold) or at either axle (speed bump) |
 | `SessionSeries` | `session_series` (≈ 5 Hz vertical/lateral/longitudinal acceleration, speed, MSDV so far) |
 | `SegmentAggregate` | `segment_agg` table, rebuilt by the aggregation step (segment × vehicle type, plus an `all` row) |
 | `roughness` | `exp(mean(log r − vehicle effect − β·log(v / 10 m/s)))`: what a car would feel at 36 km/h. Only vehicles linked to the car through shared segments are fitted (D45); a segment driven only by others has `roughness: null` and `roughnessMethod: "percentile"` |

@@ -124,7 +124,7 @@ def _wf_sos(fs: float) -> np.ndarray:
 
 
 SOS_BAND = signal.butter(4, ROUGH_BAND_HZ, btype="bandpass", fs=FS, output="sos")
-SOS_LOW = signal.butter(4, 2.0, btype="lowpass", fs=FS, output="sos")  # anti-alias before 10 Hz
+SOS_LOW = signal.butter(4, 2.0, btype="lowpass", fs=FS, output="sos")  # anti-alias for the 20 Hz decimation (Nyquist 10 Hz)
 SOS_WF = _wf_sos(FS_WF)
 SOS_PITCH = signal.butter(2, BUMP_BAND_HZ, btype="bandpass", fs=FS, output="sos")
 

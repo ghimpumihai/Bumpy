@@ -385,7 +385,7 @@ Raw values are always stored as measured; normalization happens only in the aggr
 3. **Quality checks.** Measure sample rates and gaps. Mark windows invalid when `phone_moved` was tapped, when gravity drifts in the phone's frame, or when the gyro's turn rate disagrees with GPS. Report what fraction of the session is valid.
 4. **Road roughness.** Band-pass vertical acceleration (about 1 to 30 Hz), compute RMS per segment pass, and record speed with it.
 5. **Potholes and speed bumps.**
-   - A pothole is a sharp jump in high-passed vertical acceleration, counted only above 15 km/h.
+   - A pothole is a sharp jump in band-passed (1–30 Hz) vertical acceleration, counted only above 15 km/h.
    - A speed bump shows a double peak in pitch rate (front axle, then rear axle).
    - Detections are scored against manual taps within ±1.5 s, since people react late, as precision and recall.
 6. **Motion sickness.**

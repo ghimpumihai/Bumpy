@@ -39,7 +39,7 @@ describe("geo", () => {
 });
 
 describe("scales", () => {
-  it("puts values into ISO 2631-1 comfort bands", () => {
+  it("puts values into the roughness bands", () => {
     expect(bandFor(ROUGHNESS_BANDS, 0.2)?.colorVar).toBe("--scale-1");
     expect(bandFor(ROUGHNESS_BANDS, 0.315)?.colorVar).toBe("--scale-2");
     expect(bandFor(ROUGHNESS_BANDS, 5)?.colorVar).toBe("--scale-5");

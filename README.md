@@ -2,14 +2,67 @@
 
 Codelap Hackathon 2026 (Porsche Engineering, "Data-Driven Infrastructure Engineering"). Road quality and motion sickness measured with phone sensors in cars, buses and trams, sent to Azure live while driving, processed, and shown on a map dashboard.
 
+```mermaid
+flowchart TB
+  subgraph CAPTURE["Capture"]
+    phone["iPhone recorder app<br/>100 Hz motion + GPS, disk queue"]
+    replay["Replay tool<br/>re-sends a recorded trip"]
+    laptop["Laptop upload<br/>(tools/upload not written yet)"]
+  end
+
+  subgraph AZURE["Azure North Europe"]
+    ingest["Ingest Function<br/>POST /api/ingest<br/>PUT /api/ingest/sessions/{id}"]
+    kv["Key Vault<br/>device-key hashes"]
+    eh["Event Hubs<br/>one partition per phone"]
+
+    subgraph STORAGE["Blob Storage"]
+      lake[("lake container<br/>raw batch archive")]
+      sessions[("sessions container<br/>fallback uploads")]
+    end
+
+    eg["Event Grid<br/>_complete.json created"]
+    sb["Service Bus queue<br/>session-ready"]
+
+    subgraph CAE["Container Apps"]
+      proc["Stream processor<br/>signal processing: roughness,<br/>potholes, motion-sickness dose"]
+      migrate["Migrate job<br/>runs before each services deploy"]
+      read["Read API<br/>FastAPI, 12 read-only routes"]
+      finalize["Finalize + aggregate jobs<br/>H3 segments, crowd-confirmed potholes<br/>(deployed, code not written yet)"]
+    end
+
+    pg[("PostgreSQL 17 + PostGIS<br/>private subnet, Entra logins only")]
+    web["Dashboard<br/>React + MapLibre<br/>Static Web Apps (deploy not run yet)"]
+    ops["Log Analytics + App Insights<br/>budget alerts"]
+  end
+
+  gh["GitHub Actions<br/>tests, Terraform, deploys via OIDC"]
+  acr["Container Registry<br/>processor + read API image"]
+
+  phone -->|"gzip JSON batch every 2 s<br/>+ session.json at Start and Stop"| ingest
+  replay -->|"same API, source=replay"| ingest
+  ingest -->|"checks device key"| kv
+  ingest -->|"partition key = device"| eh
+  ingest -->|"one blob per batch"| lake
+  eh --> proc
+  proc -->|"live tables + checkpoint<br/>in one transaction"| pg
+  migrate --> pg
+  pg --> read -->|"JSON / GeoJSON"| web
+
+  proc -.->|"trip ended"| sb
+  laptop -.-> sessions --> eg --> sb
+  sb -.-> finalize
+  lake -.-> finalize
+  finalize -.-> pg
+
+  gh -->|"push images"| acr
+  acr --> CAE
+  gh -.->|"deploys"| AZURE
+
+  classDef planned stroke-dasharray: 5 5
+  class finalize,laptop planned
 ```
-iPhone app ──2 s gzip batches──▶ ingest function ──▶ Event Hubs ──▶ stream processor ──▶ PostgreSQL + PostGIS
-                                      │                                                       │
-                                      └──▶ raw archive (Blob Storage)        read API ◀────────┘
-                                                                                 │
-                                                                                 ▼
-                                                                          dashboard (web)
-```
+
+Solid boxes and arrows run today. Dashed ones are not working yet: the finalize and aggregate jobs exist in Azure but their code isn't written, the processor doesn't put "trip ended" on the queue yet, and the laptop upload script doesn't exist. The Event Grid → Service Bus wiring for fallback uploads is deployed.
 
 - Plans and decision log: [decisions/](decisions/README.md)
 - iPhone recorder spec: [decisions/01-initial-plan.md](decisions/01-initial-plan.md)

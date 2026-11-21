@@ -14,11 +14,13 @@ from psycopg.types.json import Jsonb
 from . import clock
 from .db import is_connection_loss, is_retryable_conflict
 from .dsp import Pipeline
-from .live import BatchFacts, SessionFacts, exclusion_reasons
+from .live import MAX_HACC_M, BatchFacts, SessionFacts, exclusion_reasons
 
 log = logging.getLogger(__name__)
 
 T = TypeVar("T")
+# Half of finalize.MAX_FIX_GAP_S: no point the finalize job places between two fixes is further from one.
+EVENT_FIX_MAX_S = 5.0
 
 
 
@@ -290,18 +292,20 @@ class Store:
                 )
         for e in out.events:
             e.t += off
-            # Position of the nearest GPS fix of this trip (≈ 1 Hz, so within about half a second).
+            # Position of the nearest usable GPS fix of this trip (≈ 1 Hz, so within about half a
+            # second), none further than EVENT_FIX_MAX_S. The finalize job interpolates it instead.
             self.conn.execute(
                 """
                 INSERT INTO events (session_id, type, t, geom, speed_ms, magnitude, confidence)
                 VALUES (%s, %s, %s,
-                        (SELECT geom FROM track_points WHERE session_id = %s
+                        (SELECT geom FROM track_points WHERE session_id = %s AND h_acc_m <= %s
+                           AND abs(extract(epoch FROM t - %s)) <= %s
                          ORDER BY abs(extract(epoch FROM t - %s)) LIMIT 1),
                         %s, %s, %s)
                 ON CONFLICT (session_id, type, t) DO NOTHING
                 """,
-                (f.session_id, e.type, from_epoch(e.t), f.session_id, from_epoch(e.t - shift), e.speed,
-                 e.magnitude, e.confidence),
+                (f.session_id, e.type, from_epoch(e.t), f.session_id, MAX_HACC_M, from_epoch(e.t - shift),
+                 EVENT_FIX_MAX_S, from_epoch(e.t - shift), e.speed, e.magnitude, e.confidence),
             )
         self.conn.execute(
             """

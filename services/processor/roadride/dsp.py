@@ -21,11 +21,15 @@ arXiv:2501.17664 eq. 3). Its poles sit far below 100 Hz, so the signal is low-pa
 20 Hz before Wf is applied.
 
 Side-to-side sway (D49): ISO 2631-1 only weights vertical motion for sickness. The lateral acceleration
-gets the Donohew & Griffin (2004) weighting Wy (03-research-notes: flat from 0.0315 to 0.25 Hz, then
-−12 dB per octave; built as second-order Butterworth corners there, since the exact coefficients
-weren't published), unit gain in its flat band like Wf at its peak. The two doses are energies on the
-same 20 Hz grid, so they add: dose = ∫(a_wz² + k_y²·a_wy²) dt and MSDV = √(MSDV_z² + MSDV_y²), the
-root-sum-of-squares ISO 2631-1 uses to combine axes. Every MSDV the pipeline reports (live, series,
+gets the Donohew & Griffin (2004) weighting Wy (03-research-notes: an acceleration weighting flat from
+0.0315 to 0.25 Hz, then −12 dB per octave to 0.8 Hz; no coefficients were published). D50: it is built
+from a Butterworth high-pass below the band and a second-order low-pass at 0.25 Hz whose Q was fitted
+(minimax) to that straight-line weighting, so the gain stays within ±0.8 dB of it from 0.0315 to
+0.8 Hz; Butterworth corners at the band edges (D49) read 3 dB (29 %) low at 0.0315 and 0.25 Hz.
+The two doses are energies on the same 20 Hz grid, so they add: dose = ∫(a_wz² + k_y²·a_wy²) dt and
+MSDV = √(MSDV_z² + MSDV_y²). That is the root-sum-of-squares ISO 2631-1 uses to combine axes for
+comfort and health; for motion sickness the standard covers vertical motion only, so the combination
+is the project's choice (D49). Every MSDV the pipeline reports (live, series,
 dose_inc for segment passes) is that combined value. Lateral needs the learned forward axis: the three
 horizontal phone-frame components are weighted from the start, and their output is projected on the
 lateral axis once it is known, so there is no lateral dose before that and no filter transient when it
@@ -113,6 +117,11 @@ FIX_MAX_HOLD_S = 3.0  # use the last GPS speed for at most this long
 FWD_MIN_DVDT = 0.5  # m/s², only clear speed changes say where "forward" is
 FWD_MIN_DT, FWD_MAX_DT = 0.5, 3.0  # s between the two fixes of a speed change
 FWD_MIN_EVIDENCE = 10  # speed changes before the forward axis is trusted
+# A speed change taken in a turn adds dv/dt · a_lat along the lateral axis, whose sign follows the turn,
+# so it only averages out slowly (a random mount braking into 1.5–3 m/s² turns was up to 40° off after
+# 10 items). The turn's lateral acceleration is v·ω (ω = yaw rate from the gyro): a speed change counts only
+# when that is at most this share of |dv/dt|, i.e. tilts the item by ≤ 10°.
+FWD_MAX_TURN_RATIO = math.tan(math.radians(10.0))
 FWD_SETTLE_S = 5.0  # after a phone_moved tap; the same span quality.handled marks as handled
 FWD_REMOUNT_TILT_DEG = 20.0  # road grade and banking tilt the phone by a few degrees; more is a re-mount
 FWD_GRAVITY_TAU_S = 2.0  # smoothing of the gravity direction for that comparison
@@ -122,7 +131,9 @@ FWD_REMOUNT_YAW_DEG = 30.0
 MOVED = "phone_moved"  # a phone_moved tap, queued with the fixes so it is taken at its own time
 
 WF = dict(f1=0.08, f2=0.63, f4=0.25, q4=0.86, f5=0.0625, q5=0.80, f6=0.1, q6=0.80)
-WY = dict(f_low=0.0315, f_high=0.25)  # PROVISIONAL: Donohew & Griffin (2004) lateral weighting, Hz
+# PROVISIONAL: Donohew & Griffin (2004) lateral weighting (D50): Butterworth high-pass at f_hp, below the
+# paper's lowest frequency, and a low-pass at the paper's 0.25 Hz break; f_hp and q_lp fitted (minimax).
+WY = dict(f_hp=0.0172, f_lp=0.25, q_lp=0.91)
 LATERAL_K = 1.0  # PROVISIONAL: multiplying factor of the lateral axis in the combined dose (ISO-style k)
 
 
@@ -144,10 +155,10 @@ def wf_analog_factors() -> list[tuple[list[float], list[float]]]:
 
 
 def wy_analog_factors() -> list[tuple[list[float], list[float]]]:
-    """Lateral weighting Wy as two analog (b, a) factors: Butterworth high-pass and low-pass."""
-    wl, wh = _w(WY["f_low"]), _w(WY["f_high"])
-    hh = ([1.0, 0.0, 0.0], [1.0, math.sqrt(2) * wl, wl ** 2])
-    hl = ([wh ** 2], [1.0, math.sqrt(2) * wh, wh ** 2])  # −12 dB per octave above f_high
+    """Lateral weighting Wy as two analog (b, a) factors: Butterworth high-pass and a low-pass."""
+    wh, wl = _w(WY["f_hp"]), _w(WY["f_lp"])
+    hh = ([1.0, 0.0, 0.0], [1.0, math.sqrt(2) * wh, wh ** 2])
+    hl = ([wl ** 2], [1.0, wl / WY["q_lp"], wl ** 2])  # −12 dB per octave above f_lp
     return [hh, hl]
 
 
@@ -257,9 +268,14 @@ class Pipeline:
         self.prev_fix = s.get("prev_fix")  # [t, speed or None]
         self.h_acc = list(s.get("h_acc", [0.0, 0.0, 0.0]))
         self.h_n = int(s.get("h_n", 0))
+        self.h_yaw = float(s.get("h_yaw", 0.0))  # Σ yaw rate (rad/s, about up) over the h_acc samples
         self.last_event_t = s.get("last_event_t")
         self.open_event = s.get("open_event")  # [t, peak, speed] while searching the peak
         self.rough_ema = s.get("rough_ema")
+        # Weight of the exponential average so far (1 − (1−α)^n): dividing by it keeps roughness_now
+        # unbiased at the start of a trip, where the average starts from 0. A trip saved before it
+        # started its average from the first sample: weight 1.
+        self.rough_w = float(s.get("rough_w", 0.0 if self.rough_ema is None else 1.0))
         self.grid = s.get("grid")  # None until the first sample, then the segment's resampling state
         # Fixes newer than the last processed sample wait here, so they're taken at their own time
         # whatever the batch boundaries are. A fix fed after the samples around its time (it arrived
@@ -272,9 +288,6 @@ class Pipeline:
         self.fwd_settle_until = s.get("fwd_settle_until")  # evidence starting before this is ignored
         self.g_ema = s.get("g_ema")  # smoothed gravity direction, phone frame
         self.g_ref = s.get("g_ref")  # g_ema when the current forward estimate started
-        # ∫ a_w² dt of a 5 Hz window cut short by a reset, added to the next window's dose_inc so that
-        # Σ dose_inc over the series stays the trip's dose.
-        self.carry_aw2 = float(s.get("carry_aw2", 0.0))
         if self.grid is not None:
             self._upgrade_grid(self.grid)
 
@@ -282,11 +295,11 @@ class Pipeline:
         return {
             "dose": self.dose, "dose_z": self.dose_z, "dose_y": self.dose_y, "ua_sign": self.ua_sign,
             "forward_sum": self.forward_sum, "forward_n": self.forward_n,
-            "prev_fix": self.prev_fix, "h_acc": self.h_acc, "h_n": self.h_n,
+            "prev_fix": self.prev_fix, "h_acc": self.h_acc, "h_n": self.h_n, "h_yaw": self.h_yaw,
             "last_event_t": self.last_event_t, "open_event": self.open_event,
-            "rough_ema": self.rough_ema, "grid": self.grid,
+            "rough_ema": self.rough_ema, "rough_w": self.rough_w, "grid": self.grid,
             "pending_fixes": [list(f) for f in self.pending_fixes],
-            "held": self.held, "last_bump_t": self.last_bump_t, "carry_aw2": self.carry_aw2,
+            "held": self.held, "last_bump_t": self.last_bump_t,
             "still_yaw": self.still_yaw, "fwd_settle_until": self.fwd_settle_until,
             "g_ema": self.g_ema, "g_ref": self.g_ref,
         }
@@ -306,6 +319,7 @@ class Pipeline:
         gr.setdefault("bump", {"peak": None, "p1": None})
         gr["bump"].setdefault("recent", [])
         gr.setdefault("zi_wy", _zeros(SOS_WY, 3))  # saved before the lateral dose: starts from rest
+        gr["win"].setdefault("n_ax", gr["win"]["n"])  # saved before n_ax: the mean over the whole window
 
     def flush(self) -> list[Event]:
         """End of the trip: the potholes still held back (and one whose peak is still being searched)
@@ -338,7 +352,7 @@ class Pipeline:
             "zi_wf": _zeros(SOS_WF)[0],
             "zi_wy": _zeros(SOS_WY, 3),
             "zi_pitch": _zeros(SOS_PITCH)[0],
-            "win": {"n": 0, "peak": 0.0, "lat": 0.0, "lon": 0.0, "b2": 0.0, "aw2": 0.0},
+            "win": {"n": 0, "n_ax": 0, "peak": 0.0, "lat": 0.0, "lon": 0.0, "b2": 0.0, "aw2": 0.0},
             # Speed-bump search: the open pitch peak, and the nose-up peak waiting for its rear axle.
             # Kept in the grid so a gap (new grid) drops a half-seen bump.
             "bump": {"peak": None, "p1": None, "recent": []},
@@ -383,11 +397,12 @@ class Pipeline:
             dt_fix = t - self.prev_fix[0]
             if FWD_MIN_DT <= dt_fix <= FWD_MAX_DT:
                 dvdt = (speed - self.prev_fix[1]) / dt_fix
-                if abs(dvdt) >= FWD_MIN_DVDT:
+                turn = abs(self.h_yaw / self.h_n) * (speed + self.prev_fix[1]) / 2  # ≈ |mean a_lat|
+                if abs(dvdt) >= FWD_MIN_DVDT and turn <= FWD_MAX_TURN_RATIO * abs(dvdt):
                     mean_h = np.array(self.h_acc) / self.h_n
                     self.forward_sum = (np.array(self.forward_sum) + dvdt * mean_h).tolist()
                     self.forward_n += 1
-        self.h_acc, self.h_n = [0.0, 0.0, 0.0], 0
+        self.h_acc, self.h_n, self.h_yaw = [0.0, 0.0, 0.0], 0, 0.0
         self.prev_fix = [t, speed]
 
     def _smooth_gravity(self, down: np.ndarray) -> None:
@@ -417,7 +432,7 @@ class Pipeline:
 
     def _restart_axis(self, t: float, *, settle: bool) -> None:
         self.forward_sum, self.forward_n, self.still_yaw = [0.0, 0.0, 0.0], 0, 0.0
-        self.h_acc, self.h_n = [0.0, 0.0, 0.0], 0
+        self.h_acc, self.h_n, self.h_yaw = [0.0, 0.0, 0.0], 0, 0.0
         self.g_ref = None if self.g_ema is None else list(self.g_ema)
         if settle:
             self.fwd_settle_until = t + FWD_SETTLE_S
@@ -441,13 +456,26 @@ class Pipeline:
         samples = np.hstack([np.asarray(ua, float).reshape(-1, 3) * self.ua_sign,
                              np.asarray(grav, float).reshape(-1, 3),
                              rr])[order]
+        # One NaN or inf would poison every filter, and the state, for the rest of the trip: such a
+        # sample is left out, as if CoreMotion had skipped it.
+        finite = np.isfinite(t) & np.isfinite(samples).all(axis=1)
+        t, samples = t[finite], samples[finite]
         if reset:
             self._drop_grid()
             out.reset = True
-        if len(t) and self.grid is not None and abs(t[0] - self.grid["prev"][0]) > MAX_GAP_S:
-            # A hole, or the clock jumped backwards: either way the filters can't continue.
-            self._drop_grid()
-            out.reset = True
+        if len(t) and self.grid is not None:
+            last = self.grid["prev"][0]
+            if t[0] < last - MAX_GAP_S:  # the clock jumped backwards: the filters can't continue
+                self._drop_grid()
+                out.reset = True
+            else:
+                # Samples overlapping the previous batch are dropped (never interleaved) before the
+                # hole is measured, so an overlap doesn't add its length to a stall right after it.
+                new = t > last
+                t, samples = t[new], samples[new]
+                if len(t) and t[0] - last > MAX_GAP_S:  # a hole
+                    self._drop_grid()
+                    out.reset = True
         if len(t) == 0:
             self.pending_fixes = fixes  # no samples to place them against yet
             self._totals(out)
@@ -542,20 +570,23 @@ class Pipeline:
         return out
 
     def _drop_grid(self) -> None:
-        if self.grid is not None:
-            self.carry_aw2 += self.grid["win"].get("aw2", 0.0)
+        # The open 5 Hz window is dropped with its dose: a window carries the dose of its own 0.2 s
+        # only, so a pass's a_w = √(Σ dose_inc / Σ 0.2 s) stays unbiased. The trip's dose keeps it.
         self.grid = None
 
     def _rough(self) -> float | None:
-        return None if self.rough_ema is None else math.sqrt(self.rough_ema)
+        if self.rough_ema is None or self.rough_w <= 0:
+            return None
+        return math.sqrt(self.rough_ema / self.rough_w)
 
     def _process(self, ks: np.ndarray, gt: np.ndarray, grid: np.ndarray,
                  fixes: list[tuple[float, float | None]], out: FeedResult) -> None:
         gr = self.grid
         down = self._down(grid[:, 3:6])
         ua = grid[:, 0:3]
-        vert = -np.einsum("ij,ij->i", ua, down) * G
+        vert = self._vert(grid)
         horiz = (ua + np.einsum("ij,ij->i", ua, down)[:, None] * down * -1.0) * G  # ua minus its vertical part
+        yaw = -np.einsum("ij,ij->i", grid[:, 6:9], down)  # rad/s about up, counter-clockwise
 
         band, zb = signal.sosfilt(SOS_BAND, vert, zi=np.array(gr["zi_band"]))
         low, zl = signal.sosfilt(SOS_LOW, vert, zi=np.array(gr["zi_low"]))
@@ -599,7 +630,10 @@ class Pipeline:
             for k in range(i, j):
                 tt = float(gt[k])
                 b = float(band[k])
-                self.rough_ema = b * b if self.rough_ema is None else self.rough_ema + alpha * (b * b - self.rough_ema)
+                if self.rough_ema is None:
+                    self.rough_ema = 0.0
+                self.rough_ema += alpha * (b * b - self.rough_ema)
+                self.rough_w += alpha * (1.0 - self.rough_w)
                 win["b2"] = win.get("b2", 0.0) + b * b
                 axes = self._axes(down[k]) if self.forward_known else None
                 if dec[k]:
@@ -612,6 +646,7 @@ class Pipeline:
                     self.dose += dz + dy
                     win["aw2"] = win.get("aw2", 0.0) + dz + dy
                 self.h_acc = (np.array(self.h_acc) + h_low[k]).tolist() if self.h_n else h_low[k].tolist()
+                self.h_yaw += float(yaw[k])
                 self.h_n += 1
 
                 self._pothole(tt, b, out)
@@ -626,16 +661,20 @@ class Pipeline:
                     fwd, lat = axes
                     win["lon"] += float(h_low[k] @ fwd)
                     win["lat"] += float(h_low[k] @ lat)
+                    # Mean over the samples that had an axis: the window in which it becomes known
+                    # (or restarts) isn't diluted by the samples before.
+                    win["n_ax"] += 1
                 win["n"] += 1
                 if (int(ks[k]) + 1) % SERIES_EVERY == 0:
+                    n_ax = win["n_ax"]
                     out.series.append(SeriesPoint(
-                        t=tt, a_vert=round(win["peak"], 4), a_lat=round(win["lat"] / win["n"], 4),
-                        a_lon=round(win["lon"] / win["n"], 4), speed=self._speed_at(tt),
+                        t=tt, a_vert=round(win["peak"], 4),
+                        a_lat=round(win["lat"] / n_ax, 4) if n_ax else 0.0,
+                        a_lon=round(win["lon"] / n_ax, 4) if n_ax else 0.0, speed=self._speed_at(tt),
                         msdv=round(math.sqrt(self.dose), 5),
                         rough_rms=math.sqrt(win.get("b2", 0.0) / win["n"]),
-                        dose_inc=win.get("aw2", 0.0) + self.carry_aw2))
-                    win.update(n=0, peak=0.0, lat=0.0, lon=0.0, b2=0.0, aw2=0.0)
-                    self.carry_aw2 = 0.0
+                        dose_inc=win.get("aw2", 0.0)))
+                    win.update(n=0, n_ax=0, peak=0.0, lat=0.0, lon=0.0, b2=0.0, aw2=0.0)
             i = j
         gr["zi_pitch"] = zp.tolist()
         self.pending_fixes = list(fixes[fix_i:])  # later than the last sample: taken next time

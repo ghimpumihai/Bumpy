@@ -224,6 +224,19 @@ def test_unparseable_value_falls_back_to_the_forgiving_reader(folder):
     assert np.isnan(fast["rr_z"][77])  # an empty field
 
 
+def test_an_infinite_value_reads_as_zero_as_the_app_sends_it(tmp_path):
+    """The app's batches carry a non-finite sensor value as 0 (IngestBatch round6); an upload must give
+    the same numbers, not 1.8e308 (np.nan_to_num's default for inf)."""
+    d = make_folder(tmp_path / "phone")
+    csv = d / "device_motion.csv"
+    csv.write_bytes(csv.read_bytes().replace(b",-1.000000,", b",inf,", 1))  # the first row's g_z
+    root = tmp_path / "sessions"
+    uploader.run(d, client=None, dry_run=root, log=lambda m: None)
+    trip = up.load(up.DirUploads(root), SID)
+    g = np.asarray(trip.batches[0].motion_g, dtype=float).reshape(-1, 3)
+    assert g[0, 2] == 0.0 and g[1, 2] == -1.0
+
+
 def _tamper(uploaded, name, data):
     (uploaded.root / SID / name).write_bytes(data)
 

@@ -29,6 +29,15 @@ def from_ms(ms: int | float) -> dt.datetime:
     return dt.datetime.fromtimestamp(ms / 1000.0, tz=UTC)
 
 
+# A fix gives a position only with a known accuracy of at most this (the read API's MAX_HACC_M for the
+# track). Without one it is iOS's -1, which Apple documents as "the latitude and longitude are invalid".
+MAX_HACC_M = 50.0
+
+
+def usable_fix(h_acc_m: float | None) -> bool:
+    return h_acc_m is not None and h_acc_m <= MAX_HACC_M
+
+
 def _non_negative(v) -> float | None:
     return float(v) if isinstance(v, (int, float)) and not isinstance(v, bool) and v >= 0 else None
 

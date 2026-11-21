@@ -152,7 +152,7 @@ Terraform doesn't see the setting (the provider hides it), so deleting it never 
 | PostgreSQL | CPU and memory %, CPU credits left (B1ms is burstable), storage %, active and failed connections | platform metrics |
 | Read API | requests by status class, average response time, restarts, error lines; platform warnings (crash loops, failed image pulls) for the processor, read API and finalize job | Container Apps metrics, `ContainerAppConsoleLogs_CL`, `ContainerAppSystemLogs_CL` |
 
-The log tiles parse the services' log lines (`<date> <time> LEVEL logger message`, `services/processor/roadride/stream.py` and `finalize.py`); a change to those lines needs the matching change in `workbook.tf`. The read API has no Application Insights SDK, so its requests come from the Container Apps `Requests` metric. A tile shows an error instead of an empty chart until its table has its first row (for example `ContainerAppConsoleLogs_CL` before any app has logged).
+The log tiles parse the services' log lines (`<date> <time> LEVEL logger message`, `services/processor/roadride/stream.py` and `finalize.py`); a change to those lines needs the matching change in `workbook.tf`. The read API also sends its requests, logs and traces to Application Insights (`azure-monitor-opentelemetry`, `services/read-api/app/main.py`), but its section uses the Container Apps `Requests` metric, which counts every request at the ingress, including those that never reach the app. A tile shows an error instead of an empty chart until its table has its first row (for example `ContainerAppConsoleLogs_CL` before any app has logged).
 
 ## Known risks to check on the first apply
 

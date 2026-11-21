@@ -35,7 +35,7 @@ Terraform creates every resource; the GitHub Actions deploys ship the code. Terr
 | Job `caj-roadride-aggregate` | the aggregation step, started by hand | `deploy-services` |
 | Static Web App `stapp-roadride-dashboard` | nothing yet: run **deploy-dashboard** (manual) | `deploy-dashboard` |
 
-The deploys use the `prod` GitHub environment and these repo variables: `AZURE_CLIENT_ID_DEPLOY`, `AZURE_TENANT_ID`, `AZURE_SUBSCRIPTION_ID`, `INGEST_FUNCTION_APP`, `ACR_NAME`, `RESOURCE_GROUP`. CI's test database uses the `POSTGRES_PASSWORD` repo secret.
+The deploys use the `prod` GitHub environment and these repo variables: `AZURE_CLIENT_ID_DEPLOY`, `AZURE_TENANT_ID`, `AZURE_SUBSCRIPTION_ID`, `INGEST_FUNCTION_APP`, `ACR_NAME`, `RESOURCE_GROUP`. CI's test database is a throwaway container with trust authentication (no password), so no secret is needed and fork PRs work (the old `POSTGRES_PASSWORD` repo secret can be deleted once this is on `main`).
 
 Contracts the service code must follow (set as environment variables by Terraform):
 

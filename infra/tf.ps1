@@ -8,10 +8,13 @@
   .\tf.ps1 apply       # main stack: create / update
   .\tf.ps1 output      # main stack outputs (URLs, names)
   .\tf.ps1 destroy     # main stack: delete everything after the hackathon
+  .\tf.ps1 fix-ingest-storage   # only the post-apply clean-up of the function app's host storage setting
+
+  Windows PowerShell 5.1 or PowerShell 7 (`pwsh`, also on macOS: `pwsh ./tf.ps1 plan`).
 #>
 param(
   [Parameter(Mandatory = $true, Position = 0)]
-  [ValidateSet('bootstrap', 'init', 'plan', 'apply', 'output', 'destroy')]
+  [ValidateSet('bootstrap', 'init', 'plan', 'apply', 'output', 'destroy', 'fix-ingest-storage')]
   [string]$Command,
 
   [Parameter(ValueFromRemainingArguments = $true)]
@@ -71,8 +74,41 @@ function Initialize-Main {
     "-backend-config=key=$env:TFSTATE_KEY"
 }
 
+# azurerm 4.x writes a key-based `AzureWebJobsStorage=...;AccountKey=;...` into the Flex Consumption app's
+# settings on every create or update, even with identity-based storage (terraform-provider-azurerm#29149).
+# Storage keys are off, so the host can't start with it. Delete it; the AzureWebJobsStorage__* identity
+# settings from Terraform stay. Safe to run any time (it does nothing when the setting isn't there).
+function Repair-IngestHostStorage {
+  if (-not (Get-Command az -ErrorAction SilentlyContinue)) {
+    Write-Warning "az is not on PATH, so the ingest function's AzureWebJobsStorage setting was not checked. Install the Azure CLI and run: .\tf.ps1 fix-ingest-storage"
+    return
+  }
+  $app = (& terraform "-chdir=$root/main" output -raw ingest_function_name) | Select-Object -Last 1
+  $rg = (& terraform "-chdir=$root/main" output -raw resource_group) | Select-Object -Last 1
+  if ($LASTEXITCODE -ne 0 -or -not $app -or -not $rg) {
+    Write-Warning "No ingest function in the Terraform outputs yet; nothing to fix."
+    return
+  }
+  $names = @(az functionapp config appsettings list --name $app --resource-group $rg --query '[].name' -o tsv)
+  if ($LASTEXITCODE -ne 0) { throw "Could not read the app settings of $app (az login? right subscription?)" }
+  $names = $names | ForEach-Object { $_.Trim() }
+  if ($names -contains 'AzureWebJobsStorage') {
+    Write-Host "Removing the key-based AzureWebJobsStorage setting from $app (provider bug, see infra/README.md)." -ForegroundColor Yellow
+    az functionapp config appsettings delete --name $app --resource-group $rg --setting-names AzureWebJobsStorage --output none
+    if ($LASTEXITCODE -ne 0) { throw "Could not delete AzureWebJobsStorage from $app" }
+  }
+  $missing = @('AzureWebJobsStorage__accountName', 'AzureWebJobsStorage__credential', 'AzureWebJobsStorage__clientId') |
+    Where-Object { $names -notcontains $_ }
+  if ($missing) { throw "$app is missing $($missing -join ', '): run .\tf.ps1 apply again." }
+  Write-Host "$app uses identity-based host storage only." -ForegroundColor Green
+}
+
 if (-not (Get-Command terraform -ErrorAction SilentlyContinue)) {
-  throw "terraform is not on PATH. Install it with: winget install Hashicorp.Terraform"
+  # $IsMacOS / $IsLinux exist only in PowerShell 7; in Windows PowerShell 5.1 they are $null.
+  $hint = 'winget install Hashicorp.Terraform'
+  if ($IsMacOS) { $hint = 'brew tap hashicorp/tap; brew install hashicorp/tap/terraform' }
+  elseif ($IsLinux) { $hint = 'see https://developer.hashicorp.com/terraform/install' }
+  throw "terraform is not on PATH. Install it with: $hint"
 }
 
 Import-DotEnv
@@ -105,6 +141,11 @@ switch ($Command) {
     Assert-Set @('TF_VAR_alert_email')
     Initialize-Main
     Invoke-Tf "-chdir=$root/main" apply @Rest
+    Repair-IngestHostStorage
+  }
+  'fix-ingest-storage' {
+    Initialize-Main
+    Repair-IngestHostStorage
   }
   'output' {
     Initialize-Main

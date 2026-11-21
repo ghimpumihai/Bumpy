@@ -50,6 +50,31 @@ Contracts the service code must follow (set as environment variables by Terrafor
 
 Database tokens: request `https://ossrdbms-aad.database.windows.net/.default` with `ManagedIdentityCredential(client_id=AZURE_CLIENT_ID)` and use it as the password with `sslmode=require`.
 
+## Function host storage (provider bug, read before applying)
+
+The function app's own storage (`stroadridefn*`) has storage keys switched off, so the Functions host
+must log in with the ingest identity through the `AzureWebJobsStorage__accountName` / `__credential` /
+`__clientId` settings. azurerm 4.x (checked in v4.81.0, `function_app_flex_consumption_resource.go`)
+**also writes a plain `AzureWebJobsStorage=DefaultEndpointsProtocol=https;AccountName=…;AccountKey=;…`
+on every create and on every update of the function app**, whatever `storage_authentication_type` says
+([#29149](https://github.com/hashicorp/terraform-provider-azurerm/issues/29149),
+[#33211](https://github.com/hashicorp/terraform-provider-azurerm/issues/33211)). The host prefers that
+string, has no key to use with it, can't take its lock lease and never starts: every request then fails.
+
+It is removed automatically:
+
+- by `tf.ps1 apply`, right after Terraform (`tf.ps1 fix-ingest-storage` runs only this step);
+- by the **terraform-apply** workflow, after the apply;
+- by **deploy-ingest**, before every deploy, which then checks that the function answers.
+
+If you apply some other way, run this afterwards (bash or PowerShell, same line):
+
+```
+az functionapp config appsettings delete -g rg-roadride -n <ingest function> --setting-names AzureWebJobsStorage
+```
+
+Terraform doesn't see the setting (the provider hides it), so deleting it never shows up as drift.
+
 ## Where this differs from the plan
 
 - Identities and the data-plane role assignments live in `main/` (`identities.tf`, `rbac.tf`), not in the compute module, so every module can use them without circular references.

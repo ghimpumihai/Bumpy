@@ -45,6 +45,7 @@ struct SettingsView: View {
                     HStack { Text("Test connection (probe POST /api/ingest)"); if testing { Spacer(); ProgressView() } }
                 }
                 .disabled(parsedURL == nil || testing)
+                .accessibilityIdentifier("testConnection")
                 if let testResult { Text(testResult).font(.footnote) }
             } header: {
                 Text("Azure upload (live, when an API URL is set)")

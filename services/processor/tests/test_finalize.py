@@ -254,7 +254,13 @@ def test_finalize_reproduces_a_clean_live_trip_and_aggregates_it(db, batch, sess
     assert store.ended == [sid]
     assert _one(db, "SELECT status, ready_sent_at FROM sessions") == ("processing", None)
     assert _one(db, "SELECT count(*) FROM session_series")[0] == counts[0]  # untouched until finalize
-    _write_archive(tmp_path, sid, [late])
+    finalized_msdv = _one(db, "SELECT msdv_z FROM sessions")[0]
+    later = motion_batch(batch, sid, 31, T0 + 62, _vert(T0 + 999))
+    later["deviceId"] = session_meta["deviceId"]
+    with db.transaction():
+        store.apply_batch(parse_batch(later), dt.datetime.fromtimestamp(T0 + 72, dt.timezone.utc))
+    assert _one(db, "SELECT msdv_z FROM sessions")[0] >= finalized_msdv  # the dose continues
+    _write_archive(tmp_path, sid, [late, later])
     fz.handle(db, fz.DirArchive(tmp_path), json.dumps({"sessionId": sid}).encode())
     assert _one(db, "SELECT status FROM sessions")[0] == "complete"
     assert _one(db, "SELECT count(*) FROM session_series")[0] > counts[0]

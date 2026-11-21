@@ -77,6 +77,7 @@ def session(tmp_path) -> Path:
     meta = json.loads(gzip.decompress(
         (ROOT / "src/mobile-ios/tools/fixtures/session_meta_stop_v1.json.gz").read_bytes()))
     meta.update(sessionId="orig-session", deviceId="PHONE-1", startUptimeSec=START_UP)
+    meta["people"] = dict(meta.get("people") or {}, raterName="Rater A")  # the phone's local copy has it
     (folder / "session.json").write_text(json.dumps(meta))
     return folder
 
@@ -140,6 +141,7 @@ def test_session_metadata_frames_the_replay(session, tmp_path):
     assert meta["start"]["startedAtUtc"] == replay.iso_ms(NOW_MS)
     assert replay.parse_iso_ms(meta["stop"]["endedAtUtc"]) >= batches[-1]["t0UtcMs"]
     assert meta["stop"]["replayOf"] == "orig-session" and meta["stop"]["deviceId"] == "replay-PHONE-1"
+    assert "raterName" not in meta["start"]["people"] and "raterName" not in meta["stop"]["people"]
 
 
 def test_from_and_duration_cut_the_trip(session, tmp_path):

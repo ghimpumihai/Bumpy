@@ -355,7 +355,7 @@ class Pipeline:
             h_low[:, c], zh[c] = signal.sosfilt(SOS_LOW, horiz[:, c], zi=zh[c])
         gr["zi_band"], gr["zi_low"], gr["zi_h"] = zb.tolist(), zl.tolist(), zh.tolist()
 
-        # Motion-sickness dose: Wf on the 10 Hz decimation of the low-passed vertical.
+        # Motion-sickness dose: Wf on the 20 Hz decimation of the low-passed vertical.
         dec = ks % DECIMATE == 0
         if dec.any():
             aw, zw = signal.sosfilt(SOS_WF, low[dec], zi=np.array(gr["zi_wf"]))

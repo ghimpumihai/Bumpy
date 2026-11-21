@@ -291,6 +291,7 @@ def test_finalized_trip_reaches_the_map(client, seed, dbname, fixture_batch, tmp
         (folder / f"{b['batchSeq']:08d}.json.gz").write_bytes(gzip.compress(json.dumps(b).encode()))
     for m, phase in zip(metas, ("start", "stop")):
         (folder / f"session-{phase}.json.gz").write_bytes(gzip.compress(json.dumps(m).encode()))
+    live_streams = _ok(client, f"/api/sessions/{SID}")["quality"]["streams"]
     with psycopg.connect(dbname=dbname) as conn:
         assert finalize.handle(conn, finalize.DirArchive(tmp_path), json.dumps({"sessionId": SID}).encode()) \
             == ("complete", SID)
@@ -299,7 +300,13 @@ def test_finalized_trip_reaches_the_map(client, seed, dbname, fixture_batch, tmp
     assert (s["status"], s["includeInAgg"], s["exclusionReasons"]) == ("complete", True, [])
     assert 0 < s["validFraction"] <= 1 and ISO.match(s["processedAt"])
     # The finalize job's streams, under the dashboard's names (src/views/quality: device_motion).
-    assert s["quality"]["streams"]["device_motion"]["expectedHz"] == 100.0
+    streams = s["quality"]["streams"]
+    assert streams["device_motion"]["expectedHz"] == 100.0
+    assert streams["device_motion"]["rows"] == 30 * 200  # every sample of the archive, not batch counts
+    # The streams finalize can't recompute from the archive keep their live numbers instead of vanishing.
+    assert set(streams) == set(live_streams) == {"device_motion", "accel_raw", "gyro_raw", "altimeter",
+                                                  "audio_level", "location"}
+    assert streams["accel_raw"] == live_streams["accel_raw"]
 
     fc = _ok(client, "/api/segments", vehicle="all")
     assert fc["type"] == "FeatureCollection" and len(fc["features"]) > 5
@@ -417,6 +424,26 @@ def test_stream_quality_from_live_batches(client, seed, fixture_batch):
 
     (row,) = _ok(client, "/api/quality")["sessions"]
     assert row["quality"]["streams"] == streams
+
+
+def test_live_distance_ignores_parked_jitter_and_inaccurate_fixes(client, seed, fixture_batch):
+    """The finalize job's distance rule (trip_distance_m): jitter while parked and fixes worse than
+    MAX_HACC_M add nothing."""
+    import random
+
+    rng = random.Random(3)
+    parked = _trip(fixture_batch, 20)
+    for b in parked:
+        fix = b["location"][0]
+        fix.update(lat=46.77 + rng.gauss(0, 3.5 / 111_000), lon=23.62 + rng.gauss(0, 3.5 / 76_000), speed=0.1)
+    seed(meta=[session_meta(SID)], batches=parked)
+    assert _ok(client, f"/api/sessions/{SID}")["distanceM"] < 5
+
+    other = "99999999-2222-4333-8444-555555555555"
+    moving = _trip(fixture_batch, 20, sid=other, device="PHONE-2")
+    moving[10]["location"][0].update(lat=46.77 + 0.003, hAcc=300.0)  # an outlier its accuracy flags
+    seed(meta=[session_meta(other, device_id="PHONE-2")], batches=moving)
+    assert 1000 < _ok(client, f"/api/sessions/{other}")["distanceM"] < 1100  # the outlier is skipped: still ≈ 19 × 55.6 m
 
 
 def test_lists_keep_each_session_apart(client, seed, fixture_batch):

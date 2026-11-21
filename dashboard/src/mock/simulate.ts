@@ -164,12 +164,14 @@ function scoreDetections(events: SimulatedEvent[], taps: Tap[], type: RoadEventT
   const falsePositives = detections.length - truePositives;
   const falseNegatives = typedTaps.filter((tap) => !detections.some((e) => near(tap.sampleIndex, e.sampleIndex))).length;
   const ratio = (num: number, den: number) => (den > 0 ? num / den : null);
+  // Precision is over the detections, recall over the taps: a pothole detected twice (front and rear
+  // axle) is one found tap, not two.
   return {
     truePositives,
     falsePositives,
     falseNegatives,
     precision: ratio(truePositives, truePositives + falsePositives),
-    recall: ratio(truePositives, truePositives + falseNegatives),
+    recall: ratio(typedTaps.length - falseNegatives, typedTaps.length),
   };
 }
 

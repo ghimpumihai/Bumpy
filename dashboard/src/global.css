@@ -195,6 +195,61 @@
     --sidebar-ring: oklch(0.556 0 0);
 }
 
+/* The live vehicle: a dot with two slow sonar rings. A DOM marker, so the rings animate on the GPU and the map
+   style isn't rewritten every frame. */
+.vehicle-marker {
+  position: relative;
+  width: 12px;
+  height: 12px;
+}
+.vehicle-marker::before,
+.vehicle-marker::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  border-radius: 9999px;
+  background: var(--heat-low);
+  opacity: 0;
+  animation: vehicle-ring 3.4s cubic-bezier(0.16, 0.6, 0.3, 1) infinite;
+}
+.vehicle-marker::after {
+  animation-delay: -1.7s;
+}
+.vehicle-marker > span {
+  position: absolute;
+  inset: 0;
+  border-radius: 9999px;
+  background: #fff;
+  box-shadow: 0 0 0 2px var(--heat-low);
+}
+.vehicle-marker[data-stale="true"]::before,
+.vehicle-marker[data-stale="true"]::after {
+  animation: none;
+}
+.vehicle-marker[data-stale="true"] > span {
+  background: var(--muted-foreground);
+  box-shadow: 0 0 0 2px var(--background);
+}
+@keyframes vehicle-ring {
+  0% {
+    transform: scale(1);
+    opacity: 0;
+  }
+  8% {
+    opacity: 0.4;
+  }
+  100% {
+    transform: scale(5);
+    opacity: 0;
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .vehicle-marker::before,
+  .vehicle-marker::after {
+    animation: none;
+  }
+}
+
 @layer base {
   * {
     @apply border-border outline-ring/50;

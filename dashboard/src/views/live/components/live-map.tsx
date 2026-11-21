@@ -1,3 +1,4 @@
+import { Marker } from "maplibre-gl";
 import { useEffect, useRef, useState } from "react";
 
 import { sessionsApi } from "@/api/sessions";
@@ -13,31 +14,21 @@ import { boundsOf } from "@/utils/geo";
 import type { RoadEventCollection } from "@/types/sessions";
 
 import {
-  LIVE_DEVICES_SOURCE_ID,
   LIVE_FOCUS_MS,
   LIVE_FOCUS_ZOOM,
   LIVE_PING_GROWTH_PX,
   LIVE_PING_MS,
-  LIVE_HALO_OPACITY,
-  LIVE_HALO_RANGE,
-  LIVE_HALO_SCALE,
-  LIVE_MARKER_RADIUS_PX,
-  LIVE_MARKER_STROKE_PX,
   LIVE_TRACK_GLOW_PX,
   LIVE_TRACK_WIDTH_PX,
   LIVE_TRACKS_SOURCE_ID,
 } from "../utils/constants";
-import { livePings, livePositions, liveTrails, type LivePing } from "../utils/geojson";
+import { EMPTY_PINGS, livePings, liveTrails, type LivePing } from "../utils/geojson";
 import { mergeTail } from "../utils/tail";
 import { useLiveAnimation } from "../utils/use-live-animation";
 
-const COLOR_VARS = ["--heat-low", "--background", "--muted-foreground", "--event-pothole", "--event-speed-bump", "--event-rail-joint"] as const;
+const COLOR_VARS = ["--heat-low", "--event-pothole", "--event-speed-bump", "--event-rail-joint"] as const;
 const PING_LAYER_ID = "live-pings-ring";
 const PING_SOURCE_ID = "live-pings";
-/** One expanding ring at phase `t` (0 → 1): grows fast then slows, fades in over its first moments and out as it grows. */
-const ringRadius = (t: number) => LIVE_MARKER_RADIUS_PX * (LIVE_HALO_SCALE + LIVE_HALO_RANGE * (1 - (1 - t) ** 3));
-const ringOpacity = (t: number) => LIVE_HALO_OPACITY * Math.min(1, t * 6) * (1 - t) ** 1.4;
-
 /** Potholes and speed bumps detected so far on a streaming trip; a detection that arrives while you watch sends a ping. */
 function LiveEvents({ device, onDetect }: { device: LiveDevice; onDetect: (events: RoadEventCollection) => void }) {
   const events = sessionsApi.useSessionEvents({
@@ -61,6 +52,42 @@ function LiveEvents({ device, onDetect }: { device: LiveDevice; onDetect: (event
     if (fresh.length > 0) onDetect({ ...data, features: fresh });
   }, [data, onDetect]);
   return data ? <EventsLayer id={`live-events-${device.sessionId}`} data={data} /> : null;
+}
+
+/** One DOM marker per vehicle, moved every frame; it dims when the phone has gone quiet. */
+function VehicleMarkers({ positions, stale }: { positions: Record<string, Position>; stale: ReadonlySet<string> }) {
+  const map = useMapState()?.map ?? null;
+  const markers = useRef(new Map<string, { marker: Marker; element: HTMLDivElement }>());
+  useEffect(() => {
+    if (!map) return;
+    const live = markers.current;
+    for (const [id, position] of Object.entries(positions)) {
+      let entry = live.get(id);
+      if (!entry) {
+        const element = document.createElement("div");
+        element.className = "vehicle-marker";
+        element.appendChild(document.createElement("span"));
+        entry = { marker: new Marker({ element }).setLngLat(position).addTo(map), element };
+        live.set(id, entry);
+      }
+      entry.marker.setLngLat(position);
+      entry.element.dataset.stale = String(stale.has(id));
+    }
+    for (const [id, entry] of live) {
+      if (!(id in positions)) {
+        entry.marker.remove();
+        live.delete(id);
+      }
+    }
+  });
+  useEffect(() => {
+    const live = markers.current;
+    return () => {
+      for (const entry of live.values()) entry.marker.remove();
+      live.clear();
+    };
+  }, [map]);
+  return null;
 }
 
 /** Glides the camera to the vehicle whose card was picked: out a little, then in, like switching character. */
@@ -102,17 +129,16 @@ export function LiveMap({ devices, stale, focus }: LiveMapProps) {
     setSeen(devices);
     setTails((previous) => Object.fromEntries(devices.map((device) => [device.sessionId, mergeTail(previous[device.sessionId] ?? [], device.track)])));
   }
-  const { trails, heads, pulse, now } = useLiveAnimation(tails);
-  const moving = devices.map((device) => {
-    const [lon, lat] = heads[device.sessionId] ?? [device.lon, device.lat];
-    return { ...device, lon, lat };
-  });
+  const { trails, heads, now } = useLiveAnimation(tails);
+  const positions: Record<string, Position> = Object.fromEntries(
+    devices.map((device) => [device.sessionId, heads[device.sessionId] ?? ([device.lon, device.lat] as Position)]),
+  );
   const points: Position[] = devices.flatMap((device) => [...(tails[device.sessionId]?.flat() ?? device.track), [device.lon, device.lat] as Position]);
   const bounds = boundsOf(points);
   // Re-fit only when the set of devices changes, so the map doesn't jump on every 2 s poll.
   const boundsKey = devices.map((device) => device.deviceId).sort().join(",");
 
-  // Same look as the heat map: a thin line in the ramp with a soft glow; the vehicle is a white dot ringed in the ramp's first colour.
+  // Same look as the heat map: a thin line in the ramp with a soft glow.
   const trackLayers: SourceLayer[] = [
     {
       id: `${LIVE_TRACKS_SOURCE_ID}-glow`,
@@ -125,36 +151,6 @@ export function LiveMap({ devices, stale, focus }: LiveMapProps) {
       type: "line",
       layout: { "line-cap": "round", "line-join": "round" },
       paint: { "line-color": colors["--heat-low"], "line-width": LIVE_TRACK_WIDTH_PX, "line-opacity": 0.95 },
-    },
-  ];
-  const deviceLayers: SourceLayer[] = [
-    {
-      id: `${LIVE_DEVICES_SOURCE_ID}-halo`,
-      type: "circle",
-      paint: {
-        "circle-radius": ringRadius(pulse),
-        "circle-color": ["case", ["get", "stale"], colors["--muted-foreground"], colors["--heat-low"]],
-        "circle-opacity": ["case", ["get", "stale"], 0.08, ringOpacity(pulse)],
-      },
-    },
-    {
-      id: `${LIVE_DEVICES_SOURCE_ID}-halo-2`,
-      type: "circle",
-      paint: {
-        "circle-radius": ringRadius((pulse + 0.5) % 1),
-        "circle-color": ["case", ["get", "stale"], colors["--muted-foreground"], colors["--heat-low"]],
-        "circle-opacity": ["case", ["get", "stale"], 0.08, ringOpacity((pulse + 0.5) % 1)],
-      },
-    },
-    {
-      id: `${LIVE_DEVICES_SOURCE_ID}-dot`,
-      type: "circle",
-      paint: {
-        "circle-radius": LIVE_MARKER_RADIUS_PX,
-        "circle-color": ["case", ["get", "stale"], colors["--muted-foreground"], "#ffffff"],
-        "circle-stroke-color": ["case", ["get", "stale"], colors["--background"], colors["--heat-low"]],
-        "circle-stroke-width": LIVE_MARKER_STROKE_PX,
-      },
     },
   ];
   const pingLayers: SourceLayer[] = [
@@ -172,12 +168,12 @@ export function LiveMap({ devices, stale, focus }: LiveMapProps) {
   ];
   return (
     <MapCanvas styleUrl={MAP_STYLE_DARK_URL} ariaLabel="Live positions of the phones that are streaming" className="absolute inset-0" bounds={bounds} boundsKey={bounds ? boundsKey : undefined}>
-      <GeoJsonLayer id={LIVE_TRACKS_SOURCE_ID} data={liveTrails(trails)} layers={trackLayers} beforeId={`${LIVE_DEVICES_SOURCE_ID}-halo`} />
+      <GeoJsonLayer id={LIVE_TRACKS_SOURCE_ID} data={liveTrails(trails)} layers={trackLayers} />
       {devices.map((device) => (
         <LiveEvents key={device.sessionId} device={device} onDetect={addPings} />
       ))}
-      <GeoJsonLayer id={PING_SOURCE_ID} data={livePings(pings, now, LIVE_PING_MS)} layers={pingLayers} />
-      <GeoJsonLayer id={LIVE_DEVICES_SOURCE_ID} data={livePositions(moving, stale)} layers={deviceLayers} />
+      <GeoJsonLayer id={PING_SOURCE_ID} data={pings.length === 0 ? EMPTY_PINGS : livePings(pings, now, LIVE_PING_MS)} layers={pingLayers} />
+      <VehicleMarkers positions={positions} stale={stale} />
       <FocusCamera device={devices.find((device) => device.sessionId === focus.sessionId)} nonce={focus.nonce} />
     </MapCanvas>
   );

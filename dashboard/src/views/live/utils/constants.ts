@@ -1,17 +1,12 @@
 import { MS_PER_SECOND } from "@/constants/units";
 
 export const LIVE_TRACKS_SOURCE_ID = "live-tracks";
-export const LIVE_DEVICES_SOURCE_ID = "live-devices";
-export const LIVE_MARKER_RADIUS_PX = 6;
 export const LIVE_TRACK_WIDTH_PX = 2.5;
 export const LIVE_TRACK_GLOW_PX = 9;
-export const LIVE_HALO_SCALE = 1.2;
-export const LIVE_HALO_RANGE = 4;
-export const LIVE_HALO_OPACITY = 0.34;
-export const LIVE_MARKER_STROKE_PX = 2.5;
 /** Marker animation: ~30 fps is smooth enough and the map re-renders on every frame. */
 export const LIVE_FRAME_MS = 33;
-export const LIVE_PULSE_PERIOD_MS = 3400;
+/** How often the trail's geometry is refreshed while the marker glides. */
+export const LIVE_TRAIL_MS = 100;
 export const CARD_ANIMATION_S = 0.2;
 export const CARD_ANIMATION_OFFSET_PX = 8;
 

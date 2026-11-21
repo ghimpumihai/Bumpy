@@ -3,7 +3,7 @@ import { useEffect, useRef, useState } from "react";
 import { LIVE_POLL_INTERVAL_MS } from "@/constants";
 import type { Position } from "@/types/common";
 
-import { LIVE_FRAME_MS, LIVE_PULSE_PERIOD_MS } from "./constants";
+import { LIVE_FRAME_MS, LIVE_TRAIL_MS } from "./constants";
 
 interface Cursor {
   /** The segment of the trail the marker is on. */
@@ -19,13 +19,11 @@ export interface LiveAnimation {
   trails: Record<string, Position[][]>;
   /** Where each marker is drawn right now (absent while a trip has no trail yet). */
   heads: Record<string, Position>;
-  /** 0 → 1 once per pulse period; drives the halo around the markers. */
-  pulse: number;
   /** The time of this frame (same clock as `performance.now()`), for animations that run once. */
   now: number;
 }
 
-const EMPTY: LiveAnimation = { trails: {}, heads: {}, pulse: 0, now: 0 };
+const EMPTY: LiveAnimation = { trails: {}, heads: {}, now: 0 };
 
 const length = (line: Position[]) => line.slice(1).reduce((sum, p, i) => sum + Math.hypot(p[0] - line[i][0], p[1] - line[i][1]), 0);
 
@@ -49,7 +47,7 @@ function cut(line: Position[], distance: number): Position[] {
 
 /**
  * Polls arrive every couple of seconds; the marker follows the trail at a steady pace to its newest point over one poll
- * interval instead of jumping, and the trail is drawn only up to the marker. The halo pulses. Frames are throttled
+ * interval instead of jumping, and the trail is drawn only up to the marker. Frames are throttled
  * because the map re-renders on every one.
  */
 export function useLiveAnimation(tails: Record<string, Position[][]>): LiveAnimation {
@@ -76,9 +74,10 @@ export function useLiveAnimation(tails: Record<string, Position[][]>): LiveAnima
   }, [tails]);
 
   useEffect(() => {
-    const still = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
     let frame = 0;
     let last = 0;
+    let lastTrail = 0;
+    let shownTrails: Record<string, Position[][]> | null = null;
     const tick = (now: number) => {
       frame = requestAnimationFrame(tick);
       if (now - last < LIVE_FRAME_MS) return;
@@ -93,7 +92,13 @@ export function useLiveAnimation(tails: Record<string, Position[][]>): LiveAnima
         trails[id] = [...segments.slice(0, cursor.segment), drawn];
         heads[id] = drawn[drawn.length - 1];
       }
-      setAnimation({ trails, heads, pulse: still ? 0 : (now % LIVE_PULSE_PERIOD_MS) / LIVE_PULSE_PERIOD_MS, now });
+      // The trail's geometry goes through the map's worker on every update, so it is refreshed less often than the
+      // marker, which moves on the main thread; the difference is a few pixels at most.
+      if (now - lastTrail >= LIVE_TRAIL_MS || !shownTrails) {
+        lastTrail = now;
+        shownTrails = trails;
+      }
+      setAnimation({ trails: shownTrails, heads, now });
     };
     frame = requestAnimationFrame(tick);
     return () => cancelAnimationFrame(frame);

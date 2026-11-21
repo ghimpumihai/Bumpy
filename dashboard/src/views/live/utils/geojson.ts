@@ -1,7 +1,6 @@
 import type { FeatureCollection, MultiLineString, Point } from "geojson";
 
 import type { Position } from "@/types/common";
-import type { LiveDevice } from "@/types/live";
 
 export function liveTrails(tails: Record<string, Position[][]>): FeatureCollection<MultiLineString, { sessionId: string }> {
   return {
@@ -17,17 +16,7 @@ export function liveTrails(tails: Record<string, Position[][]>): FeatureCollecti
   };
 }
 
-/** `stale`: the phone has gone quiet, so its marker dims instead of breathing. */
-export function livePositions(devices: LiveDevice[], stale: ReadonlySet<string> = new Set()): FeatureCollection<Point, { deviceId: string; source: string; stale: boolean }> {
-  return {
-    type: "FeatureCollection",
-    features: devices.map((device) => ({
-      type: "Feature",
-      geometry: { type: "Point", coordinates: [device.lon, device.lat] },
-      properties: { deviceId: device.deviceId, source: device.source, stale: stale.has(device.sessionId) },
-    })),
-  };
-}
+export const EMPTY_PINGS: FeatureCollection<Point, { type: string; age: number }> = { type: "FeatureCollection", features: [] };
 
 export interface LivePing {
   key: string;

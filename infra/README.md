@@ -126,6 +126,8 @@ Terraform doesn't see the setting (the provider hides it), so deleting it never 
 - The read API's CORS origins are passed as an environment variable and enforced by FastAPI, not by the ingress setting.
 - The function app's host storage and deployment package live in their own small storage account, so the ingest identity is Owner only there and has plain write access on `lake`.
 - The Static Web App is in **East US 2**: Static Web Apps isn't offered in North Europe, and West Europe refused new customers on 2026-11-20. It serves files from a global network anyway.
+- Plan §13 applies on merge to `main` after approval in `prod`; `prod` has no required reviewers (the code deploys use it unattended), so **terraform-apply is manual** instead, and there is no teardown workflow (`tf.ps1 destroy`). The PR plan runs with `-refresh=false` because the plan identity is Reader only (see "CI for Terraform").
+- The read API's ingress port is set by deploy-services together with the image, and the `AzureWebJobsStorage` setting the provider writes is deleted by `tf.ps1 apply` / the workflows: both are outside Terraform on purpose (`ignore_changes`, provider bug).
 - `TF_VAR_psql_nat_gateway_enabled=true` adds a NAT gateway to the database subnet (~$1/day), for when default outbound access can't reach Entra ID.
 - Bootstrap may not register `microsoft.insights` (Azure lists it in lowercase); if Application Insights fails with `MissingSubscriptionRegistration`, run `az provider register --namespace Microsoft.Insights --wait`.
 - The monitoring workbook and alert rules are not written yet (first on the plan's cut list). The budget and the email action group are.

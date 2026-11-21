@@ -29,7 +29,7 @@ npm run build          # static site in dist/
 ```
 
 Data source precedence: `?mock=1` / `?mock=0` in the URL → the browser override from the
-**Mock data / Read API** button in the header → `VITE_DATA_SOURCE` → `config.json` `apiBase` → mock.
+**Mock data / Read API** button in the header → `config.json` `apiBase` → mock.
 
 ## Screens
 

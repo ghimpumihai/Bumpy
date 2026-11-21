@@ -22,3 +22,12 @@ export const LIVE_PING_GROWTH_PX = 28;
 /** The camera glide to a vehicle picked from its card. */
 export const LIVE_FOCUS_ZOOM = 15.5;
 export const LIVE_FOCUS_MS = 1300;
+/**
+ * While the map follows a vehicle, the camera closes the gap to the marker with this time constant: smooth enough to
+ * absorb the distance the car covered during the glide, close enough to stay on it (≈ 3 m behind at 50 km/h).
+ */
+export const LIVE_FOLLOW_SMOOTHING_MS = 200;
+/** A longer pause between frames (a background tab) counts as this long, so the camera never leaps. */
+export const LIVE_FOLLOW_MAX_STEP_MS = 100;
+/** Closer than this (screen pixels), the camera sits exactly on the vehicle. */
+export const LIVE_FOLLOW_SNAP_PX = 0.5;

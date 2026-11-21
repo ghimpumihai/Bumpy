@@ -84,3 +84,50 @@ final class ExportTests: XCTestCase {
         XCTAssertNotNil(data.range(of: Data("accel_raw.csv".utf8)))
     }
 }
+
+// MARK: - Recording lifecycle, late log lines, export state, audio recovery
+
+/// A started session with fakes only (no upload, no audio); stop it with `stopOnMain`.
+private func makeRunningSession(root: URL, clock: ClockSource = SystemClock()) throws -> RecordingSession {
+    let deps = RecordingSession.Dependencies(
+        motion: SyntheticMotionSource(), location: nil, altimeter: nil, activity: nil, audio: nil,
+        deviceStatus: FakeDeviceStatus(), uploadQueue: nil, clock: clock, deviceId: "D", appVersion: "t",
+        deviceInfo: .init(model: "x", name: "x", iosVersion: "x"))
+    let session = try RecordingSession(store: SessionStore(root: root), setup: SessionSetup(), preflight: nil, deps: deps)
+    session.start() // XCTest runs test methods on the main thread
+    return session
+}
+
+final class LifecycleNoteTests: XCTestCase {
+    private func clockSources(_ session: RecordingSession) throws -> [String] {
+        session.writer.flushNow()
+        return try readCSV(session.folder.appendingPathComponent("clock.csv")).rows.map { $0[2] }
+    }
+
+    func testInactiveToActiveWithoutBackgroundIsNotAForegroundReturn() throws {
+        let session = try makeRunningSession(root: try makeTempDir())
+        defer { session.stop() }
+        // Control Center / Notification Center / a call banner: inactive → active, never background.
+        session.noteLifecycle(background: false)
+        session.noteLifecycle(background: false)
+        XCTAssertNil(session.latest.returnedFromBackgroundUp, "no 'App was in background' banner")
+        XCTAssertFalse(try clockSources(session).contains("foreground"))
+        let log = try String(contentsOf: session.folder.appendingPathComponent("app_log.txt"), encoding: .utf8)
+        XCTAssertFalse(log.contains("app returned to foreground"))
+    }
+
+    func testRealBackgroundTripIsNotedOnceEachWay() throws {
+        let session = try makeRunningSession(root: try makeTempDir())
+        defer { session.stop() }
+        session.noteLifecycle(background: true)
+        session.noteLifecycle(background: true) // duplicate scene-phase callback
+        XCTAssertTrue(session.latest.inBackground)
+        session.noteLifecycle(background: false)
+        session.noteLifecycle(background: false) // e.g. a later Control Center trip
+        XCTAssertFalse(session.latest.inBackground)
+        XCTAssertNotNil(session.latest.returnedFromBackgroundUp)
+        let sources = try clockSources(session)
+        XCTAssertEqual(sources.filter { $0 == "background" }.count, 1)
+        XCTAssertEqual(sources.filter { $0 == "foreground" }.count, 1)
+    }
+}

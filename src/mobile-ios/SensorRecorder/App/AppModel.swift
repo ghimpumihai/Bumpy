@@ -160,6 +160,8 @@ final class AppModel {
         refreshSessions()
     }
 
+    /// `.active` also follows inactive-only trips (Control Center, alerts); the session ignores a
+    /// "foreground" note unless it was really in the background.
     func handleScenePhase(_ phase: ScenePhase) {
         guard let rec = recording, !rec.isFinished else { return }
         switch phase {

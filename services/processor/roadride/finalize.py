@@ -34,7 +34,7 @@ import numpy as np
 from psycopg import Connection
 from psycopg.types.json import Jsonb
 
-from . import aggregate
+from . import aggregate, quality
 from .dsp import Event, Pipeline, SeriesPoint
 from .live import BatchFacts, parse_batch, parse_session
 from .store import Store, from_epoch
@@ -155,6 +155,7 @@ def run_pipeline(batches: list[BatchFacts]) -> TripSignal:
             np.asarray(f.motion_g, dtype=float).reshape(-1, 3),
             [(x.t.timestamp() - off, x.speed_ms) for x in f.fixes],
             reset=prev is not None and f.batch_seq != prev + 1,
+            rr=np.asarray(f.motion_rr, dtype=float).reshape(-1, 3),
         )
         for p in res.series:
             p.t += off
@@ -164,6 +165,11 @@ def run_pipeline(batches: list[BatchFacts]) -> TripSignal:
         out.events += res.events
         out.resets += int(res.reset)
         prev = f.batch_seq
+    if batches:  # the trip is over: potholes still held back for a possible speed bump are final
+        off = batches[-1].clock_offset
+        for e in pipe.flush():
+            e.t += off
+            out.events.append(e)
     out.msdv = math.sqrt(pipe.dose)
     return out
 
@@ -201,9 +207,10 @@ def track_distance(fixes: list[tuple[float, float, float]]) -> np.ndarray:
 
 
 def build_passes(series: list[SeriesPoint], fixes: list[tuple[float, float, float]],
-                 pothole_times: list[float], cell_of=None) -> list[Pass]:
+                 pothole_times: list[float], cell_of=None, invalid: np.ndarray | None = None) -> list[Pass]:
     """Splits the 5 Hz series into passes through H3 cells. A window's position is interpolated
-    between the GPS fixes around it; a window without one ends the current pass."""
+    between the GPS fixes around it; a window without one ends the current pass. `invalid` windows
+    (the phone was handled or had moved in its mount) don't count for roughness."""
     if cell_of is None:
         import h3
 
@@ -234,7 +241,8 @@ def build_passes(series: list[SeriesPoint], fixes: list[tuple[float, float, floa
         if not run:
             return
         pts = [series[k] for k in run]
-        moving = [p for p in pts if p.speed is not None and p.speed >= MOVING_SPEED_MS]
+        moving = [series[k] for k in run if series[k].speed is not None and series[k].speed >= MOVING_SPEED_MS
+                  and not (invalid is not None and invalid[k])]
         known = [p.speed for p in pts if p.speed is not None]
         if len(moving) >= MIN_MOVING_WINDOWS:
             rough = math.sqrt(sum(p.rough_rms ** 2 for p in moving) / len(moving))
@@ -279,11 +287,17 @@ def stream_quality(times: list[float], expected_hz: float | None) -> dict:
             "gapsOver1s": int(np.count_nonzero(gaps > 1.0))}
 
 
+INVALID_DEGRADED_SHARE = 0.10  # PROVISIONAL: more of the trip than this handled / moved / mismatched
+
+
 def assess(trip: Trip, sig: TripSignal, expected_batches: int | None,
-           fixes: list[tuple[float, float, float, float | None]]) -> tuple[str, float | None, dict]:
-    """Returns (quality_status, valid_fraction, quality json). PROVISIONAL rules:
+           fixes: list[tuple[float, float, float, float | None]],
+           invalid: dict[str, np.ndarray] | None = None) -> tuple[str, float | None, dict]:
+    """Returns (quality_status, valid_fraction, quality json). `invalid` holds the per-window masks
+    of quality.py (phone_moved, gravity_drift, gyro_gps_mismatch). PROVISIONAL rules:
     bad = no motion or no GPS, or under half the expected motion samples;
-    degraded = missing batches, filter restarts, under 90 % of the motion samples or mostly poor GPS."""
+    degraded = missing batches, filter restarts, under 90 % of the motion samples, mostly poor GPS,
+    or over 10 % of the trip invalid for one of the reasons above."""
     motion_t = [x for f in trip.batches for x in f.motion_t]
     motion = stream_quality(motion_t, MOTION_HZ)
     location = stream_quality([f[0] for f in fixes], 1.0)
@@ -297,37 +311,73 @@ def assess(trip: Trip, sig: TripSignal, expected_batches: int | None,
     missing = max(0, expected_batches - len({s for s in seqs if s < expected_batches})) \
         if expected_batches is not None else None
 
-    # Seconds of the trip without a usable fix (no fix within the window, or a poor one).
-    poor_s = 0.0
+    # Windows of the trip without a usable fix (no fix within the window, or a poor one).
+    poor = np.zeros(len(sig.series), dtype=bool)
     if sig.series:
         ft = np.asarray([f[0] for f in fixes]) if fixes else np.zeros(0)
         acc = np.asarray([f[3] if f[3] is not None else np.inf for f in fixes]) if fixes else np.zeros(0)
-        for p in sig.series:
+        for i, p in enumerate(sig.series):
             j = int(np.searchsorted(ft, p.t)) if len(ft) else 0
             near = [k for k in (j - 1, j) if 0 <= k < len(ft) and abs(ft[k] - p.t) <= 2.0]
-            if not near or min(acc[k] for k in near) > GPS_GOOD_HACC_M:
-                poor_s += WINDOW_S
+            poor[i] = not near or min(acc[k] for k in near) > GPS_GOOD_HACC_M
+    masks = {k: np.zeros(len(sig.series), dtype=bool) for k in ("phone_moved", "gravity_drift", "gyro_gps_mismatch")}
+    masks.update(invalid or {})
     trip_s = len(sig.series) * WINDOW_S
+    invalid_any = poor.copy()
+    for m in masks.values():
+        invalid_any |= m
     valid = None
     if coverage is not None and trip_s > 0:
-        valid = round(max(0.0, coverage * (1.0 - poor_s / trip_s)), 4)
+        valid = round(max(0.0, coverage * (1.0 - float(invalid_any.sum()) * WINDOW_S / trip_s)), 4)
+    worst_share = max(float(m.sum()) * WINDOW_S / trip_s for m in masks.values()) if trip_s > 0 else 0.0
 
     if not sig.series or not fixes or coverage is None or coverage < 0.5:
         status = "bad"
-    elif (missing or 0) > 0 or sig.resets > 0 or coverage < 0.9 or (good_gps is not None and good_gps < 0.5):
+    elif (missing or 0) > 0 or sig.resets > 0 or coverage < 0.9 or (good_gps is not None and good_gps < 0.5) \
+            or worst_share > INVALID_DEGRADED_SHARE:
         status = "degraded"
     else:
         status = "ok"
     quality = {
         "streams": {"deviceMotion": motion, "location": location},
         "validFraction": valid,
-        "invalidSeconds": {"phone_moved": 0, "gravity_drift": 0, "gyro_gps_mismatch": 0,
-                           "gps_poor": round(poor_s, 1)},
+        "invalidSeconds": {**{k: round(float(m.sum()) * WINDOW_S, 1) for k, m in masks.items()},
+                           "gps_poor": round(float(poor.sum()) * WINDOW_S, 1)},
         "missingBatches": missing,
         "filterRestarts": sig.resets,
         "motionCoverage": None if coverage is None else round(coverage, 4),
     }
     return status, valid, quality
+
+
+@dataclass
+class TripChecks:
+    masks: dict[str, np.ndarray]  # per series window: phone_moved, gravity_drift, gyro_gps_mismatch
+    taps: list[tuple[float, str]]  # every label as (epoch s, type), ascending
+
+    def handled_at(self, t: float) -> bool:
+        return bool(quality.handled(np.array([t]), self.taps)[0])
+
+
+def trip_checks(trip: Trip, sig: TripSignal, fixes: list) -> TripChecks:
+    """quality.py's whole-trip checks on the trip's samples, on UTC like the series."""
+    t = np.concatenate([np.asarray(f.motion_t, dtype=float) + f.clock_offset for f in trip.batches]) \
+        if trip.batches else np.zeros(0)
+
+    def stack(attr: str) -> np.ndarray:
+        parts = [np.asarray(getattr(f, attr), dtype=float).reshape(-1, 3) for f in trip.batches]
+        return np.vstack(parts) if parts else np.zeros((0, 3))
+
+    motion = quality.Motion(t=t, g=stack("motion_g"), rr=stack("motion_rr"))
+    labels = sorted((lab.t.timestamp(), lab.type) for f in trip.batches for lab in f.labels)
+    mids = quality.window_mids([p.t for p in sig.series], WINDOW_S)
+    masks = {
+        "phone_moved": quality.handled(mids, labels),
+        "gravity_drift": quality.gravity_drift(mids, motion),
+        "gyro_gps_mismatch": quality.gyro_gps_mismatch(
+            mids, motion, [(x.t.timestamp(), x.speed_ms, x.course_deg) for x in fixes]),
+    }
+    return TripChecks(masks=masks, taps=labels)
 
 
 # --- Writing --------------------------------------------------------------------------------
@@ -338,8 +388,12 @@ def finalize_session(conn: Connection, archive: Archive, session_id: str) -> dic
     if not trip.batches:
         return None
     sig = run_pipeline(trip.batches)
-    by_time = {x.t.timestamp(): (x.t.timestamp(), x.lat, x.lon, x.h_acc_m) for f in trip.batches for x in f.fixes}
-    fixes = [by_time[k] for k in sorted(by_time)]
+    by_time = {x.t.timestamp(): x for f in trip.batches for x in f.fixes}
+    fix_objs = [by_time[k] for k in sorted(by_time)]
+    fixes = [(x.t.timestamp(), x.lat, x.lon, x.h_acc_m) for x in fix_objs]
+    checks = trip_checks(trip, sig, fix_objs)
+    events = [e for e in sig.events if not checks.handled_at(e.t)]  # the phone being handled, not the road
+    detection, matched = quality.score_detections([(e.t, e.type) for e in events], checks.taps)
     store = Store(conn)
 
     with conn.transaction():
@@ -379,18 +433,19 @@ def finalize_session(conn: Connection, archive: Archive, session_id: str) -> dic
             )
             cur.executemany(
                 """
-                INSERT INTO events (session_id, type, t, geom, speed_ms, magnitude, confidence)
+                INSERT INTO events (session_id, type, t, geom, speed_ms, magnitude, confidence, matched_label)
                 VALUES (%s, %s, %s,
                         (SELECT geom FROM track_points WHERE session_id = %s
                          ORDER BY abs(extract(epoch FROM t - %s)) LIMIT 1),
-                        %s, %s, %s)
+                        %s, %s, %s, %s)
                 ON CONFLICT (session_id, type, t) DO NOTHING
                 """,
                 [(session_id, e.type, from_epoch(e.t), session_id, from_epoch(e.t), e.speed, e.magnitude,
-                  e.confidence) for e in sig.events],
+                  e.confidence, m) for e, m in zip(events, matched)],
             )
             passes = build_passes(sig.series, [f[:3] for f in fixes],
-                                  [e.t for e in sig.events if e.type == "pothole"])
+                                  [e.t for e in events if e.type == "pothole"],
+                                  invalid=checks.masks["phone_moved"] | checks.masks["gravity_drift"])
             cur.executemany(
                 """
                 INSERT INTO segment_observations (session_id, pass_idx, h3, t_start, duration_s,
@@ -404,8 +459,9 @@ def finalize_session(conn: Connection, archive: Archive, session_id: str) -> dic
 
         expected = conn.execute("SELECT expected_batch_count FROM sessions WHERE session_id = %s",
                                 (session_id,)).fetchone()[0]
-        status, valid, quality = assess(trip, sig, expected, fixes)
-        missing = quality["missingBatches"]
+        status, valid, q = assess(trip, sig, expected, fixes, checks.masks)
+        q["detection"] = detection
+        missing = q["missingBatches"]
         last_t = sig.series[-1].t if sig.series else trip.batches[-1].end_utc.timestamp()
         conn.execute(
             """
@@ -414,13 +470,13 @@ def finalize_session(conn: Connection, archive: Archive, session_id: str) -> dic
               ended_at = COALESCE(ended_at, %s), updated_at = now()
             WHERE session_id = %s
             """,
-            (expected is None or (missing or 0) > 0, sig.msdv, status, valid, Jsonb(quality),
+            (expected is None or (missing or 0) > 0, sig.msdv, status, valid, Jsonb(q),
              float(track_distance([f[:3] for f in fixes])[-1]) if fixes else 0.0, from_epoch(last_t),
              session_id),
         )
         store._refresh_exclusions(session_id)
 
-    summary = {"batches": len(trip.batches), "series": len(sig.series), "events": len(sig.events),
+    summary = {"batches": len(trip.batches), "series": len(sig.series), "events": len(events),
                "passes": len(passes), "msdv": round(sig.msdv, 4), "quality": status}
     log.info("finalized %s %s", session_id, " ".join(f"{k}={v}" for k, v in summary.items()))
     return summary

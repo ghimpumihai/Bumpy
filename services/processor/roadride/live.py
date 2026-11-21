@@ -70,6 +70,7 @@ class BatchFacts:
     motion_t: list[float] = field(default_factory=list)
     motion_ua: list[tuple[float, float, float]] = field(default_factory=list)
     motion_g: list[tuple[float, float, float]] = field(default_factory=list)
+    motion_rr: list[tuple[float, float, float]] = field(default_factory=list)  # rotation rate, rad/s
 
     @property
     def last_fix(self) -> Fix | None:
@@ -118,6 +119,7 @@ def parse_batch(b: dict) -> BatchFacts:
         motion_t=[t0_up + float(x) for x in dm["t"]],
         motion_ua=list(zip(dm["ua_x"], dm["ua_y"], dm["ua_z"])),
         motion_g=list(zip(dm["g_x"], dm["g_y"], dm["g_z"])),
+        motion_rr=list(zip(dm["rr_x"], dm["rr_y"], dm["rr_z"])),
     )
 
 

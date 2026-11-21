@@ -43,7 +43,8 @@ Each new, in-order batch runs through the trip's pipeline (plan §9):
 - **Vertical acceleration:** user acceleration projected on "up" (minus the gravity direction), in m/s², resampled onto a uniform 100 Hz grid.
 - **Roughness:** 1–30 Hz band-pass. `roughness_now` on the live view is its RMS over roughly the last 5 s.
 - **Motion sickness:** ISO 2631-1 **Wf** applied at 20 Hz after low-pass and decimation. MSDV = (∫a_w² dt)^½ is accumulated over the whole trip: `msdv_so_far` live, `sessions.msdv_z`, and `msdv` in the series.
-- **Potholes:** band-passed vertical above 5 m/s², only above 15 km/h, the peak within 0.3 s, at most one per second. Position comes from the nearest GPS fix. They're written to `events`.
+- **Potholes:** band-passed vertical above 5 m/s², only above 15 km/h, the peak within 0.3 s, at most one per second. Position comes from the nearest GPS fix. They're written to `events` 2.5 s after the jolt, once no speed bump can cover them any more.
+- **Speed bumps:** a double peak in the vehicle's pitch rate (the rotation rate about the lateral axis, 0.5–5 Hz): nose up above 0.15 rad/s as the front axle climbs, then nose down as the rear axle climbs, one wheelbase (2–7 m, car to bus or tram) apart at the GPS speed, between 5 and 40 km/h. Peaks longer than 0.5 s (a hill crest, a slow turn) don't count. The bump's jolts aren't reported as potholes. Pitch needs the forward axis, so there are no speed bumps until it is known.
 - **Chart series:** `session_series` at 5 Hz, with vertical (the largest value of each 0.2 s window), lateral/longitudinal and speed.
 - **Forward axis:** learned from GPS speed changes, so lateral/longitudinal stay 0 until about ten clear accelerations or brakings have been seen.
 
@@ -56,7 +57,7 @@ It runs on the phone's **uptime clock** (`t0Up + t`), which only moves forward d
 
 Each series window also carries the RMS of the band-passed vertical and its share of the dose (`rough_rms`, `dose_inc`); they aren't stored in `session_series`, but the finalize job builds segment passes from them.
 
-**Provisional:** the pothole threshold and the forward-axis estimate haven't seen a real drive yet. Speed bumps come next.
+**Provisional:** the pothole and speed-bump thresholds and the forward-axis estimate haven't seen a real drive yet. The pipeline's state of a trip in progress during the deploy that added the rotation rate is upgraded in place (no rotation channel yet: zero for the first interpolated sample).
 
 ## Finalize job (`roadride/finalize.py`)
 
@@ -64,14 +65,25 @@ KEDA starts one execution per message on `session-ready`; each execution handles
 
 1. Reads `lake/raw/session=<id>/` (every accepted batch and both copies of `session.json`), 16 downloads at a time.
 2. Runs the same pipeline over the whole trip, batch by batch in sequence order: late batches count, and the filters restart only at a missing batch. A cleanly streamed trip gives exactly the live series, events and MSDV (a test checks this).
-3. In one transaction: re-applies the session metadata, fills in any missing track points and labels, replaces `session_series`, `events` and `segment_observations`, and sets `status = complete`, `incomplete`, `msdv_z`, `quality_status`, `valid_fraction`, `quality`, `distance_m` and `finalized_at`. `include_in_agg` follows from the existing rules.
-4. Rebuilds the aggregates, then completes the message.
+3. Releases the potholes the pipeline still held back at the end of the trip, runs the quality checks below, drops events inside "phone handled" windows and scores the rest against the manual taps.
+4. In one transaction: re-applies the session metadata, fills in any missing track points and labels, replaces `session_series`, `events` (with `matched_label`) and `segment_observations`, and sets `status = complete`, `incomplete`, `msdv_z`, `quality_status`, `valid_fraction`, `quality`, `distance_m` and `finalized_at`. `include_in_agg` follows from the existing rules.
+5. Rebuilds the aggregates, then completes the message.
 
 Everything it writes is replaced per trip, so a repeated message is harmless. A failure abandons the message (Service Bus retries it, then dead-letters it after 5 tries). Messages it can't handle are dead-lettered with the reason: an unreadable body, a trip with no archive, or a laptop upload (Event Grid's `_complete.json`): **finalizing uploaded CSV folders isn't built yet.** Parquet output is also not built; nothing reads it yet.
 
 **Segment passes.** The 5 Hz series is split where the interpolated GPS position changes H3 cell (resolution 11, as the dashboard). A pass's roughness is the RMS over its moving windows (≥ 1 m/s, at least 3 of them), its speed is measured over the same windows, its a_w RMS is √(Σ dose / duration), and it counts the potholes inside it. Windows more than 10 s from a fix have no position and end the pass. Passes in the first or last 200 m are stored but flagged `in_privacy_zone` and never aggregated.
 
-**Quality (provisional rules).** `bad`: no motion, no GPS, or under half the expected 100 Hz motion samples. `degraded`: missing batches, filter restarts, under 90 % of the samples, or mostly poor GPS (hAcc > 20 m). `ok` otherwise. `valid_fraction` = motion coverage × the share of time with a good fix. The phone-moved, gravity-drift and gyro-GPS checks of plan §9 step 3 aren't built.
+**Invalid windows (`roadride/quality.py`, plan §9 step 3, provisional thresholds).** Each 0.2 s series window can be invalid for one or more reasons, counted in `quality.invalidSeconds`:
+- `phone_moved`: 5 s either side of a `phone_moved` tap, and 1 s before to 10 s after a `sync_tap` (the operator knocks on the phone, spec §5). Events there are dropped.
+- `gravity_drift`: the 1 s mean gravity direction is more than 15° from the trip's typical one (the phone sagged or moved in its mount).
+- `gyro_gps_mismatch`: between two fixes 0.5–3 s apart, both above 18 km/h, the gyro's yaw rate and the GPS course change differ by more than 0.2 rad/s.
+- `gps_poor`: no fix within 2 s, or hAcc > 20 m.
+
+`phone_moved` and `gravity_drift` windows don't count for a pass's roughness.
+
+**Detection scores.** Potholes and speed bumps are scored against the `pothole` and `speed_bump` taps within ±1.5 s (`quality.detection`, API.md `DetectionMetrics`): a detection is a true positive if a tap of its type is that close, a tap is found if a detection is. `events.matched_label` says which detections matched.
+
+**Quality (provisional rules).** `bad`: no motion, no GPS, or under half the expected 100 Hz motion samples. `degraded`: missing batches, filter restarts, under 90 % of the samples, mostly poor GPS (hAcc > 20 m), or more than 10 % of the trip invalid for one of `phone_moved`, `gravity_drift`, `gyro_gps_mismatch`. `ok` otherwise. `valid_fraction` = motion coverage × the share of windows that are valid for every reason.
 
 ## Aggregation (`roadride/aggregate.py`)
 

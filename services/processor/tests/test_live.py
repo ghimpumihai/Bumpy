@@ -12,7 +12,7 @@ def test_fixture_batch_facts(batch):
     assert f.t0_utc == dt.datetime(2025, 11, 21, 9, 15, 32, tzinfo=UTC)
     # Newest sample: the location fix at t0 + 0.120 s (columnar samples end at t0 + 0.04 s).
     assert f.end_utc == dt.datetime(2025, 11, 21, 9, 15, 32, 120000, tzinfo=UTC)
-    # The fixture comes from a build that still sends audioLevel (D48): it is not counted.
+    # No audio since D48: an audioLevel block (builds before D48 send one) is never counted.
     assert f.sample_counts == {"deviceMotion": 5, "accelRaw": 5, "gyroRaw": 5, "altimeter": 1,
                                "location": 1, "labels": 2}
     (fix,) = f.fixes

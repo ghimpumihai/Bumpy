@@ -1,8 +1,7 @@
 """The ingest contract: body decoding and schema checks.
 
 Ported from src/mobile-ios/tools/mock_ingest_server.py, the server the iPhone app was built and tested
-against. Keep the two in step: tests/test_parity.py runs the same cases through both. One exception
-until the app drops audio (D48): this side no longer requires or checks `audioLevel` / `audioEnabled`.
+against. Keep the two in step: tests/test_parity.py runs the same cases through both.
 
 Pure standard library, so it is testable without Azure.
 """
@@ -37,8 +36,8 @@ SESSION_ID_RE = re.compile(r"^[A-Za-z0-9_-]{1,128}$")
 REQUIRED_KEYS = ["schemaVersion", "sessionId", "deviceId", "batchSeq", "t0Utc", "t0Up", "units",
                  "deviceMotion", "accelRaw", "gyroRaw", "location", "altimeter",
                  "labels", "device"]
-# App builds before D48 still send `audioLevel` (batch) and `audioEnabled` (session.json): accepted
-# like any other extra key and never read, so those phones keep uploading.
+# No audio since D48. App builds before it may still send `audioLevel` (batch) and `audioEnabled`
+# (session.json): accepted like any other extra key and never read, so those phones keep uploading.
 EXPECTED_UNITS = {"accel": "g", "gyro": "rad/s", "speed": "m/s", "pressure": "kPa"}
 COLUMNAR = {
     "deviceMotion": ["ua_x", "ua_y", "ua_z", "g_x", "g_y", "g_z", "rr_x", "rr_y", "rr_z",

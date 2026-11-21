@@ -19,37 +19,45 @@ are in [`decisions/01-initial-plan.md`](../../decisions/01-initial-plan.md) (bac
    Stop in Xcode, unplug, and start the app **from the home screen**. A debugger-attached app can be
    killed when the cable or wireless-debug link drops.
 
-On first use the preflight asks for Motion & Fitness, Location (choose **Precise**) and Microphone.
-Turn the ring/silent switch **off silent**, so the PROBLEM alert sound is audible (haptics work either way).
+On first use the preflight asks for Motion & Fitness and Location (choose **Precise**). The app never
+uses the microphone (D48) or the camera (no mount photo since D51).
+Turn the ring/silent switch **off silent**, so the problem alert sound is audible (haptics work either way).
 
 ## Using it (operator)
 
-Sessions → **New session** → setup (pre-filled with your last values, plus a mount photo; for
-**bus/tram** also the line number, seat, passenger posture, and **audio recording defaults to OFF**) →
-**Preflight** (must be all green; *Override* exists for emergencies and is recorded) →
-**Recording dashboard** → hold **Stop** for 2 s → **Summary** (red rows = gaps > 1 s) →
-**Export**. The full drive protocol is in the app (the **?** button) and in spec §9.
+Three screens (D51): **Start** → **Recording** → **Recap**. Lay the phone flat, screen up, and tap
+**Start trip**. The preflight checks run silently; only a failing one shows, as one red line with a
+fix, and starting anyway asks for a confirm (recorded as an override). While recording the screen
+shows a timer and one status line (red while something is wrong, "GPS back · 12 s gap" for a few
+seconds after GPS recovers). Hold **Hold to end trip** for 2 s. The recap shows data quality (share
+of the trip with motion and GPS data) and how much of the trip reached the cloud. Every trip is
+recorded as a car; there are no labels or sickness prompts. Results are on the web dashboard.
+
+The menu (top left) holds **Web app** and **Settings**: server address, device key and Test
+connection, with how many trips are still waiting to upload. The dashboard link appears once its
+address is set, for now with the launch argument `-dashboard.baseURL <url>`.
+
+The look follows the redesign mock-up: the dashboard's neutral palette, an ink-black accent and the
+dashboard's typeface, Geist (`SensorRecorder/Resources/Fonts/Geist-Variable.ttf`, SIL Open Font
+License in `Geist-OFL.txt`, registered through `UIAppFonts`; `Theme.font` sets its weight axis).
 
 ## What gets written
 
 `Documents/sessions/<UTC start>_<shortId>/` is visible in the **Files app** and in Finder over USB
-(`UIFileSharingEnabled`), so data can be copied off even without the Export button.
+(`UIFileSharingEnabled`): that is how a session is copied off the phone (there is no in-app export).
 
 | File | Content |
 |---|---|
 | `session.json` | metadata (spec §3.8). Rewritten at start, at stop (with `stats`), and on recovery |
-| `clock.csv` | `t_up,t_utc_ms,source`. Anchors at `start`, every 10 s (`periodic`), `background`/`foreground`, `stop`, plus one `audio_start` per audio segment |
+| `clock.csv` | `t_up,t_utc_ms,source`. Anchors at `start`, every 10 s (`periodic`), `background`/`foreground`, `stop` |
 | `device_motion.csv`, `accel_raw.csv`, `gyro_raw.csv`, `mag_raw.csv` | CoreMotion at 100 Hz (mag 50 Hz), native units |
 | `location.csv`, `heading.csv` | CoreLocation. `t_up` is derived from the fix's UTC timestamp (its age at arrival). iOS's cached first fix is kept if it is at most 5 s older than the start, so `location.csv` can begin slightly before `startedAtUtc`. Older cached fixes are dropped (logged), and GPS stats count only fixes from the start. |
 | `altimeter.csv`, `abs_altitude.csv` | CMAltimeter relative (kPa, m) and absolute altitude |
 | `activity.csv` | CMMotionActivity (+ `start_utc_ms`) |
-| `audio_000.m4a`, `audio_001.m4a`, … | AAC 48 kHz mono 64 kbps, in 5-minute segments |
-| `audio_segments.csv` | `t_up,t_utc_ms,event,file`: start/stop/interrupted/reset per segment; `blocked_background` (empty `file`) when iOS refuses to restart the mic while the app is in the background — the gap lasts until the next `start` |
-| `audio_level.csv` | RMS and peak dBFS at 10 Hz |
 | `device.csv` | battery, thermal, Low Power Mode, free disk, network, every 5 s |
 | `labels.csv` | `t_up,t_utc_ms,type,value,note` (all human labels) |
 | `app_log.txt` | warnings, problems, permission state, interruptions, upload rejections (also those after Stop: the file can grow past the size in `session.json` stats) |
-| `mount.jpg` | mount photo |
+| `mount.jpg` | mount photo (older builds only: there is no setup form since D51) |
 
 Every sensor CSV starts with `t_up` (seconds since boot, the CoreMotion clock, 6 decimals) and
 `t_utc_ms` (`anchor_utc_ms + (t_up − anchor_up)·1000`, using the latest anchor). Lat/lon have 8
@@ -64,27 +72,16 @@ Label `type` values: `pothole`, `speed_bump`, `phone_moved`, `surface_start/surf
 are no longer written (D47: motion sickness is only the backend's MSDV); folders from older
 builds may still contain them, and `session.json` `stats.sicknessRatings/sicknessMissed` stay as 0.
 
+**No audio (D48).** The app records no sound: no `audio_*.m4a`, `audio_segments.csv`,
+`audio_level.csv` or `audio_start` clock rows, no `audioLevel` in upload batches, and no
+`audioEnabled`, `requestedRatesHz.audioLevel` or `stats.audioFiles` in `session.json`. Folders and
+`session.json` files from older builds may still have them; they load and are ignored.
+
 ### Deliberate deviations from the spec (and why)
 
-- **Audio in 5-minute segments, not one `audio.m4a`.** An AAC/MP4 file is only readable once
-  `stop()` writes its index, so a crash, a force-quit or a dead battery would destroy the entire
-  drive's audio. Segments overlap at rotation (no gap), and each start time is logged, so
-  segment *n* starts at the *n*-th `audio_start` row in `clock.csv`. After an interruption
-  (phone call, Siri) a *new* segment starts, so every file maps linearly onto `t_up`.
-  If that interruption happens while the screen is locked, iOS may refuse to start the mic again
-  until the app is opened (`cannotStartRecording`): the app writes a `blocked_background` row and a
-  PROBLEM line, retries every 60 s, and restarts at once when the app comes to the foreground.
-  **After a call during a drive, unlock the phone and open the app.**
-- **Audio session `.playAndRecord` + mode `.measurement` + `.mixWithOthers`** (spec: `.record`).
-  - Measurement mode still disables AGC and voice processing.
-  - playAndRecord plus `allowHapticsAndSystemSoundsDuringRecording` is needed so the prompt and
-    alert sounds and haptics work while recording (iOS mutes them otherwise).
-  - Mixable means the session never stops navigation or music, and can restart while backgrounded.
-  - Input is pinned to the built-in mic, so the car's Bluetooth hands-free can't take over.
-- **Audio OFF mode (bus/tram, GDPR, spec §3.5).** When `audioEnabled` is false, no audio is ever
-  written. `audio_level.csv` (S1) still comes from a live level meter (`AVAudioEngine` tap, numbers
-  only). A stalled meter is a PROBLEM on the dashboard.
-- **Extra files/columns:** `audio_segments.csv`, `abs_altitude.csv` (B2), `activity.csv … start_utc_ms`.
+- **No audio (D48), against spec §3.5 S1/S2:** nothing in the backend used it, and it was the
+  project's biggest privacy cost.
+- **Extra files/columns:** `abs_altitude.csv` (B2), `activity.csv … start_utc_ms`.
 - **Nothing can stall or re-order the queue:** 5xx/408/429/network errors retry the same file in
   place (the backend's 503 means an outage, never a bad payload), so the Stop copy always follows
   the last batch. A file the queue can't send at all (a Files-app copy with a changed name, an
@@ -94,7 +91,8 @@ builds may still contain them, and `session.json` `stats.sicknessRatings/sicknes
   upload of the session folder is the fallback. The session folder stays the local source of truth.
 - **401/403 are retried with backoff** instead of moved to `upload_failed/`; otherwise a mistyped
   key would dump the whole queue. 408/429/5xx/network errors are retried; other 4xx go to
-  `upload_failed/` (Settings → *Move failed batches back to queue*). A pasted API URL ending in
+  `upload_failed/` (they stay there, on the phone and in the Files app; the app has no button to
+  re-send them since D51). A pasted API URL ending in
   `/api/ingest` is reduced to its base (the app appends that path itself).
 - **The upload test is a probe POST**, because the backend has no `/api/health` route.
   - The app sends `{"probe":true,"deviceId":"<Device ID>"}` (gzipped, with the device key and
@@ -106,9 +104,9 @@ builds may still contain them, and `session.json` `stats.sicknessRatings/sicknes
   - Plain `http://` is accepted only for local test servers (loopback, RFC 1918 IPs, `.local`), and
     redirects are never followed. On Wi-Fi, such a key *is* sniffable, so use a throwaway key for the
     mock server, never the real one. The real backend must be `https://`.
-- **`clock.csv` rows are written from several queues** (periodic, lifecycle, `audio_start`), so
-  sort by `t_up` before use. `audio_start` rows are derived from the current anchor; they are not
-  separate clock reads.
+- **`clock.csv` rows are written from several queues** (periodic, lifecycle), so sort by `t_up`
+  before use. Folders from builds before D48 also hold derived `audio_start` rows; they are not
+  clock reads.
 - **GPS/heading callbacks run on the main thread** (CLLocationManager delivers to the run loop that
   created it). At ~1 Hz with a cheap append, this is negligible.
 
@@ -124,7 +122,7 @@ unit, and UTC timestamp") it adds these optional, additive fields:
 - `t0UtcMs`, so a sample's UTC time is `t0UtcMs + t[i]·1000`;
 - `fieldUnits`, the unit of every field (the §6 `units` map is unchanged);
 - `location[].isSimulated`;
-- the **full dataset** (02 D32: only raw audio stays on the phone): `deviceMotion.roll/pitch/yaw`, `magRaw`,
+- the **full dataset** (02 D32): `deviceMotion.roll/pitch/yaw`, `magRaw`,
   `heading`, `absAltitude`, `activity`, `location[].ellAlt/vAcc/courseAcc` and the full `device` status.
 
 All of this is listed for the backend team in spec §6.2 (`decisions/01-initial-plan.md`).
@@ -155,14 +153,11 @@ in the repo.
 
 ## Privacy
 
-- Audio (`audio_*.m4a`) is never sent live. It is in the session folder and the export, so
-  `tools/upload` should exclude `*.m4a` if audio must stay on the phone. On bus/tram, audio
-  recording is OFF by default (level meter only).
+- No sound is recorded (D48). `tools/upload` still skips `*.m4a`, which folders from older builds hold.
 - GPS traces and `people.raterName` are personal data. Use pseudonyms such as "R1" for raters.
   Sessions live in Documents: they are visible in the Files app and included in device backups.
-- **Delete session** (session detail) removes the folder. It is refused while any of the
-  session's batches are still queued for upload, so a trip leaves the phone only once it
-  reached the cloud. The device ID is per phone (Keychain, this-device-only).
+- Sessions are deleted from the Files app (there is no in-app session list since D51). The device
+  ID is per phone (Keychain, this-device-only).
 
 ## Robustness
 
@@ -170,15 +165,14 @@ in the repo.
   loses < 1 s. Files are append-only.
 - On launch, sessions without `endedAtUtc` are marked `"recovered": true`, a torn last CSV line is
   trimmed, and stats are rebuilt from the files, with the duration measured from the session start.
-- The audio segment being recorded at a crash has no MP4 index and isn't playable. It is listed in
-  `stats.audioFilesIncomplete` and in `app_log.txt`.
 - The UI-test data reset (`-uiTestingReset`) exists only in Simulator Debug builds, so it can never
   wipe sessions on the phone.
 - Screen never locks while recording; Stop needs a 2 s hold; there is no pause.
-- Background modes `location` + `audio` keep recording alive if the app is backgrounded (WARN).
+- Background mode `location` (continuous updates, never paused) keeps recording alive if the app
+  is backgrounded (WARN).
 - Every warning rule of spec §7 is implemented in `Core/HealthEvaluator.swift`. New PROBLEMs
   trigger a haptic, a sound and an `app_log.txt` entry.
-- The dashboard's live numbers use the backend's definitions, so the phone and the web dashboard
+- The on-phone live estimates (no longer shown since D51) use the backend's definitions, so the phone and the web dashboard
   agree (`Recording/LiveSignals.swift`):
   - **Roughness now:** RMS of the 1–30 Hz band-passed vertical acceleration (the backend's filter
     coefficients), averaged exponentially over about 5 s.
@@ -194,11 +188,12 @@ SensorRecorder/
   Core/       TimeBase (clock anchors), CSV formatting, SessionFiles (schemas + buffered writers),
               SessionMetadata, SessionStore (folders, recovery), StreamMonitor (rates/gaps),
               HealthEvaluator (warning rules)
-  Sensors/    CoreMotion / synthetic motion, CoreLocation, AVAudioRecorder, device health
+  Sensors/    CoreMotion / synthetic motion, CoreLocation, device health
   Recording/  RecordingSession (wires everything to disk), RecordingController (8 Hz dashboard),
               PreflightModel, LiveSignals (plots, roughness, ISO 2631-1 Wf MSDV estimate)
   Upload/     IngestBatch + accumulator, gzip (Compression + CRC32), disk UploadQueue, settings
-  UI/         SwiftUI screens
+  UI/         SwiftUI screens (Start, Recording, Recap, menu, Settings) and Theme
+  Resources/  Fonts/Geist-Variable.ttf (+ its OFL licence)
 ```
 
 ## Tests
@@ -207,7 +202,7 @@ SensorRecorder/
 cd src/mobile-ios
 SIM="iPhone 17 Pro"   # any iOS 17+ simulator
 # optional, for the UI tests: grant permissions and give the simulator a GPS position
-xcrun simctl boot "$SIM"; for p in location-always microphone motion photos; do
+xcrun simctl boot "$SIM"; for p in location-always motion; do
   xcrun simctl privacy "$SIM" grant $p com.chuds.sensorrecorder; done
 xcrun simctl location "$SIM" set 46.77121,23.62363
 xcodebuild -project SensorRecorder.xcodeproj -scheme SensorRecorder \
@@ -218,12 +213,12 @@ xcodebuild -project SensorRecorder.xcodeproj -scheme SensorRecorder \
   gap/rate stats, every warning rule, session.json, crash recovery, gzip/CRC, the batch payload
   shape, every upload-queue rule, the Wf filter response vs ISO values, zip
   export, and a full 3-second recording that checks every file on disk.
-- **UI tests** drive the real app: setup → preflight → dashboard → every label control →
-  short tap doesn't stop → hold-to-stop → summary →
-  session list, plus kill-while-recording → relaunch → RECOVERED.
+- **UI tests** drive the real app: Start (override on the Simulator) → Recording → short tap
+  doesn't stop → hold-to-stop → Recap → Done, kill-while-recording → relaunch → recovered, and
+  Settings (upload off; no recording switch, Back returns to Start).
 - **The Simulator has no motion or barometer hardware.** Motion and barometer show "n/a" there,
   preflight can't be all green (the UI tests use the recorded *override*), GPS comes from
-  `simctl location`, and audio comes from the Mac's microphone. **Real data needs the iPhone.** Unit
+  `simctl location`. **Real data needs the iPhone.** Unit
   tests use a test-only synthetic 100 Hz motion source to exercise the full pipeline.
 - Upload batches from the UI tests go to `tools/mock_ingest_server.py` on `:8765` when it is
   running (`-upload.baseURL`).

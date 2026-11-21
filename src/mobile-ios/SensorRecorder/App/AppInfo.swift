@@ -11,6 +11,11 @@ enum AppInfo {
         return "\(v) (\(b)) \(sha)"
     }
 
+    /// `1.0.0`: the marketing version, for the menu and Settings footers.
+    static var shortVersion: String {
+        Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "?"
+    }
+
     /// Hardware identifier, e.g. `iPhone15,2`.
     static var modelIdentifier: String {
         if let sim = ProcessInfo.processInfo.environment["SIMULATOR_MODEL_IDENTIFIER"] { return sim }

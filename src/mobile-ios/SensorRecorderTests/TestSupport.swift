@@ -116,50 +116,6 @@ final class FakeActivity: ActivitySource {
     func stop() {}
 }
 
-/// Audio fake: emits 10 Hz levels, reports a segment start, writes a dummy file.
-final class FakeAudio: AudioSource {
-    private var timer: DispatchSourceTimer?
-    private let queue = DispatchQueue(label: "fake-audio")
-    private let rec = Locked(false)
-    var failToStart = false
-    /// Number of audio segments to simulate (rotation): each gets a file, start and stop events.
-    var segments = 1
-    var isRecording: Bool { rec.current }
-    var bytesWritten: Int64 { 1234 }
-    var latestLevel: AudioLevelSample? { nil }
-    var formatDescription: String { "fake" }
-    var recordsAudio = true
-
-    func start(folder: URL, _ cb: AudioCallbacks) -> Bool {
-        guard !failToStart else { return false }
-        for i in 0..<segments {
-            let name = SessionFileName.audioSegment(i)
-            try? Data(repeating: 0, count: 1234).write(to: folder.appendingPathComponent(name))
-            if i > 0 { cb.segmentEvent(ProcessInfo.processInfo.systemUptime, "stop", SessionFileName.audioSegment(i - 1)) }
-            cb.segmentEvent(ProcessInfo.processInfo.systemUptime, "start", name)
-        }
-        lastSegment = SessionFileName.audioSegment(segments - 1)
-        segmentCallback = cb.segmentEvent
-        rec.withLock { $0 = true }
-        let t = DispatchSource.makeTimerSource(queue: queue)
-        t.schedule(deadline: .now(), repeating: 0.1)
-        t.setEventHandler { cb.level(AudioLevelSample(t: ProcessInfo.processInfo.systemUptime, avgDbfs: -31, peakDbfs: -12)) }
-        timer = t
-        t.resume()
-        return true
-    }
-
-    private var lastSegment: String?
-    private var segmentCallback: ((TimeInterval, String, String) -> Void)?
-
-    func stop() {
-        timer?.cancel(); timer = nil; queue.sync {}
-        if let last = lastSegment { segmentCallback?(ProcessInfo.processInfo.systemUptime, "stop", last) }
-        lastSegment = nil
-        rec.withLock { $0 = false }
-    }
-}
-
 /// Deterministic RNG (SplitMix64) so randomized tests are reproducible.
 struct SeededGenerator: RandomNumberGenerator {
     private var state: UInt64

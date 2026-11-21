@@ -67,7 +67,7 @@ final class SessionDeletionTests: XCTestCase {
         let root = try makeTempDir()
         let store = SessionStore(root: root.appendingPathComponent("sessions"))
         let folder = try store.makeSessionFolder(start: Date(), id: UUID())
-        try Data("x".utf8).write(to: folder.appendingPathComponent("audio_000.m4a"))
+        try Data("x".utf8).write(to: folder.appendingPathComponent("accel_raw.csv"))
         XCTAssertThrowsError(try store.deleteSession(root), "must refuse anything that is not a session folder")
         try store.deleteSession(folder)
         XCTAssertFalse(FileManager.default.fileExists(atPath: folder.path))
@@ -81,7 +81,7 @@ final class SessionVerdictTests: XCTestCase {
     private func meta(_ streams: [String: SessionMetadata.StreamStats], writeErrors: Int = 0) -> SessionMetadata {
         var m = SessionMetadataTests.sample()
         m.stats = .init(durationSec: 60, streams: streams, labelsCount: 0,
-                        audioFiles: [], fileSizes: [:], totalBytes: 0, writeErrors: writeErrors, uploadBatchesCreated: 0)
+                        fileSizes: [:], totalBytes: 0, writeErrors: writeErrors, uploadBatchesCreated: 0)
         return m
     }
     private func s(_ n: Int64, gap: Double) -> SessionMetadata.StreamStats {
@@ -102,23 +102,6 @@ final class SessionVerdictTests: XCTestCase {
 }
 
 final class RecoveryRound3Tests: XCTestCase {
-    private func box(_ type: String, payload: Int) -> Data {
-        var d = Data()
-        let size = UInt32(8 + payload)
-        d.append(contentsOf: [UInt8(size >> 24), UInt8((size >> 16) & 0xff), UInt8((size >> 8) & 0xff), UInt8(size & 0xff)])
-        d.append(contentsOf: Array(type.utf8))
-        d.append(Data(repeating: 0, count: payload))
-        return d
-    }
-
-    func testDetectsAudioWithoutMoovIndex() throws {
-        let dir = try makeTempDir()
-        try (box("ftyp", payload: 16) + box("mdat", payload: 1000) + box("moov", payload: 40))
-            .write(to: dir.appendingPathComponent("audio_000.m4a"))
-        try (box("ftyp", payload: 16) + box("mdat", payload: 1000)) // crashed while recording
-            .write(to: dir.appendingPathComponent("audio_001.m4a"))
-        XCTAssertEqual(SessionAnalyzer.unplayableAudioFiles(in: dir), ["audio_001.m4a"])
-    }
 
     func testRecoveredDurationIsMeasuredFromTheSessionStart() throws {
         let root = try makeTempDir()
@@ -132,13 +115,9 @@ final class RecoveryRound3Tests: XCTestCase {
             .write(to: folder.appendingPathComponent("activity.csv"))
         try Data("t_up,t_utc_ms,x,y,z\n1000.5,1,0,0,0\n1060.0,1,0,0,0\n".utf8)
             .write(to: folder.appendingPathComponent("accel_raw.csv"))
-        try (box("ftyp", payload: 8) + box("mdat", payload: 100)).write(to: folder.appendingPathComponent("audio_000.m4a"))
         store.recoverUnfinishedSessions()
         let r = try SessionMetadata.load(from: folder.appendingPathComponent("session.json"))
         XCTAssertEqual(r.stats?.durationSec ?? 0, 60, accuracy: 1e-6)
-        XCTAssertEqual(r.stats?.audioFilesIncomplete, ["audio_000.m4a"])
-        let log = try String(contentsOf: folder.appendingPathComponent("app_log.txt"), encoding: .utf8)
-        XCTAssertTrue(log.contains("audio_000.m4a has no index"))
         XCTAssertEqual(r.stats?.fileSizes["app_log.txt"], FileManager.default.fileSize(folder.appendingPathComponent("app_log.txt")),
                        "sizes are measured after the recovery note is written")
     }
@@ -154,32 +133,17 @@ final class RecoveryRound3Tests: XCTestCase {
     }
 }
 
-// MARK: - Health: silent mic, location permission
+// MARK: - Health: location permission
 
 final class HealthRound3Tests: XCTestCase {
     private func base() -> HealthInputs {
         var i = HealthInputs(now: 1060, recordingStartUp: 1000)
         i.gpsLastFixUp = 1059.5
-        i.audioExpected = false
-        i.audioMeterExpected = true
-        i.streams[.audioLevel] = StreamSnapshot(id: .audioLevel, count: 600, rateHz: 10, age: 0.1, meanRateHz: 10,
-                                                maxGap: 0.1, gapsOver1s: 0, droppedEstimate: 0, available: true)
         return i
-    }
-
-    func testSilentMeterMeansDeniedOrBlockedMic() {
-        var i = base()
-        i.audioLastSoundUp = 1059
-        XCTAssertTrue(HealthEvaluator.evaluate(i).isEmpty)
-        i.audioLastSoundUp = 1040
-        XCTAssertEqual(HealthEvaluator.evaluate(i).map(\.key), ["audio.silent"])
-        i.audioLastSoundUp = nil // never any sound since start (60 s)
-        XCTAssertEqual(HealthEvaluator.evaluate(i).first?.level, .warn)
     }
 
     func testLocationPermissionLossIsAProblem() {
         var i = base()
-        i.audioLastSoundUp = 1059
         i.locationDegraded = "Precise Location is OFF: GPS is approximate"
         let issues = HealthEvaluator.evaluate(i)
         XCTAssertEqual(issues.map(\.key), ["gps.permission"])
@@ -207,7 +171,7 @@ final class GPSFixTests: XCTestCase {
         // 300 s old (another place, earlier) → dropped; 2 s old → written, not counted; 0 s → counted
         let deps = RecordingSession.Dependencies(
             motion: SyntheticMotionSource(), location: ScriptedLocation([fix(ageSec: 300), fix(ageSec: 2)]),
-            altimeter: nil, activity: nil, audio: nil, deviceStatus: FakeDeviceStatus(), uploadQueue: nil,
+            altimeter: nil, activity: nil, deviceStatus: FakeDeviceStatus(), uploadQueue: nil,
             deviceId: "D", appVersion: "t", deviceInfo: .init(model: "x", name: "x", iosVersion: "x"))
         let session = try RecordingSession(store: SessionStore(root: try makeTempDir()), setup: SessionSetup(),
                                            preflight: nil, deps: deps)
@@ -226,13 +190,13 @@ final class GPSFixTests: XCTestCase {
     }
 }
 
-// MARK: - Every CSV row matches its header (all 14 files)
+// MARK: - Every CSV row matches its header (every file a recording writes)
 
 final class AllFilesRowShapeTests: XCTestCase {
     func testEveryWrittenRowHasExactlyTheHeaderColumnCount() throws {
         let deps = RecordingSession.Dependencies(
             motion: SyntheticMotionSource(), location: FakeLocationSource(), altimeter: FakeAltimeter(),
-            activity: FakeActivity(), audio: FakeAudio(), deviceStatus: FakeDeviceStatus(), uploadQueue: nil,
+            activity: FakeActivity(), deviceStatus: FakeDeviceStatus(), uploadQueue: nil,
             deviceId: "D", appVersion: "t", deviceInfo: .init(model: "x", name: "x", iosVersion: "x"))
         let session = try RecordingSession(store: SessionStore(root: try makeTempDir()), setup: SessionSetup(),
                                            preflight: nil, deps: deps)
@@ -244,7 +208,7 @@ final class AllFilesRowShapeTests: XCTestCase {
             DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) { session.stop(); e.fulfill() }
         }
         wait(for: [e], timeout: ciTimeout)
-        for file in StreamFile.allCases {
+        for file in StreamFile.recorded {
             let text = try String(contentsOf: session.folder.appendingPathComponent(file.fileName), encoding: .utf8)
             let lines = text.split(separator: "\n").map(String.init)
             XCTAssertEqual(lines.first, file.header, file.rawValue)
@@ -364,25 +328,12 @@ final class SessionMetadataUploadTests: XCTestCase {
         XCTAssertTrue(String(decoding: try m.jsonData(), as: UTF8.self).contains("Ana Popescu"), "local session.json keeps it")
     }
 
-    func testPublicTransportAlwaysStartsWithAudioOff() {
-        var tram = SessionSetup()
-        tram.vehicle.type = "tram"
-        tram.audioEnabled = true // last tram trip had audio switched on
-        SetupDefaults.save(tram)
-        defer { UserDefaults.standard.removeObject(forKey: SetupDefaults.key) }
-        XCTAssertFalse(SetupDefaults.load().audioEnabled, "GDPR: bus/tram never inherit audio ON")
-        var car = SessionSetup()
-        car.audioEnabled = false
-        SetupDefaults.save(car)
-        XCTAssertFalse(SetupDefaults.load().audioEnabled, "a car keeps the operator's choice")
-    }
-
     private func runSession(uploadOn: Locked<Bool>, seconds: TimeInterval, toggleOnAfter: TimeInterval? = nil) throws
         -> (RecordingSession, UploadQueue) {
         let q = UploadQueue(directory: try makeTempDir().appendingPathComponent("q"), transport: MockTransport(),
                             config: { uploadOn.current ? UploadConfig(baseURL: URL(string: "https://fn.test"), deviceKey: "k") : .disabled })
         let deps = RecordingSession.Dependencies(
-            motion: SyntheticMotionSource(), location: nil, altimeter: nil, activity: nil, audio: nil,
+            motion: SyntheticMotionSource(), location: nil, altimeter: nil, activity: nil,
             deviceStatus: FakeDeviceStatus(), uploadQueue: q, deviceId: "D", appVersion: "t",
             deviceInfo: .init(model: "x", name: "x", iosVersion: "x"))
         let session = try RecordingSession(store: SessionStore(root: try makeTempDir()), setup: SessionSetup(),
@@ -425,13 +376,12 @@ final class SessionMetadataUploadTests: XCTestCase {
             acc.addAccel(Vec3Sample(t: t, v: Vec3(x: r(), y: r(), z: r())))
             acc.addGyro(Vec3Sample(t: t, v: Vec3(x: r(), y: r(), z: r())))
         }
-        for i in 0..<22 { acc.add(AudioLevelSample(t: 100 + Double(i) * 0.1, avgDbfs: -40 + r(), peakDbfs: -20 + r())) }
         let json = try acc.drain(t0Up: 100, t0UtcMs: 1_763_716_532_000, device: FakeDeviceStatus().status).jsonData()
         XCTAssertLessThan(json.count, RecordingSession.maxBatchJSONBytes / 2, "\(json.count) bytes")
     }
 }
 
-// MARK: - 02 D32: every batch carries the full dataset (only raw audio stays on the phone)
+// MARK: - 02 D32: every batch carries the full dataset
 
 final class FullDatasetBatchTests: XCTestCase {
     func testBatchCarriesEveryStreamOfTheSessionFolder() throws {

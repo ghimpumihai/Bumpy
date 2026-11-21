@@ -15,7 +15,8 @@ Python 3, standard library only.
 
 ## Run it
 
-1. Export the session from the app (Session detail → Export), and AirDrop or copy the folder or `.zip` to the laptop.
+1. Copy the session folder off the phone (Files app or Finder over USB: the app has no export button
+   since D51), or use a `.zip` of it.
 2. Create a key just for replays (once):
 
    ```powershell

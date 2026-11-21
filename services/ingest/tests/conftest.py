@@ -50,7 +50,6 @@ def session_meta(batch):
         "vehicle": {"type": "car"},
         "mount": {"rigid": True},
         "people": {"raterSeat": "front"},
-        "audioEnabled": False,
     }
 
 

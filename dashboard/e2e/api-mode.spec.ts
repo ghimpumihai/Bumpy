@@ -11,7 +11,7 @@ test("reads config.json and talks to the read API over HTTP, without loading the
   });
   await page.goto("/map");
   await expect(page.getByRole("button", { name: /Read API: data source settings/ })).toBeVisible();
-  await expect(page.getByRole("region", { name: "Dataset overview" })).toContainText("Confirmed potholes");
+  await expect(page.getByRole("region", { name: "Dataset overview" })).toContainText("Potholes");
   expect(apiRequests).toEqual(expect.arrayContaining(["/api/overview", "/api/segments", "/api/events"]));
   expect(mockChunks).toEqual([]);
 });
@@ -23,7 +23,7 @@ test("the live view keeps polling the read API", async ({ page }) => {
   });
   await page.goto("/live");
   const panel = page.getByRole("complementary", { name: "Streaming devices" });
-  await expect(panel.locator('[data-slot="badge"]', { hasText: /^Replay$/ })).toBeVisible();
+  await expect(panel.getByText(/^Replay ·/)).toBeVisible();
   await expect.poll(() => livePolls, { timeout: 10_000 }).toBeGreaterThanOrEqual(3);
 });
 
@@ -36,7 +36,7 @@ test("a wrong API URL that answers with an HTML page shows a clear error on ever
   await page.route(`${API_ORIGIN}/**`, (route) =>
     route.fulfill({ status: 200, contentType: "text/html", headers: { "access-control-allow-origin": "*" }, body: "<!doctype html><title>x</title>" }),
   );
-  for (const path of ["/map", "/sessions", "/sessions/3f1c2b9e-0d4a-4e7b-9c51-6a2d8e0f4b11", "/live", "/quality"]) {
+  for (const path of ["/map", "/sessions", "/sessions/3f1c2b9e-0d4a-4e7b-9c51-6a2d8e0f4b11", "/live"]) {
     await page.goto(path);
     await expect(page.getByText(/instead of JSON\. Check the API URL/).first(), path).toBeVisible();
     await expect(page.getByText("Something went wrong!"), path).toHaveCount(0);

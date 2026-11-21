@@ -4,11 +4,7 @@ import SwiftUI
 import UIKit
 
 enum Route: Hashable {
-    case setup
-    case preflight
-    case detail(String) // folder name
     case settings
-    case help
 }
 
 /// App-wide state and long-lived services. Main actor.
@@ -18,11 +14,7 @@ final class AppModel {
     let store: SessionStore
     let location = LocationService()
     let deviceMonitor = DeviceStatusMonitor()
-    let audio = AudioRecorderService()
-    let audioMeter = AudioLevelMeterService()
     let uploadQueue: UploadQueue
-    let sicknessInterval: TimeInterval
-    let sicknessTimeout: TimeInterval
 
     var sessions: [SessionStore.Entry] = []
     var path = NavigationPath()
@@ -51,13 +43,6 @@ final class AppModel {
         #endif
         try? store.ensureRoot()
         uploadQueue = UploadQueue(directory: UploadQueue.defaultDirectory, config: { AppSettings.uploadConfig })
-        // Launch arguments `-sicknessInterval <s> -sicknessTimeout <s>` (NSArgumentDomain) override
-        // the spec defaults (120 s / 30 s); used by UI tests and for dry runs.
-        let d = UserDefaults.standard
-        let interval = d.double(forKey: "sicknessInterval")
-        let timeout = d.double(forKey: "sicknessTimeout")
-        sicknessInterval = interval > 0 ? interval : 120
-        sicknessTimeout = timeout > 0 ? timeout : 30
         setup = SetupDefaults.load()
         // Upload events go to the latest session's app_log.txt (spec §4) and to the unified log.
         let logTarget = uploadLogSession
@@ -101,11 +86,14 @@ final class AppModel {
 
     enum DeleteSessionError: LocalizedError {
         case batchesNotUploaded(Int)
+        case batchesFailed(Int)
 
         var errorDescription: String? {
             switch self {
             case .batchesNotUploaded(let count):
                 return "\(count) batch(es) of this trip haven't reached the cloud yet. Let the upload finish before deleting."
+            case .batchesFailed(let count):
+                return "\(count) batch(es) of this trip were rejected by the server and are in upload_failed. Export the trip and resolve them before deleting."
             }
         }
     }
@@ -125,6 +113,8 @@ final class AppModel {
             if let sessionId {
                 let pending = queue.pendingCount(sessionId: sessionId)
                 if pending > 0 { throw DeleteSessionError.batchesNotUploaded(pending) }
+                let failed = queue.failedCount(sessionId: sessionId)
+                if failed > 0 { throw DeleteSessionError.batchesFailed(failed) }
             }
             try store.deleteSession(folder)
         }.value
@@ -147,8 +137,6 @@ final class AppModel {
         RecordingSession.Dependencies(
             motion: CoreMotionSource(), location: location, altimeter: CoreAltimeterSource(),
             activity: CoreActivitySource(),
-            // Audio OFF (default on bus/tram, GDPR): level meter only, nothing from the mic is stored.
-            audio: setup.audioEnabled ? audio : audioMeter,
             deviceStatus: deviceMonitor, uploadQueue: uploadQueue,
             deviceId: AppSettings.deviceId, appVersion: AppInfo.version, deviceInfo: AppInfo.deviceInfo)
     }
@@ -161,11 +149,12 @@ final class AppModel {
         guard !isRecovering else {
             throw CocoaError(.userCancelled, userInfo: [NSLocalizedDescriptionKey: "Still checking previous sessions, try again in a second."])
         }
+        // D51: no setup form. Every trip is a car; mount and people keep the remembered defaults.
+        setup.vehicle = SessionMetadata.Vehicle()
         SetupDefaults.save(setup)
         let deps = makeDependencies()
         let session = try RecordingSession(store: store, setup: setup, preflight: preflight, deps: deps)
-        let controller = RecordingController(session: session, sicknessInterval: sicknessInterval,
-                                             sicknessTimeout: sicknessTimeout)
+        let controller = RecordingController(session: session)
         location.stopPreview()
         recording = controller
         uploadLogSession.withLock { $0 = session }
@@ -203,23 +192,22 @@ enum SetupDefaults {
         var mount: SessionMetadata.Mount
         var people: SessionMetadata.People
         var conditions: SessionMetadata.Conditions
-        var audioEnabled: Bool? // optional: older stored setups lack it
     }
 
     static func load() -> SessionSetup {
         guard let data = UserDefaults.standard.data(forKey: key),
               let s = try? JSONDecoder().decode(Stored.self, from: data) else { return SessionSetup() }
-        // Bus/tram always start with audio OFF (spec §3.5, GDPR), whatever the last trip used.
-        let audio = s.vehicle.isPublicTransport ? false : (s.audioEnabled ?? true)
-        var setup = SessionSetup(vehicle: s.vehicle, audioEnabled: audio,
-                                 mount: s.mount, people: s.people, conditions: s.conditions)
+        var setup = SessionSetup(vehicle: s.vehicle, mount: s.mount, people: s.people, conditions: s.conditions)
         setup.mount.photoFile = nil
+        // Mount quality decides whether a trip counts for the road map, so it is set for every trip,
+        // never carried over from the last one.
+        setup.mount.rigid = true
+        setup.mount.handheld = false
         return setup
     }
 
     static func save(_ setup: SessionSetup) {
-        let s = Stored(vehicle: setup.vehicle, mount: setup.mount, people: setup.people, conditions: setup.conditions,
-                       audioEnabled: setup.audioEnabled)
+        let s = Stored(vehicle: setup.vehicle, mount: setup.mount, people: setup.people, conditions: setup.conditions)
         if let data = try? JSONEncoder().encode(s) { UserDefaults.standard.set(data, forKey: key) }
     }
 }

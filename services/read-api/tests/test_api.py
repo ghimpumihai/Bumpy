@@ -5,6 +5,7 @@ contract: a missing or misspelled field would break a dashboard page without any
 """
 
 import datetime as dt
+import math
 import re
 
 import pytest
@@ -16,17 +17,17 @@ pytestmark = requires_db
 ISO = re.compile(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$")
 
 SUMMARY_KEYS = {
-    "sessionId", "source", "isMock", "replayOf", "deviceId", "vehicle", "mount", "people", "audioEnabled",
+    "sessionId", "source", "isMock", "replayOf", "deviceId", "vehicle", "mount", "people",
     "startedAt", "endedAt", "durationS", "distanceM", "status", "incomplete", "qualityStatus",
     "validFraction", "includeInAgg", "exclusionReasons", "roughnessEligible", "sicknessExperimental",
-    "msdvZ", "msiPct", "eventCounts", "ratingsCount",
+    "msdv", "msdvZ", "msdvY", "msiPct", "eventCounts",
 }
 DETAIL_KEYS = SUMMARY_KEYS | {"quality", "detection", "sickness", "processedAt", "processorVersion"}
 QUALITY_KEYS = {"streams", "gps", "validFraction", "invalidSeconds", "rejectedBatches", "lateBatches",
                 "duplicateBatches"}
 LIVE_DEVICE_KEYS = {
     "deviceId", "sessionId", "source", "sessionStatus", "vehicleType", "updatedAt", "receivedAt", "lat",
-    "lon", "speedMs", "courseDeg", "hAccM", "roughnessNow", "msdvSoFar", "latestRating", "battery",
+    "lon", "speedMs", "courseDeg", "hAccM", "roughnessNow", "msdvSoFar", "battery",
     "thermal", "track",
 }
 OVERVIEW_KEYS = {"sessions", "distanceKm", "segments", "confirmedPotholes", "speedBumps", "lastProcessedAt",
@@ -103,22 +104,24 @@ def test_unknown_route_is_404_with_error_body(client):
 # --- A live trip --------------------------------------------------------------------------
 
 def test_live_trip_end_to_end(client, seed, fixture_batch):
-    rating = [{"t": 0.5, "type": "sickness", "value": "3", "note": None}]
-    seed(meta=[session_meta(SID)], batches=_trip(fixture_batch, 20, labels_at={15: rating}))
+    # An older app build's MISC rating (D47: no longer used) next to a pothole tap.
+    labels = [{"t": 0.5, "type": "sickness", "value": "3", "note": None},
+              {"t": 0.7, "type": "pothole", "value": None, "note": None}]
+    seed(meta=[session_meta(SID)], batches=_trip(fixture_batch, 20, labels_at={15: labels}))
 
     (s,) = _ok(client, "/api/sessions")["sessions"]
     assert set(s) == SUMMARY_KEYS
     assert (s["sessionId"], s["source"], s["status"], s["vehicle"]["type"]) == (SID, "live", "live", "bus")
     assert s["exclusionReasons"] == ["live_only"] and s["includeInAgg"] is False
     assert s["roughnessEligible"] is True and s["sicknessExperimental"] is False
-    assert s["ratingsCount"] == 1 and s["eventCounts"] == {"pothole": 0, "speed_bump": 0, "rail_joint": 0}
+    assert s["eventCounts"] == {"pothole": 0, "speed_bump": 0, "rail_joint": 0}
     assert 1000 < s["distanceM"] < 1100  # 19 steps of ≈ 55.6 m
     assert ISO.match(s["startedAt"]) and s["endedAt"] is None
 
     d = _ok(client, f"/api/sessions/{SID}")
     assert set(d) == DETAIL_KEYS and set(d["quality"]) == QUALITY_KEYS
     assert d["quality"]["gps"]["fixes"] == 20
-    assert [r["value"] for r in d["sickness"]["ratings"]] == [3]
+    assert set(d["sickness"]) == {"msdv", "msdvZ", "msdvY", "msiPct"}  # the calculated dose only, no ratings
 
     track = _ok(client, f"/api/sessions/{SID}/track")
     coords, times = track["geometry"]["coordinates"], track["properties"]["times"]
@@ -134,10 +137,10 @@ def test_live_trip_end_to_end(client, seed, fixture_batch):
         ("PHONE-1", SID, "live", "bus")
     assert ISO.match(dev["updatedAt"]) and ISO.match(dev["receivedAt"])
     assert dev["lat"] == pytest.approx(46.77 + 19 * STEP_DEG) and dev["speedMs"] == 10.0
-    assert dev["latestRating"]["value"] == 3 and len(dev["track"]) >= 2
+    assert len(dev["track"]) >= 2
 
     labels = _ok(client, f"/api/sessions/{SID}/labels")["labels"]
-    assert [lab["type"] for lab in labels] == ["sickness"] and ISO.match(labels[0]["tUtc"])
+    assert [lab["type"] for lab in labels] == ["pothole"] and ISO.match(labels[0]["tUtc"])  # ratings hidden
     series = _ok(client, f"/api/sessions/{SID}/series")
     assert set(series) == {"t", "aVert", "aLat", "aLon", "speed", "msdv"}
     assert len({len(v) for v in series.values()}) == 1  # columnar: equal lengths
@@ -153,7 +156,7 @@ def test_device_shown_from_the_start(client, seed, fixture_batch):
 
 
 def test_silent_device_drops_off_live_view(client, seed, fixture_batch):
-    old = dt.datetime.now(UTC) - dt.timedelta(minutes=5)
+    old = dt.datetime.now(UTC) - dt.timedelta(minutes=10)
     seed(batches=_trip(fixture_batch, 20, start=old), received_at=old)
     assert _ok(client, "/api/live")["devices"] == []
 
@@ -196,7 +199,7 @@ def _with_motion(b: dict, vert) -> dict:
     t0 = b["t0UtcMs"] / 1000
     zeros = [0.0] * 200
     b["deviceMotion"] = {"t": rel.tolist(), "ua_x": zeros, "ua_y": zeros,
-                         "ua_z": (vert(t0 + rel) / 9.80665).tolist(),
+                         "ua_z": (-vert(t0 + rel) / 9.80665).tolist(),  # CoreMotion's sign
                          "g_x": zeros, "g_y": zeros, "g_z": [-1.0] * 200,
                          "rr_x": zeros, "rr_y": zeros, "rr_z": zeros,
                          "q_w": [1.0] * 200, "q_x": zeros, "q_y": zeros, "q_z": zeros}
@@ -221,8 +224,11 @@ def test_signal_results_are_served(client, seed, fixture_batch):
     assert max(abs(v) for v in series["aVert"]) > 5  # the pothole spike
 
     s = _ok(client, f"/api/sessions/{SID}")
-    assert s["msdvZ"] > 0 and s["msiPct"] == pytest.approx(s["msdvZ"] / 3, abs=1e-4)
-    assert s["sickness"]["msdvZ"] == s["msdvZ"]
+    assert s["msdvZ"] > 0 and s["msdvY"] is not None
+    assert s["msdv"] == pytest.approx(math.hypot(s["msdvZ"], s["msdvY"]), abs=1e-4)
+    assert s["msiPct"] == pytest.approx(s["msdv"] / 3, abs=1e-4)
+    # The calculated dose only (D47): combined, its two parts, and the incidence.
+    assert s["sickness"] == {k: s[k] for k in ("msdv", "msdvZ", "msdvY", "msiPct")}
     assert s["eventCounts"] == {"pothole": 1, "speed_bump": 0, "rail_joint": 0}
 
     (ev,) = _ok(client, f"/api/sessions/{SID}/events")["features"]
@@ -233,7 +239,7 @@ def test_signal_results_are_served(client, seed, fixture_batch):
     assert props["speedKmh"] == 36.0 and props["vehicleType"] == "bus" and ISO.match(props["tUtc"])
 
     (dev,) = _ok(client, "/api/live")["devices"]
-    assert dev["msdvSoFar"] == pytest.approx(s["msdvZ"], rel=1e-3) and dev["roughnessNow"] is not None
+    assert dev["msdvSoFar"] == pytest.approx(s["msdv"], rel=1e-3) and dev["roughnessNow"] is not None
 
     # Not finalized, so not part of the shared map yet.
     assert _ok(client, "/api/events", vehicle="all")["features"] == []
@@ -277,6 +283,7 @@ def test_finalized_trip_reaches_the_map(client, seed, dbname, fixture_batch, tmp
         (folder / f"{b['batchSeq']:08d}.json.gz").write_bytes(gzip.compress(json.dumps(b).encode()))
     for m, phase in zip(metas, ("start", "stop")):
         (folder / f"session-{phase}.json.gz").write_bytes(gzip.compress(json.dumps(m).encode()))
+    live_streams = _ok(client, f"/api/sessions/{SID}")["quality"]["streams"]
     with psycopg.connect(dbname=dbname) as conn:
         assert finalize.handle(conn, finalize.DirArchive(tmp_path), json.dumps({"sessionId": SID}).encode()) \
             == ("complete", SID)
@@ -285,7 +292,13 @@ def test_finalized_trip_reaches_the_map(client, seed, dbname, fixture_batch, tmp
     assert (s["status"], s["includeInAgg"], s["exclusionReasons"]) == ("complete", True, [])
     assert 0 < s["validFraction"] <= 1 and ISO.match(s["processedAt"])
     # The finalize job's streams, under the dashboard's names (src/views/quality: device_motion).
-    assert s["quality"]["streams"]["device_motion"]["expectedHz"] == 100.0
+    streams = s["quality"]["streams"]
+    assert streams["device_motion"]["expectedHz"] == 100.0
+    assert streams["device_motion"]["rows"] == 30 * 200  # every sample of the archive, not batch counts
+    # The streams finalize can't recompute from the archive keep their live numbers instead of vanishing.
+    assert set(streams) == set(live_streams) == {"device_motion", "accel_raw", "gyro_raw", "altimeter",
+                                                  "location"}
+    assert streams["accel_raw"] == live_streams["accel_raw"]
 
     fc = _ok(client, "/api/segments", vehicle="all")
     assert fc["type"] == "FeatureCollection" and len(fc["features"]) > 5
@@ -310,6 +323,15 @@ def test_finalized_trip_reaches_the_map(client, seed, dbname, fixture_batch, tmp
 
     # Finalized, so its pothole is on the shared map now.
     assert len(_ok(client, "/api/events", vehicle="all")["features"]) == 1
+
+    # Speed bumps are counted like /api/events: only with a position.
+    with psycopg.connect(dbname=dbname) as conn:
+        for sec, geom in ((10, "ST_SetSRID(ST_MakePoint(23.62, 46.771), 4326)::geography"), (12, "NULL")):
+            conn.execute(f"INSERT INTO events (session_id, type, t, geom, magnitude, confidence) "
+                         f"VALUES (%s, 'speed_bump', %s, {geom}, 6.0, 0.8)",
+                         (SID, start + dt.timedelta(seconds=sec)))
+    bumps = len(_ok(client, "/api/events", vehicle="all", type="speed_bump")["features"])
+    assert bumps == 1 and _ok(client, "/api/overview")["speedBumps"] == bumps
 
 
 def test_cors_only_for_configured_origin(dbname, monkeypatch):
@@ -391,7 +413,7 @@ def test_stream_quality_from_live_batches(client, seed, fixture_batch):
     seed(meta=[session_meta(SID)], batches=batches)
 
     streams = _ok(client, f"/api/sessions/{SID}")["quality"]["streams"]
-    assert set(streams) == {"device_motion", "accel_raw", "gyro_raw", "altimeter", "audio_level", "location"}
+    assert set(streams) == {"device_motion", "accel_raw", "gyro_raw", "altimeter", "location"}
     for s in streams.values():
         assert set(s) == {"rows", "rateHz", "expectedHz", "maxGapS", "gapsOver1s"}
     dm = streams["device_motion"]
@@ -403,6 +425,26 @@ def test_stream_quality_from_live_batches(client, seed, fixture_batch):
 
     (row,) = _ok(client, "/api/quality")["sessions"]
     assert row["quality"]["streams"] == streams
+
+
+def test_live_distance_ignores_parked_jitter_and_inaccurate_fixes(client, seed, fixture_batch):
+    """The finalize job's distance rule (trip_distance_m): jitter while parked and fixes worse than
+    MAX_HACC_M add nothing."""
+    import random
+
+    rng = random.Random(3)
+    parked = _trip(fixture_batch, 20)
+    for b in parked:
+        fix = b["location"][0]
+        fix.update(lat=46.77 + rng.gauss(0, 3.5 / 111_000), lon=23.62 + rng.gauss(0, 3.5 / 76_000), speed=0.1)
+    seed(meta=[session_meta(SID)], batches=parked)
+    assert _ok(client, f"/api/sessions/{SID}")["distanceM"] < 5
+
+    other = "99999999-2222-4333-8444-555555555555"
+    moving = _trip(fixture_batch, 20, sid=other, device="PHONE-2")
+    moving[10]["location"][0].update(lat=46.77 + 0.003, hAcc=300.0)  # an outlier its accuracy flags
+    seed(meta=[session_meta(other, device_id="PHONE-2")], batches=moving)
+    assert 1000 < _ok(client, f"/api/sessions/{other}")["distanceM"] < 1100  # the outlier is skipped: still ≈ 19 × 55.6 m
 
 
 def test_lists_keep_each_session_apart(client, seed, fixture_batch):

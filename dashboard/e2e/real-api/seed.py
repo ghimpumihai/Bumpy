@@ -65,7 +65,6 @@ def meta(session_id: str, device_id: str, started: dt.datetime, *, ended: dt.dat
     m = {
         "sessionId": session_id, "deviceId": device_id, "startedAtUtc": iso(started), "startUptimeSec": 10.0,
         "endedAtUtc": iso(ended) if ended else None, "recovered": False, "syntheticSensors": False,
-        "audioEnabled": False,
         "vehicle": {"type": "bus", "makeModel": "Solaris Urbino 12", "line": "24", "notes": ""},
         "mount": {"location": "dashboard holder", "phoneOrientation": "flat", "rigid": True, "handheld": False},
         "people": {"operatorSeat": "front", "raterSeat": "rear left", "raterPosture": "seated", "passengerCount": 2},

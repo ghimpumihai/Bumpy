@@ -36,6 +36,7 @@ BATCH_MUTATIONS = {
     "impossible date": lambda b: b.update(t0Utc="2026-13-40T09:15:32.120Z"),
     "t0Up string": lambda b: b.update(t0Up="1"),
     "wrong units": lambda b: b["units"].update(accel="m/s2"),
+    "extra units key": lambda b: b["units"].update(magnetic="uT"),
     "empty source": lambda b: b.update(source=""),
     "t0UtcMs float": lambda b: b.update(t0UtcMs=1.5),
     "fieldUnits bad": lambda b: b.update(fieldUnits={"a": 1}),
@@ -85,7 +86,7 @@ BATCH_MUTATIONS = {
     "nested extra NUL": lambda b: b["device"].update(netType=["ok", {"deep": "\x00"}]),
     "thermal too long": lambda b: b["device"].update(thermal="t" * 2001),
     "empty batch": lambda b: [blk.update({k: [] for k in blk}) for blk in
-                              (b["deviceMotion"], b["accelRaw"], b["gyroRaw"], b["altimeter"], b["audioLevel"])]
+                              (b["deviceMotion"], b["accelRaw"], b["gyroRaw"], b["altimeter"])]
                              and b.update(location=[], labels=[]),
 }
 
@@ -97,7 +98,7 @@ def test_batch_matches_mock(name, batch, mock_server):
     theirs = _outcome(mock_server.validate, batch)
     assert mine == theirs
     valid = name in ("valid", "empty batch", "no optional blocks", "heading valid", "activity valid",
-                     "deviceId 128", "label type 64", "note 2000")
+                     "deviceId 128", "label type 64", "note 2000", "extra units key")
     assert mine[0] == ("ok" if valid else "invalid"), mine
 
 
@@ -109,6 +110,33 @@ def test_fixture_batch_is_valid(batch, mock_server):
 
 def test_non_object_rejected_like_mock(mock_server):
     assert _outcome(contract.validate_batch, [1])[1] == _outcome(mock_server.validate, [1])[1]
+
+
+OLD_AUDIO_LEVELS = {  # what builds before D48 send, well-formed or not: never read
+    "valid": {"t": [0.0], "avgDbfs": [-40.0], "peakDbfs": [-20.0]},
+    "malformed": {"t": [0.0, 0.1], "avgDbfs": ["loud"]},
+    "null": None,
+}
+
+
+@pytest.mark.parametrize("level", ["absent", *OLD_AUDIO_LEVELS])
+def test_audio_level_ignored_by_both(level, batch, mock_server):
+    """D48 (no audio): neither side requires or checks audioLevel; builds before D48 still send it."""
+    batch.pop("audioLevel", None)  # whether or not the fixture still has it
+    if level != "absent":
+        batch["audioLevel"] = OLD_AUDIO_LEVELS[level]
+    assert _outcome(contract.validate_batch, batch) == _outcome(mock_server.validate, batch) == ("ok", None)
+
+
+@pytest.mark.parametrize("enabled", [None, True, False, "yes", 1])
+def test_audio_enabled_ignored_by_both(enabled, session_meta, mock_server):
+    """D48: session.json audioEnabled (builds before D48) is neither required nor checked."""
+    sid = session_meta["sessionId"]
+    session_meta.pop("audioEnabled", None)
+    if enabled is not None:
+        session_meta["audioEnabled"] = enabled
+    assert (_outcome(contract.validate_session_meta, session_meta, sid)
+            == _outcome(mock_server.validate_session_meta, session_meta, sid) == ("ok", "start"))
 
 
 @pytest.mark.parametrize("sid", ["a/b", "../x", "x" * 129, "has space"])
@@ -127,7 +155,6 @@ SESSION_MUTATIONS = {
     "no endedAtUtc key": lambda m: m.pop("endedAtUtc"),
     "recovered string": lambda m: m.update(recovered="no"),
     "vehicle missing": lambda m: m.pop("vehicle"),
-    "audioEnabled string": lambda m: m.update(audioEnabled="yes"),
     "batchCount negative": lambda m: m.update(batchCount=-1, recovered=True),
     "startUptime string": lambda m: m.update(startUptimeSec="1"),
     "deviceId missing": lambda m: m.pop("deviceId"),

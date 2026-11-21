@@ -13,7 +13,7 @@ import { buildChartData } from "../utils/series";
 export function SessionCharts({ session }: { session: SessionDetail }) {
   const series = sessionsApi.useSessionSeries(session);
   const events = sessionsApi.useSessionEvents(session);
-  const data = series.data ? buildChartData(series.data, events.data, session.sickness.ratings) : null;
+  const data = series.data ? buildChartData(series.data, events.data) : null;
   const syncKey = `session-${session.sessionId}`;
 
   return (
@@ -47,7 +47,7 @@ export function SessionCharts({ session }: { session: SessionDetail }) {
                 ]}
               />
               <TimeSeriesChart
-                title="Sideways and forward acceleration — sway in curves and stop-and-go"
+                title="Sideways and forward acceleration — curves and stop-and-go (appears once the phone’s direction is learned)"
                 times={data.times}
                 height={CHART_HEIGHT_PX}
                 syncKey={syncKey}
@@ -64,14 +64,11 @@ export function SessionCharts({ session }: { session: SessionDetail }) {
                 series={[{ label: "Speed", colorVar: "--chart-4", values: data.speedKmh, unit: "km/h" }]}
               />
               <TimeSeriesChart
-                title="Motion sickness dose so far, and the passenger's MISC ratings"
+                title="Motion sickness dose so far"
                 times={data.times}
                 height={CHART_HEIGHT_PX}
                 syncKey={syncKey}
-                series={[
-                  { label: "MSDV", colorVar: "--chart-5", values: data.msdv, unit: "m/s¹·⁵" },
-                  { label: "MISC rating", colorVar: "--chart-1", values: data.ratings, pointsOnly: true, axis: "right", unit: "0–10" },
-                ]}
+                series={[{ label: "MSDV", colorVar: "--chart-5", values: data.msdv, unit: "m/s¹·⁵" }]}
               />
             </div>
           )}

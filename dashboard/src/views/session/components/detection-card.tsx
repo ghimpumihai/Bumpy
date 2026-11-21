@@ -6,6 +6,9 @@ import { formatFraction } from "@/utils/format-number";
 
 /** Detections scored against the passenger's taps within ±1.5 s (plan 02 §9). */
 export function DetectionCard({ detection }: { detection: DetectionMetrics | null }) {
+  // Without any manual tap there is nothing to score against: a table of zeros would only look like a result.
+  const scored = detection !== null && Object.values(detection).some((score) => score.truePositives + score.falseNegatives > 0);
+  if (!scored) return null;
   return (
     <Card>
       <CardHeader>

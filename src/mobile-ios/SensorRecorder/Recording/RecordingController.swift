@@ -24,11 +24,10 @@ struct DashboardSnapshot: Equatable {
     var lateral: [Double] = []
     var roughness: Double = 0
     var msdv: Double = 0
-    var lastSickness: Int?
 }
 
 /// Main-thread view model for the recording dashboard. Refreshes at 8 Hz (spec: 5–10 Hz, never
-/// per sample), evaluates the warning rules, alerts on new problems, drives the sickness prompt.
+/// per sample), evaluates the warning rules, alerts on new problems.
 @MainActor
 @Observable
 final class RecordingController {
@@ -37,33 +36,29 @@ final class RecordingController {
     private(set) var issues: [HealthIssue] = []
     private(set) var overall: HealthLevel = .ok
     private(set) var toast: String?
-    private(set) var sicknessPromptActive = false
-    private(set) var sicknessManualOpen = false
-    private(set) var sicknessRemaining: Int = 0
     private(set) var activeSurface: SurfaceKind?
     private(set) var activeSegments: Set<SegmentKind> = []
     private(set) var finished: SessionMetadata?
     private(set) var trackPoints: [TrackBuffer.Point] = []
+    /// "GPS back · 12 s gap", shown for a few seconds after GPS recovers.
+    private(set) var recoveryNote: String?
 
     @ObservationIgnored private var timer: Timer?
-    @ObservationIgnored private var scheduler: SicknessScheduler
     @ObservationIgnored private var issueTracker = IssueTracker()
     @ObservationIgnored private var toastExpiry: Date?
     @ObservationIgnored private var trackVersion = -1
     @ObservationIgnored private var tickCount = 0
     @ObservationIgnored private let alerter: Alerter
+    @ObservationIgnored private var recoveryExpiry: Date?
+    /// Uptime of the last GPS fix before the current outage; nil while GPS is fine.
+    @ObservationIgnored private var gpsLostSinceUp: TimeInterval?
 
     static let refreshHz = 8.0
-    // Audio level bar: 6 bars from −60 dBFS up, 10 dB each.
-    static let levelBars = 6
-    static let levelFloorDbfs = -60.0
-    static let dbPerBar = 10.0
+    static let recoveryNoteSeconds: TimeInterval = 5
 
-    init(session: RecordingSession, sicknessInterval: TimeInterval = 120, sicknessTimeout: TimeInterval = 30,
-         alerter: Alerter? = nil) {
+    init(session: RecordingSession, alerter: Alerter? = nil) {
         self.session = session
         self.alerter = alerter ?? SystemAlerter()
-        scheduler = SicknessScheduler(start: session.startUp, interval: sicknessInterval, timeout: sicknessTimeout)
     }
 
     // MARK: Lifecycle
@@ -84,11 +79,6 @@ final class RecordingController {
         guard finished == nil else { return }
         timer?.invalidate()
         timer = nil
-        if scheduler.isPromptActive {
-            session.addLabel(.sicknessMissed, note: "recording stopped")
-        }
-        sicknessPromptActive = false
-        sicknessManualOpen = false
         finished = session.stop()
         UIApplication.shared.isIdleTimerDisabled = false
         alerter.stopped()
@@ -115,33 +105,6 @@ final class RecordingController {
         confirm(l.type == .segmentStart ? "\(s.shortName) START" : "\(s.shortName) END", at: l.date)
     }
 
-    func openManualSickness() {
-        sicknessManualOpen = true
-    }
-
-    func closeManualSickness() {
-        sicknessManualOpen = false
-    }
-
-    /// The rater declined / the operator needs the screen: logged as missed, never as a rating.
-    func skipSicknessPrompt() {
-        guard sicknessPromptActive else { return }
-        session.addLabel(.sicknessMissed, note: "skipped")
-        scheduler.answered()
-        sicknessPromptActive = false
-        confirm("Sickness prompt skipped", at: Date())
-    }
-
-    func rateSickness(_ value: Int) {
-        let prompted = sicknessPromptActive
-        session.addLabel(.sickness, value: String(value), note: prompted ? "prompt" : "manual")
-        scheduler.answered()
-        sicknessPromptActive = false
-        sicknessManualOpen = false
-        snapshot.lastSickness = value
-        confirm("Sickness \(value) logged", at: Date())
-    }
-
     private func confirm(_ text: String, at date: Date) {
         alerter.labelConfirmed()
         let f = DateFormatter()
@@ -164,23 +127,8 @@ final class RecordingController {
         issues = newIssues
         overall = HealthEvaluator.overall(newIssues)
 
-        // Sickness prompt
-        switch scheduler.tick(now: now) {
-        case .prompt:
-            session.addLabel(.sicknessPrompt)
-            sicknessPromptActive = true
-            sicknessManualOpen = false
-            alerter.sicknessPrompt()
-        case .missed:
-            session.addLabel(.sicknessMissed)
-            session.log(.info, "sickness prompt missed")
-            sicknessPromptActive = false
-        case nil:
-            break
-        }
-        sicknessRemaining = Int((scheduler.remaining(now: now) ?? 0).rounded(.up))
-
         if let exp = toastExpiry, Date() > exp { toast = nil; toastExpiry = nil }
+        if let exp = recoveryExpiry, Date() > exp { recoveryNote = nil; recoveryExpiry = nil }
 
         snapshot = buildSnapshot(now: now, inputs: inputs)
 
@@ -199,12 +147,36 @@ final class RecordingController {
         for i in t.appeared { session.log(i.level == .problem ? .problem : .warn, i.message) }
         for key in t.resolved { session.log(.info, "resolved: \(key)") }
         if t.alert { alerter.newProblem() } // spec: strong haptic + sound on PROBLEM
+
+        let gpsLost = new.contains { $0.key == "gps.nofix" }
+        if gpsLost, gpsLostSinceUp == nil {
+            gpsLostSinceUp = session.latest.gpsFixUp ?? session.startUp
+        } else if !gpsLost, let since = gpsLostSinceUp {
+            gpsLostSinceUp = nil
+            if let back = session.latest.gpsFixUp, back > since {
+                recoveryNote = "GPS back · \(TripFormat.gap(back - since)) gap"
+                recoveryExpiry = Date().addingTimeInterval(Self.recoveryNoteSeconds)
+            }
+        }
+    }
+
+    /// The one status line above "Hold to end trip": the worst current issue, else the recovery
+    /// note, else "All saved".
+    var statusLine: (text: String, level: HealthLevel) {
+        if let worst = issues.max(by: { $0.level < $1.level }) {
+            var text = worst.message
+            if worst.key == "gps.nofix" {
+                text = text.replacingOccurrences(of: "GPS: no fix for", with: "GPS lost for") + " · motion still saving"
+            }
+            if issues.count > 1 { text += " · +\(issues.count - 1) more" }
+            return (text, worst.level)
+        }
+        return (recoveryNote ?? "All saved", .ok)
     }
 
     private func buildSnapshot(now: TimeInterval, inputs: HealthInputs) -> DashboardSnapshot {
         var s = DashboardSnapshot()
         s.elapsed = now - session.startUp
-        s.lastSickness = session.labels.lastSickness?.value
         let st = inputs.streams
 
         func fmtRate(_ r: Double) -> String { r >= 10 ? String(format: "%.1f Hz", r) : String(format: "%.2f Hz", r) }
@@ -251,26 +223,8 @@ final class RecordingController {
             rows.append(.init(id: "activity", name: "Activity", rate: a.available ? "auto" : "n/a", samples: act, age: "",
                               dot: .neutral, detail: nil))
         }
-        // Audio: "recording" (S2 to file) vs "meter only" (audio OFF, e.g. bus/tram) must never be
-        // confused — in GDPR mode the operator must not be told the microphone is recording.
-        let sourceRunning = session.audioRecording // recorder recording, or meter running
-        var audioDetail: String?
-        if let lvl = session.audioLevel, sourceRunning, lvl.avgDbfs.isFinite { // Int(NaN) would trap
-            let bars = max(0, min(Self.levelBars, Int((lvl.avgDbfs - Self.levelFloorDbfs) / Self.dbPerBar)))
-            audioDetail = String(format: "level %.0f dBFS ", lvl.avgDbfs) + String(repeating: "▮", count: bars)
-                + String(repeating: "▯", count: Self.levelBars - bars)
-        }
-        if session.recordsAudio {
-            rows.append(.init(id: "audio", name: "Audio rec", rate: sourceRunning ? "ON 48k" : "OFF",
-                              samples: ByteFormat.string(session.audioBytes), age: "",
-                              dot: .level(sourceRunning ? .ok : .problem), detail: audioDetail))
-        } else {
-            let meterLevel = issues.first { $0.key == "audio.meter" }?.level ?? .ok
-            rows.append(.init(id: "audio", name: "Audio", rate: "rec OFF", samples: "meter only (privacy)", age: "",
-                              dot: session.hasAudioSource ? .level(meterLevel) : .neutral, detail: audioDetail))
-        }
         // Disk
-        let written = session.writer.totalCSVBytes + session.audioBytes
+        let written = session.writer.totalCSVBytes
         let free = inputs.freeDiskBytes ?? -1
         let diskLevel = max(issues.first { $0.key.hasPrefix("disk.") }?.level ?? .ok, .ok)
         rows.append(.init(id: "disk", name: "Disk written", rate: ByteFormat.string(written),
@@ -307,7 +261,6 @@ final class RecordingController {
 protocol Alerter {
     func prepare()
     func labelConfirmed()
-    func sicknessPrompt()
     func newProblem()
     func stopped()
 }
@@ -319,10 +272,6 @@ final class SystemAlerter: Alerter {
 
     func prepare() { haptics.prepare(); impact.prepare() }
     func labelConfirmed() { impact.impactOccurred() }
-    func sicknessPrompt() {
-        haptics.notificationOccurred(.warning)
-        AudioServicesPlaySystemSound(1007)
-    }
     func newProblem() {
         // spec: strong haptic + sound on PROBLEM
         haptics.notificationOccurred(.error)

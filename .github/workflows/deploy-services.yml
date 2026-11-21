@@ -134,7 +134,7 @@ jobs:
             sleep 10
           done
           failed=0
-          for route in /api/overview /api/sessions /api/quality /api/live "/api/segments?vehicle=all"; do
+          for route in /api/overview /api/sessions /api/quality /api/live /api/heat "/api/segments?vehicle=all"; do
             code=$(curl -s -o /tmp/body -w '%{http_code}' "https://$fqdn$route" || true)
             echo "GET $route -> $code"
             if [ "$code" != "200" ]; then

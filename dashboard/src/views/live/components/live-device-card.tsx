@@ -1,16 +1,12 @@
 import { Link } from "@tanstack/react-router";
-import { BatteryMedium, Thermometer } from "lucide-react";
+import { BatteryMedium, Crosshair, Thermometer } from "lucide-react";
 
-import { SourceBadge } from "@/components/status/session-badges";
-import { VehicleLabel } from "@/components/status/vehicle-label";
 import { Badge } from "@/components/ui/badge";
 import { Card, CardContent } from "@/components/ui/card";
-import { PLACEHOLDER } from "@/constants";
-import { MISC_MAX } from "@/constants/sessions";
 import type { LiveDevice } from "@/types/live";
 import { StreamStatus } from "@/types/sessions";
 import { formatTime } from "@/utils/format-date-time";
-import { formatAcceleration, formatFraction, formatMsdv, formatNumber, formatSpeedFromMs } from "@/utils/format-number";
+import { formatAcceleration, formatFraction, formatMsdv, formatSpeedFromMs } from "@/utils/format-number";
 
 import { freshnessLabel, liveFreshness } from "../utils/freshness";
 
@@ -26,34 +22,34 @@ interface LiveDeviceCardProps {
   now: number;
   /** The dashboard lost the read API: show when the data is from, without judging the phone. */
   apiUnreachable: boolean;
+  /** Fly the map to this vehicle. */
+  onLocate: () => void;
 }
 
-export function LiveDeviceCard({ device, now, apiUnreachable }: LiveDeviceCardProps) {
+export function LiveDeviceCard({ device, now, apiUnreachable, onLocate }: LiveDeviceCardProps) {
   const freshness = liveFreshness(device, now);
   const metrics = [
     { label: "Speed", value: formatSpeedFromMs(device.speedMs) },
     { label: "Roughness now", value: formatAcceleration(device.roughnessNow) },
     { label: "MSDV so far", value: formatMsdv(device.msdvSoFar) },
-    {
-      label: "Latest MISC",
-      value: device.latestRating ? `${formatNumber(device.latestRating.value)} / ${MISC_MAX}` : PLACEHOLDER,
-      hint: device.latestRating ? `at ${formatTime(device.latestRating.tUtc)}` : "no rating yet",
-    },
   ];
   const freshnessText = freshnessLabel(device, freshness, apiUnreachable);
   return (
     <Card className="py-0">
       <CardContent className="vertical gap-3 p-4">
-        <div className="horizontal justify-between gap-2">
-          <VehicleLabel type={device.vehicleType} className="font-medium" />
-          <SourceBadge source={device.source} />
+        <div className="vertical gap-0.5">
+          <span className="text-sm font-medium">
+            iPhone {device.deviceId.slice(0, 8)}
+          </span>
+          <span className="text-xs text-muted-foreground">
+            {device.source === "replay" ? "Replay" : "Streaming"} · last update {formatTime(device.updatedAt)}
+          </span>
         </div>
-        <dl className="grid grid-cols-2 gap-x-3 gap-y-2 sm:grid-cols-4 lg:grid-cols-2">
+        <dl className="grid grid-cols-3 gap-x-3 gap-y-2 lg:grid-cols-2">
           {metrics.map((metric) => (
             <div key={metric.label} className="vertical">
               <dt className="text-[11px] text-muted-foreground">{metric.label}</dt>
               <dd className="text-sm font-semibold tabular-nums">{metric.value}</dd>
-              {metric.hint && <dd className="text-[11px] text-muted-foreground">{metric.hint}</dd>}
             </div>
           ))}
         </dl>
@@ -74,7 +70,15 @@ export function LiveDeviceCard({ device, now, apiUnreachable }: LiveDeviceCardPr
               {device.thermal}
             </span>
           )}
-          <Link to="/sessions/$sessionId" params={{ sessionId: device.sessionId }} className="ml-auto text-accent underline-offset-4 hover:underline">
+          <button
+            type="button"
+            onClick={onLocate}
+            aria-label="Show on map"
+            className="ml-auto rounded-md p-1 text-muted-foreground transition-colors hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+          >
+            <Crosshair className="size-4" aria-hidden="true" />
+          </button>
+          <Link to="/sessions/$sessionId" params={{ sessionId: device.sessionId }} className="text-accent underline-offset-4 hover:underline">
             Session details
           </Link>
         </div>

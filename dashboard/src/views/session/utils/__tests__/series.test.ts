@@ -19,25 +19,22 @@ const event = (type: "pothole" | "speed_bump", tUtc: string) => ({
 });
 
 describe("buildChartData", () => {
-  it("puts events and ratings on the nearest sample of the series", () => {
+  it("puts events on the nearest sample of the series", () => {
     const events: RoadEventCollection = {
       type: "FeatureCollection",
       features: [event("pothole", new Date(T0 + 230).toISOString()), event("speed_bump", new Date(T0 + 590).toISOString())],
     };
-    const data = buildChartData(series, events, [{ tUtc: new Date(T0 + 450).toISOString(), value: 4, msdvSoFar: 0.2 }]);
+    const data = buildChartData(series, events);
     expect(data.potholes).toEqual([null, 5.2, null, null]);
     expect(data.speedBumps).toEqual([null, null, null, 0.2]);
-    expect(data.ratings).toEqual([null, null, 4, null]);
   });
 
   it("converts speed to km/h and keeps gaps", () => {
-    expect(buildChartData(series, undefined, []).speedKmh).toEqual([36, 36, null, 18]);
+    expect(buildChartData(series, undefined).speedKmh).toEqual([36, 36, null, 18]);
   });
 
   it("handles an empty series", () => {
-    const empty = buildChartData({ t: [], aVert: [], aLat: [], aLon: [], speed: [], msdv: [] }, undefined, [
-      { tUtc: new Date(T0).toISOString(), value: 1, msdvSoFar: 0 },
-    ]);
-    expect(empty.ratings).toEqual([]);
+    const empty = buildChartData({ t: [], aVert: [], aLat: [], aLon: [], speed: [], msdv: [] }, undefined);
+    expect(empty.potholes).toEqual([]);
   });
 });

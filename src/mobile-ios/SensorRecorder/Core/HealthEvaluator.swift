@@ -42,12 +42,6 @@ struct HealthInputs: Sendable {
     /// Last GPS fix arrival (uptime) and its accuracy.
     var gpsLastFixUp: TimeInterval?
     var gpsHorizontalAccuracy: Double?
-    var audioExpected = true
-    var audioRecording = true
-    /// An audio source (recorder or level meter) is part of this session.
-    var audioMeterExpected = false
-    /// Uptime of the last audio level above `audioSilenceDbfs` (nil = none yet).
-    var audioLastSoundUp: TimeInterval?
     /// Location authorization currently lacks Precise Location (or was revoked) during recording.
     var locationDegraded: String?
     /// Uptime of the most recent disk write/flush failure.
@@ -87,12 +81,6 @@ enum HealthEvaluator {
     static let motionNoDataGrace: TimeInterval = 1.5
     /// Extra settle time after the first full rate window before rates are judged.
     static let rateWindowSettle: TimeInterval = 0.5
-    /// Audio level meter: grace after start, and max silence before PROBLEM.
-    static let audioMeterGrace: TimeInterval = 3
-    static let audioMeterMaxAge: TimeInterval = 2
-    /// A cabin is never this quiet: sustained levels at/below this mean a denied or blocked mic.
-    static let audioSilenceDbfs = -120.0
-    static let audioSilenceMaxSec: TimeInterval = 10
 
     static func evaluate(_ i: HealthInputs) -> [HealthIssue] {
         var out: [HealthIssue] = []
@@ -141,28 +129,6 @@ enum HealthEvaluator {
             let age = b.age ?? elapsed
             if age > barometerWarnAge {
                 out.append(.init(level: .warn, key: "baro.stale", message: "Barometer: no data for \(Int(age)) s"))
-            }
-        }
-
-        // Audio
-        if i.audioExpected && !i.audioRecording {
-            out.append(.init(level: .problem, key: "audio.off", message: "Audio recorder not recording (auto-retry every \(Int(AudioSegmentPolicyConstants.restartEvery)) s; end any call/Siri)"))
-        }
-
-        // Audio level meter: in audio-OFF mode (public transport) this is the only audio signal,
-        // so silence of the meter itself must not go unnoticed.
-        if i.audioMeterExpected, !(i.audioExpected && !i.audioRecording) {
-            let age = i.streams[.audioLevel]?.age ?? (elapsed > audioMeterGrace ? elapsed : 0)
-            if age > audioMeterMaxAge {
-                out.append(.init(level: .problem, key: "audio.meter", message: "Audio level meter: no data for \(Int(age)) s"))
-            }
-        }
-
-        if i.audioMeterExpected, i.streams[.audioLevel]?.age.map({ $0 <= audioMeterMaxAge }) == true {
-            let silent = i.now - (i.audioLastSoundUp ?? i.recordingStartUp)
-            if silent > audioSilenceMaxSec {
-                out.append(.init(level: .warn, key: "audio.silent",
-                                 message: "Audio level silent for \(Int(silent)) s: microphone denied or blocked?"))
             }
         }
 
@@ -230,7 +196,6 @@ enum HealthEvaluator {
         switch id {
         case .gps: keys = ["gps."]
         case .barometer: keys = ["baro."]
-        case .audioLevel: keys = ["audio."]
         default: keys = ["stale.\(id.rawValue)", "rate.\(id.rawValue)"]
         }
         return issues.filter { issue in keys.contains { issue.key.hasPrefix($0) } }.map(\.level).max() ?? .ok
@@ -239,8 +204,3 @@ enum HealthEvaluator {
     private static func fmt1(_ v: Double) -> String { String(format: "%.1f", v) }
 }
 
-/// Audio restart cadence shared by the recorder policy and health messages (Core must not depend
-/// on Sensors, so the constant lives here).
-enum AudioSegmentPolicyConstants {
-    static let restartEvery: TimeInterval = 5
-}

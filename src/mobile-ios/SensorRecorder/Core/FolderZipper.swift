@@ -31,7 +31,7 @@ enum FolderZipper {
         return output
     }
 
-    /// Deletes one export zip (a session zip can be GBs of audio; tmp/ is only purged by iOS
+    /// Deletes one export zip (a session zip can be large; tmp/ is only purged by iOS
     /// under storage pressure).
     static func removeExport(_ zip: URL) {
         do {

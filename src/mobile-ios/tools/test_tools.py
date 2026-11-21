@@ -6,9 +6,9 @@ Usage:
 
 Both tools are run as subprocesses (exactly as the team runs them), with the same interpreter.
   - quick_check: synthetic session folders (valid and deliberately broken) in a temp dir: rates,
-    headers, UTC anchors, audio (incl. fake MP4s with/without a 'moov' box, recovered sessions),
-    rows before the session start, stream coverage and stats.durationSec.
-  - quick_check as a module (imported by path): has_moov_box, and the header contract: if
+    headers, UTC anchors, rows before the session start, stream coverage, stats.durationSec, and
+    pre-D48 audio files/keys in older folders (ignored, one INFO line).
+  - quick_check as a module (imported by path): the header contract: if
     tools/fixtures/csv_headers.json exists (written by the Swift unit tests from StreamFile.header),
     quick_check.EXPECTED_HEADER_LINES must equal it exactly.
   - mock_ingest_server: started on a free port, exercised over HTTP, always terminated.
@@ -40,7 +40,8 @@ HEADERS_FIXTURE = os.path.join(HERE, "fixtures", "csv_headers.json")
 KEY = "test-device-key"
 
 # ----------------------------------------------------------------------------------------------
-# Synthetic session folders (headers must match SessionFiles.swift / quick_check.EXPECTED_HEADERS)
+# Synthetic session folders (headers must match SessionFiles.swift / quick_check.EXPECTED_HEADERS;
+# audio_level / audio_segments: quick_check.LEGACY_HEADERS, written only by builds before D48)
 # ----------------------------------------------------------------------------------------------
 
 HEADERS = {
@@ -72,30 +73,23 @@ def iso(ms):
     return time.strftime("%Y-%m-%dT%H:%M:%S", time.gmtime(ms / 1000.0)) + ".%03dZ" % (int(ms) % 1000)
 
 
-def mp4(moov=True, largesize=False, mdat_to_eof=False):
-    """A tiny fake MP4: 'ftyp' + 'mdat' (+ 'moov'). Only the top-level box structure is real."""
-    ftyp = b"\x00\x00\x00\x18ftypM4A \x00\x00\x00\x00M4A isom"
-    payload = b"\x00" * 4096
-    if mdat_to_eof:
-        mdat = b"\x00\x00\x00\x00mdat" + payload  # size 0: box runs to end of file
-    elif largesize:
-        mdat = b"\x00\x00\x00\x01mdat" + (16 + len(payload)).to_bytes(8, "big") + payload
-    else:
-        mdat = (8 + len(payload)).to_bytes(4, "big") + b"mdat" + payload
-    moov_box = b"\x00\x00\x00\x10moov" + b"\x00" * 8 if moov and not mdat_to_eof else b""
-    return ftyp + mdat + moov_box
+def fake_m4a(n=4096):
+    """Bytes standing in for a pre-D48 audio file: an 'ftyp' box and no index. quick_check must
+    not open it."""
+    return b"\x00\x00\x00\x18ftypM4A \x00\x00\x00\x00M4A isom" + b"\x00" * n
 
 
-def make_session(folder, audio_enabled=True, write_audio=True, gyro_gap=None, location_header=None,
-                 utc_offset_ms=0, legacy_meta=False, empty_altimeter=False, pre=None, until=None,
-                 segments=(True,), recovered=False, stats=None):
+def make_session(folder, gyro_gap=None, location_header=None, utc_offset_ms=0, legacy_meta=False,
+                 empty_altimeter=False, pre=None, until=None, recovered=False, stats=None,
+                 legacy_audio=False, no_labels=False):
     """Writes a ~30 s session that passes every quick_check rule unless a knob breaks it.
     pre:      {stem: [seconds before start, ...]} extra rows prepended (t_up/t_utc_ms before start)
     until:    {stem: seconds} the stream stops after that many seconds
-    segments: one moov flag per audio_00N.m4a (False = no MP4 index, as after a crash)
-    recovered: session.json as rewritten by crash recovery (recovered=true, endedAtUtc null,
-              last segment without a stop event)
-    stats:    session.json "stats" object (None = null, as before the session ends)"""
+    recovered: session.json as rewritten by crash recovery (recovered=true, endedAtUtc null)
+    stats:    session.json "stats" object (None = null, as before the session ends)
+    legacy_audio: also write what a build before D48 recorded: audio_level.csv, audio_segments.csv,
+              audio_000.m4a / audio_001.m4a (no MP4 index), clock.csv audio_start rows and
+              session.json audioEnabled / requestedRatesHz.audioLevel"""
     os.makedirs(folder)
     u0 = int(time.time() * 1000) - 120_000  # wall clock at T0_UP, 2 minutes ago
     pre, until = pre or {}, until or {}
@@ -119,8 +113,7 @@ def make_session(folder, audio_enabled=True, write_audio=True, gyro_gap=None, lo
         write(name, [fmt(i, t) for i, t in enumerate(ts)],
               header=location_header if name == "location" else None)
 
-    record_audio = audio_enabled and write_audio
-    seg_files = [f"audio_{i:03d}.m4a" for i in range(len(segments))] if record_audio else []
+    seg_files = ["audio_000.m4a", "audio_001.m4a"] if legacy_audio else []
     seg_t = {f: T0_UP + 0.2 + i * DURATION / len(seg_files) for i, f in enumerate(seg_files)}
     clock = [f"{T0_UP:.6f},{utc(T0_UP)},start"]
     for f in seg_files:
@@ -147,25 +140,24 @@ def make_session(folder, audio_enabled=True, write_audio=True, gyro_gap=None, lo
     stream("abs_altitude", 1, lambda i, t: f"{t:.6f},{utc(t)},352.0,5.0,1.0")
     stream("activity", 1, lambda i, t: f"{t:.6f},{utc(t)},0,0,0,1,0,0,2,{utc(t) - 1000}",
            times=[T0_UP + 1])
-    stream("audio_level", 10, lambda i, t: f"{t:.6f},{utc(t)},-40.5,-20.1")
+    if legacy_audio:
+        stream("audio_level", 10, lambda i, t: f"{t:.6f},{utc(t)},-40.5,-20.1")
     stream("device", 0.2, lambda i, t: f"{t:.6f},{utc(t)},0.82,unplugged,nominal,0,50000000000,"
                                        f"satisfied,wifi")
     labels = [
         f"{T0_UP + 5:.6f},{utc(T0_UP + 5)},pothole,,",
-        f"{T0_UP + 10:.6f},{utc(T0_UP + 10)},sickness,4,",
+        f"{T0_UP + 10:.6f},{utc(T0_UP + 10)},speed_bump,,",
         # multi-line quoted note with a comma and an escaped quote: must count as ONE label
         f'{T0_UP + 15:.6f},{utc(T0_UP + 15)},note,,"first line, with comma\nsecond ""line"""',
     ]
-    write("labels", labels)
-    seg_rows = []
-    for i, f in enumerate(seg_files):
-        t_stop = seg_t[seg_files[i + 1]] if i + 1 < len(seg_files) else T0_UP + DURATION
-        seg_rows.append(f"{seg_t[f]:.6f},{utc(seg_t[f])},start,{f}")
-        if not (recovered and i == len(seg_files) - 1):  # the app died while recording it
-            seg_rows.append(f"{t_stop:.6f},{utc(t_stop)},stop,{f}")
-        with open(os.path.join(folder, f), "wb") as fh:
-            fh.write(mp4(moov=segments[i]))
-    write("audio_segments", seg_rows)
+    write("labels", [] if no_labels else labels)
+    if legacy_audio:
+        seg_rows = []
+        for f in seg_files:
+            seg_rows.append(f"{seg_t[f]:.6f},{utc(seg_t[f])},start,{f}")
+            with open(os.path.join(folder, f), "wb") as fh:
+                fh.write(fake_m4a())
+        write("audio_segments", seg_rows)
 
     meta = {
         "sessionId": str(uuid.uuid4()).upper(),
@@ -181,9 +173,7 @@ def make_session(folder, audio_enabled=True, write_audio=True, gyro_gap=None, lo
         "people": {"operatorSeat": "front passenger", "raterSeat": "rear left",
                    "raterPosture": "seated", "passengerCount": 2, "raterName": ""},
         "conditions": {"weather": "dry", "notes": ""},
-        "audioEnabled": audio_enabled,
-        "requestedRatesHz": {"deviceMotion": 100, "accel": 100, "gyro": 100, "mag": 50,
-                             "audioLevel": 10},
+        "requestedRatesHz": {"deviceMotion": 100, "accel": 100, "gyro": 100, "mag": 50},
         "recovered": recovered,
         "syntheticSensors": False,
         "folderName": os.path.basename(folder),
@@ -193,8 +183,10 @@ def make_session(folder, audio_enabled=True, write_audio=True, gyro_gap=None, lo
     }
     if recovered:
         meta["recoveredAtUtc"] = iso(u0 + 600_000)
+    if legacy_audio:
+        meta["audioEnabled"] = True
+        meta["requestedRatesHz"]["audioLevel"] = 10
     if legacy_meta:
-        del meta["audioEnabled"]
         del meta["vehicle"]["line"]
         del meta["mount"]["handheld"]
         del meta["mount"]["seatOverAxle"]
@@ -250,8 +242,51 @@ class QuickCheckTests(unittest.TestCase):
         self.assertEqual(code, 0, out)
         self.assertIn("OVERALL: PASS", out)
         self.assertIn("rows=3", out)  # labels: the multi-line note counts once
-        self.assertIn("audioEnabled", out)
         self.assertIn("people.raterPosture", out)
+
+    def test_new_session_without_audio_is_clean(self):
+        """D48: the app records no audio; nothing about audio is expected or reported."""
+        code, out = run_quick_check(self.session("current"))
+        self.assertRan(out)
+        self.assertEqual(code, 0, out)
+        self.assertIn("OVERALL: PASS  (0 fail, 0 warn)", out)
+        self.assertNotIn("[INFO]", out)
+        self.assertNotIn("audio", out.lower())
+        self.assertNotIn("D48", out)
+
+    def test_trip_without_labels_is_info_not_warn(self):
+        """D51: the app has no label buttons, so a new trip's labels.csv is header only."""
+        code, out = run_quick_check(self.session("nolabels", no_labels=True))
+        self.assertRan(out)
+        self.assertEqual(code, 0, out)
+        self.assertIn("OVERALL: PASS  (0 fail, 0 warn)", out)
+        self.assertIn("[INFO] labels.csv has no labels", out)
+
+    def test_pre_d48_folder_with_audio_is_info_not_fail(self):
+        """A folder from a build before D48 still has audio files, CSVs and keys: one INFO line,
+        no WARN/FAIL, even when those files are broken (no MP4 index, a 0-byte file, a wrong
+        header, a row before the start, a short row, audio stats that disagree)."""
+        folder = self.session("oldaudio", legacy_audio=True,
+                              stats={"durationSec": DURATION, "audioFiles": ["audio_000.m4a"],
+                                     "audioFilesIncomplete": ["audio_000.m4a"]})
+        with open(os.path.join(folder, "audio.m4a"), "wb"):
+            pass  # 0 bytes
+        with open(os.path.join(folder, "audio_level.csv"), "w", encoding="utf-8") as fh:
+            fh.write("t_up,t_utc_ms,avg\n1.0,1000,-40\ngarbage\n")  # bad header, row in 1970
+        code, out = run_quick_check(folder)
+        self.assertRan(out)
+        self.assertEqual(code, 0, out)
+        self.assertIn("OVERALL: PASS  (0 fail, 0 warn)", out)
+        infos = [ln for ln in out.splitlines() if "[INFO]" in ln]
+        self.assertEqual(len(infos), 1, out)
+        for needle in ("from an app build before D48 (no audio), ignored", "audio.m4a",
+                       "audio_000.m4a", "audio_001.m4a", "audio_level.csv", "audio_segments.csv",
+                       "2 clock.csv row(s) with source=audio_start", "session.json audioEnabled",
+                       "requestedRatesHz.audioLevel", "stats.audioFiles",
+                       "stats.audioFilesIncomplete"):
+            self.assertIn(needle, infos[0])
+        # the derived audio_start rows are not used as clock anchors
+        self.assertIn("anchors=4 ", out)
 
     def test_gyro_gap_half_second_fails(self):
         self.assertFail(self.session("gap", gyro_gap=(10.0, 10.5)), "gyro_raw: ", "max gap 0.5")
@@ -263,7 +298,7 @@ class QuickCheckTests(unittest.TestCase):
         self.assertIn("is_simulated", out)
         # later sections still ran
         self.assertIn("== labels.csv ==", out)
-        self.assertIn("== audio ==", out)
+        self.assertIn("== summary ==", out)
 
     def test_utc_offset_500ms_fails(self):
         self.assertFail(self.session("utc", utc_offset_ms=500), "device_motion: t_utc_ms")
@@ -273,17 +308,6 @@ class QuickCheckTests(unittest.TestCase):
         self.assertRan(out)
         self.assertEqual(code, 0, out)
         self.assertRegex(out, r"\[WARN\] device_motion: t_utc_ms")
-
-    def test_missing_audio_with_audio_enabled_fails(self):
-        self.assertFail(self.session("noaudio", audio_enabled=True, write_audio=False),
-                        "MISSING audio")
-
-    def test_audio_disabled_without_audio_is_not_fail(self):
-        code, out = run_quick_check(self.session("privacy", audio_enabled=False))
-        self.assertRan(out)
-        self.assertEqual(code, 0, out)
-        self.assertIn("audio recording OFF (privacy)", out)
-        self.assertNotIn("MISSING audio", out)
 
     def test_zero_row_altimeter_warns(self):
         code, out = run_quick_check(self.session("noalt", empty_altimeter=True))
@@ -302,7 +326,7 @@ class QuickCheckTests(unittest.TestCase):
         self.assertRan(out)
         self.assertEqual(code, 0, out)
         self.assertIn("OVERALL: PASS", out)
-        self.assertIn("[INFO] session.json: no audioEnabled (older app version)", out)
+        self.assertIn("[INFO] session.json: no vehicle.line (older app version)", out)
 
     def test_handheld_warns(self):
         folder = self.session("hand")
@@ -327,7 +351,7 @@ class QuickCheckTests(unittest.TestCase):
         self.assertRan(out)
         self.assertEqual(code, 1, out)
 
-    # -- helpers for the timeline / audio-playability checks ------------------------------------
+    # -- helpers for the timeline checks ---------------------------------------------------------
 
     def run_ok(self, folder):
         """Runs quick_check, expects exit 0 (PASS or WARN); returns (out, warn lines, info lines)."""
@@ -373,11 +397,6 @@ class QuickCheckTests(unittest.TestCase):
     def test_gps_that_stops_after_one_second_warns(self):
         out, warns, _ = self.run_ok(self.session("gps1s", until={"location": 2.0}))
         self.assertLine(warns, out, "location covers only 1 s of 30 s session")
-        self.assertNoLine(warns, out, "audio_level covers only")
-
-    def test_short_audio_level_coverage_warns(self):
-        out, warns, _ = self.run_ok(self.session("lvl", until={"audio_level": 5.0}))
-        self.assertLine(warns, out, "audio_level covers only 5 s of 30 s session")
 
     def test_coverage_not_checked_for_sessions_under_30s(self):
         folder = self.session("short", until={"location": 2.0})
@@ -388,44 +407,7 @@ class QuickCheckTests(unittest.TestCase):
         self.assertIn("session duration: 20.0 s", out)
         self.assertNoLine(warns, out, "covers only")
 
-    # -- 3. audio playability --------------------------------------------------------------------
-
-    def test_audio_without_moov_fails(self):
-        self.assertFail(self.session("nomoov", segments=(False,)), "audio_000.m4a unplayable")
-
-    def test_recovered_last_segment_without_moov_warns(self):
-        stats = {"durationSec": DURATION - 0.01, "audioFilesIncomplete": ["audio_001.m4a"]}
-        out, warns, _ = self.run_ok(self.session("crash", segments=(True, False), recovered=True,
-                                                 stats=stats))
-        self.assertLine(warns, out, "audio_001.m4a unplayable (no index): it was being recorded "
-                                    "when the app died", "expected after a crash")
-        self.assertNoLine(warns, out, "audio_000.m4a")
-        self.assertIn("stats.audioFilesIncomplete: audio_001.m4a", out)
-        self.assertIn("[PASS] stats.audioFilesIncomplete agrees with the 'moov' scan", out)
-        self.assertIn("[PASS] session.json: stats.durationSec 30.0 s vs last row t_up", out)
-
-    def test_recovered_earlier_segment_without_moov_fails(self):
-        self.assertFail(self.session("crash0", segments=(False, True), recovered=True),
-                        "audio_000.m4a unplayable")
-
-    def test_finished_session_last_segment_without_moov_fails(self):
-        self.assertFail(self.session("nomoov2", segments=(True, False)), "audio_001.m4a unplayable")
-
-    def test_audio_files_incomplete_disagreement_warns(self):
-        stats = {"durationSec": DURATION, "audioFilesIncomplete": ["audio_000.m4a"]}
-        out, warns, _ = self.run_ok(self.session("disagree", stats=stats))
-        self.assertLine(warns, out, "stats.audioFilesIncomplete (audio_000.m4a) disagrees",
-                        "scan (none)")
-
-    def test_largesize_mdat_with_moov_is_playable(self):
-        folder = self.session("large")
-        with open(os.path.join(folder, "audio_000.m4a"), "wb") as fh:
-            fh.write(mp4(largesize=True))
-        out, _, _ = self.run_ok(folder)
-        self.assertIn("OVERALL: PASS", out)
-        self.assertIn("playable ('moov' box present)", out)
-
-    # -- 4. duration consistency -----------------------------------------------------------------
+    # -- 3. duration consistency -----------------------------------------------------------------
 
     def test_finished_duration_matches(self):
         out, warns, _ = self.run_ok(self.session("dur", stats={"durationSec": DURATION + 1.5}))
@@ -436,6 +418,11 @@ class QuickCheckTests(unittest.TestCase):
         out, warns, _ = self.run_ok(self.session("durbad", stats={"durationSec": DURATION + 10}))
         self.assertLine(warns, out, "stats.durationSec 40.0 s vs endedAtUtc - startedAtUtc 30.0 s",
                         "diff +10.0 s")
+
+    def test_recovered_duration_matches_last_row(self):
+        out, warns, _ = self.run_ok(self.session("recok", recovered=True,
+                                                 stats={"durationSec": DURATION - 0.01}))
+        self.assertIn("[PASS] session.json: stats.durationSec 30.0 s vs last row t_up", out)
 
     def test_recovered_duration_mismatch_warns(self):
         out, warns, _ = self.run_ok(self.session("recdur", recovered=True,
@@ -451,7 +438,7 @@ def load_quick_check():
 
 
 class QuickCheckModuleTests(unittest.TestCase):
-    """quick_check imported as a module (by path): schema pinning and the MP4 box walker."""
+    """quick_check imported as a module (by path): schema pinning."""
 
     @classmethod
     def setUpClass(cls):
@@ -470,30 +457,6 @@ class QuickCheckModuleTests(unittest.TestCase):
     def test_synthetic_session_headers_match_quick_check(self):
         self.assertEqual(HEADERS, self.qc.EXPECTED_HEADER_LINES)
         self.assertEqual(len(self.qc.EXPECTED_HEADER_LINES), 14)
-
-    def test_has_moov_box(self):
-        tmp = tempfile.mkdtemp(prefix="qc-mp4-")
-        try:
-            cases = {
-                "plain_moov": (mp4(), True),
-                "no_moov": (mp4(moov=False), False),
-                "largesize_moov": (mp4(largesize=True), True),
-                "largesize_no_moov": (mp4(largesize=True, moov=False), False),
-                "mdat_to_eof": (mp4(mdat_to_eof=True), False),
-                "empty": (b"", False),
-                "truncated_header": (b"\x00\x00\x00", False),
-                "zero_size_garbage": (b"\x00" * 64, False),
-                "bad_size": (b"\x00\x00\x00\x04ftyp" + b"\x00" * 32, False),
-                "moov_first": (b"\x00\x00\x00\x08moov", True),
-            }
-            for name, (data, expected) in cases.items():
-                with self.subTest(name=name):
-                    p = os.path.join(tmp, name + ".m4a")
-                    with open(p, "wb") as fh:
-                        fh.write(data)
-                    self.assertEqual(self.qc.has_moov_box(p), expected)
-        finally:
-            shutil.rmtree(tmp, ignore_errors=True)
 
 
 # ----------------------------------------------------------------------------------------------
@@ -604,7 +567,6 @@ def make_batch(seq=0, n=3, session_id=None):
         "location": [{"tUtcMs": 1763716532120, "lat": 46.77121, "lon": 23.62363, "alt": 352.1,
                       "hAcc": 4.7, "speed": 8.4, "speedAcc": 0.5, "course": 92.0}] if n else [],
         "altimeter": {"t": t[:1], "relAltM": v[:1], "pressureKpa": [96.5][:len(t[:1])]},
-        "audioLevel": {"t": t, "avgDbfs": v, "peakDbfs": v},
         "labels": [{"t": 0.01, "type": "pothole", "value": None, "note": None}] if n else [],
         "device": {"battery": 0.82, "thermal": "nominal", "lowPower": False},
     }
@@ -626,8 +588,7 @@ def make_meta(session_id=None, batch_count=None, recovered=False, ended=True):
         "people": {"operatorSeat": "front", "raterSeat": "rear left", "raterPosture": "standing",
                    "passengerCount": 30, "raterName": ""},
         "conditions": {"weather": "dry", "notes": ""},
-        "audioEnabled": False,
-        "requestedRatesHz": {"deviceMotion": 100, "accel": 100, "gyro": 100, "mag": 50, "audioLevel": 10},
+        "requestedRatesHz": {"deviceMotion": 100, "accel": 100, "gyro": 100, "mag": 50},
         "recovered": recovered,
         "syntheticSensors": False,
         "folderName": "2026-11-21T09-12-03Z_abcd",
@@ -763,6 +724,22 @@ class MockIngestServerTests(unittest.TestCase):
         named = gzip.compress(b'{"probe":true,"deviceId":"8C3F1A2B-0000-4000-8000-000000000001"}')
         self.assertIn("probe", self.assertStatus(self.srv.ingest(raw=named, extra={"x-probe": "1"}), 400)["error"])
 
+    def test_pre_d48_audio_keys_are_ignored(self):
+        """D48 (no audio), as the ingest function: older builds still send audioLevel in batches
+        and audioEnabled in session.json. Neither is required or checked, even when malformed."""
+        for level in ({"t": [0.0], "avgDbfs": [-40.0], "peakDbfs": [-20.0]},
+                      {"t": [0.0, 0.1], "avgDbfs": ["loud"]}, None):
+            with self.subTest(level=level):
+                b = make_batch()
+                b["audioLevel"] = level
+                self.assertStatus(self.srv.ingest(b), 201)
+        for enabled in (True, False, "yes", 1, None):
+            with self.subTest(enabled=enabled):
+                m = make_meta()
+                m["audioEnabled"] = enabled
+                m["requestedRatesHz"]["audioLevel"] = 10
+                self.assertStatus(self.srv.put_meta(m), 201)
+
     def test_empty_batch_is_201(self):
         self.assertStatus(self.srv.ingest(make_batch(n=0)), 201)
 
@@ -818,7 +795,7 @@ class MockIngestServerTests(unittest.TestCase):
     def test_meta_schema_strict(self):
         cases = [("batchCount", -1), ("batchCount", 2.0), ("batchCount", True), ("recovered", None),
                  ("startUptimeSec", "1"), ("startedAtUtc", None), ("endedAtUtc", 5),
-                 ("vehicle", None), ("mount", []), ("people", "x"), ("audioEnabled", 1)]
+                 ("vehicle", None), ("mount", []), ("people", "x")]
         for k, v in cases:
             with self.subTest(k=k, v=v):
                 m = make_meta(batch_count=1)

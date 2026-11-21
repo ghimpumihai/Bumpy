@@ -15,7 +15,8 @@ Python 3, standard library only.
 
 ## Run it
 
-1. Export the session from the app (Session detail → Export), and AirDrop or copy the folder or `.zip` to the laptop.
+1. Copy the session folder off the phone (Files app or Finder over USB: the app has no export button
+   since D51), or use a `.zip` of it.
 2. Create a key just for replays (once):
 
    ```powershell
@@ -76,8 +77,8 @@ The replay is a separate trip from the original:
   is ever in the future (the backend keeps the newest position per device), so a fast replay looks
   like a phone catching up after a dead zone.
 - Batches are rebuilt from the CSV files: `device_motion`, `accel_raw`, `gyro_raw`, `altimeter`,
-  `audio_level`, `location`, `labels`, and `device` for battery and thermal state. Samples are
-  windowed by `t_up` from `startUptimeSec`. Raw audio is never sent, same as the app. A torn last
+  `location`, `labels`, and `device` for battery and thermal state. Samples are windowed by `t_up`
+  from `startUptimeSec`. Audio files in older session folders are ignored (D48). A torn last
   line from a crash is skipped.
 
 ## Tests

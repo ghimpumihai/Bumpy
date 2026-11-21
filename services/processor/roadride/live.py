@@ -12,7 +12,7 @@ from dataclasses import dataclass, field
 
 UTC = dt.timezone.utc
 
-COLUMNAR_BLOCKS = ("deviceMotion", "accelRaw", "gyroRaw", "altimeter", "audioLevel")
+COLUMNAR_BLOCKS = ("deviceMotion", "accelRaw", "gyroRaw", "altimeter")
 VEHICLE_TYPES = {"car", "bus", "tram", "bike", "boat"}
 SOURCES = {"live", "upload", "replay"}
 
@@ -20,11 +20,22 @@ SOURCES = {"live", "upload", "replay"}
 def parse_iso(value: str | None) -> dt.datetime | None:
     if not value:
         return None
-    return dt.datetime.fromisoformat(value.replace("Z", "+00:00")).astimezone(UTC)
+    t = dt.datetime.fromisoformat(value.replace("Z", "+00:00"))
+    # Spec §3.8 times are UTC; without a zone, astimezone() would take it as the server's local time.
+    return (t if t.tzinfo else t.replace(tzinfo=UTC)).astimezone(UTC)
 
 
 def from_ms(ms: int | float) -> dt.datetime:
     return dt.datetime.fromtimestamp(ms / 1000.0, tz=UTC)
+
+
+# A fix gives a position only with a known accuracy of at most this (the read API's MAX_HACC_M for the
+# track). Without one it is iOS's -1, which Apple documents as "the latitude and longitude are invalid".
+MAX_HACC_M = 50.0
+
+
+def usable_fix(h_acc_m: float | None) -> bool:
+    return h_acc_m is not None and h_acc_m <= MAX_HACC_M
 
 
 def _non_negative(v) -> float | None:
@@ -39,6 +50,7 @@ class Fix:
     speed_ms: float | None
     course_deg: float | None
     h_acc_m: float | None
+    t_up: float | None = None  # on the uptime clock, when known (the upload's location.csv; clock.py)
 
 
 @dataclass(frozen=True)
@@ -75,6 +87,11 @@ class BatchFacts:
     @property
     def last_fix(self) -> Fix | None:
         return max(self.fixes, key=lambda f: f.t) if self.fixes else None
+
+    @property
+    def phone_moved_up(self) -> list[float]:
+        """The operator's phone_moved taps on the uptime clock, like the fixes fed to dsp.Pipeline."""
+        return [lab.t.timestamp() - self.clock_offset for lab in self.labels if lab.type == "phone_moved"]
 
 
 def parse_batch(b: dict) -> BatchFacts:
@@ -134,7 +151,6 @@ class SessionFacts:
     mount: dict
     people: dict
     conditions: dict | None
-    audio_enabled: bool | None
     synthetic_sensors: bool
     recovered: bool
     started_at: dt.datetime | None
@@ -158,7 +174,6 @@ def parse_session(m: dict) -> SessionFacts:
         mount=m.get("mount") or {},
         people=m.get("people") or {},
         conditions=m.get("conditions") if isinstance(m.get("conditions"), dict) else None,
-        audio_enabled=m.get("audioEnabled") if isinstance(m.get("audioEnabled"), bool) else None,
         synthetic_sensors=m.get("syntheticSensors") is True,
         recovered=m.get("recovered") is True,
         started_at=parse_iso(m.get("startedAtUtc")),

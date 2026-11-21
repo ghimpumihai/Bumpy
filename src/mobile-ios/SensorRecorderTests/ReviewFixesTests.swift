@@ -84,7 +84,6 @@ final class MetadataCompatibilityTests: XCTestCase {
          "syntheticSensors":true,"folderName":"f","deviceId":"D","mockScenario":"cluj-demo-v1","stats":null}
         """
         let m = try JSONDecoder().decode(SessionMetadata.self, from: Data(old.utf8))
-        XCTAssertTrue(m.audioEnabled, "older versions always recorded audio")
         XCTAssertNil(m.vehicle.line)
         XCTAssertFalse(m.mount.handheld)
         XCTAssertFalse(m.mount.seatOverAxle)
@@ -95,12 +94,11 @@ final class MetadataCompatibilityTests: XCTestCase {
 
     func testNewFieldsAreWrittenWithExplicitNulls() throws {
         var m = SessionMetadataTests.sample()
-        m.audioEnabled = false
         m.vehicle.type = "bus"
         m.mount.handheld = true
         m.people.raterPosture = "standing"
         let obj = try XCTUnwrap(JSONSerialization.jsonObject(with: m.jsonData()) as? [String: Any])
-        XCTAssertEqual(obj["audioEnabled"] as? Bool, false)
+        XCTAssertNil(obj["audioEnabled"], "no audio (D48): the key is no longer written")
         let vehicle = try XCTUnwrap(obj["vehicle"] as? [String: Any])
         XCTAssertTrue(vehicle["line"] is NSNull, "spec: line is null when not set")
         let mount = try XCTUnwrap(obj["mount"] as? [String: Any])
@@ -111,17 +109,14 @@ final class MetadataCompatibilityTests: XCTestCase {
         XCTAssertEqual(try JSONDecoder().decode(SessionMetadata.self, from: m.jsonData()), m)
     }
 
-    func testVehicleTypeDefaultsAudioOffOnPublicTransport() {
+    func testLineNumberOnlyAppliesToPublicTransport() {
         var s = SessionSetup()
-        XCTAssertTrue(s.audioEnabled)
         s.vehicle.type = "bus"; s.vehicle.line = "24B"
         s.applyVehicleTypeDefaults()
-        XCTAssertFalse(s.audioEnabled, "GDPR: no audio recording on buses by default")
         XCTAssertEqual(s.vehicle.line, "24B")
         s.vehicle.type = "tram"; s.applyVehicleTypeDefaults()
-        XCTAssertFalse(s.audioEnabled)
+        XCTAssertEqual(s.vehicle.line, "24B")
         s.vehicle.type = "car"; s.applyVehicleTypeDefaults()
-        XCTAssertTrue(s.audioEnabled)
         XCTAssertNil(s.vehicle.line, "line only applies to bus/tram")
     }
 
@@ -148,80 +143,6 @@ final class LabelSanitizeTests: XCTestCase {
         XCTAssertNil(RecordingSession.sanitize("  \n "))
         XCTAssertNil(RecordingSession.sanitize(nil))
         XCTAssertEqual(RecordingSession.sanitize("a, \"b\""), "a, \"b\"", "commas/quotes are handled by CSV escaping")
-    }
-}
-
-// MARK: - Audio policy, level meter maths
-
-final class AudioPolicyTests: XCTestCase {
-    func decide(now: Double, rec: Bool, seg: Double = 0, want: Bool = true, intr: Bool = false, intrAt: Double = 0,
-                last: Double = -100) -> AudioSegmentPolicy.Action {
-        AudioSegmentPolicy.decide(now: now, isRecording: rec, segmentStartedUp: seg, wantRecording: want,
-                                  interrupted: intr, interruptedAtUp: intrAt, lastRestartAttemptUp: last)
-    }
-
-    func testRotatesEveryFiveMinutes() {
-        XCTAssertEqual(decide(now: 299.9, rec: true), .none)
-        XCTAssertEqual(decide(now: 300, rec: true), .rotate)
-    }
-
-    func testRestartsAStoppedRecorderEveryFiveSeconds() {
-        XCTAssertEqual(decide(now: 10, rec: false, last: 4), .restart)
-        XCTAssertEqual(decide(now: 10, rec: false, last: 6), .none, "throttled")
-        XCTAssertEqual(decide(now: 10, rec: false, want: false), .none, "not after stop()")
-    }
-
-    func testInterruptionWaitsForEndedButNotForever() {
-        XCTAssertEqual(decide(now: 110, rec: false, intr: true, intrAt: 100), .none, "call in progress")
-        XCTAssertEqual(decide(now: 121, rec: false, intr: true, intrAt: 100), .restart, "no 'ended' after 20 s")
-    }
-
-    func testLevelAccumulator() {
-        var acc = LevelAccumulator(windowSeconds: 0.1)
-        let fs = 48_000.0
-        let sine = (0..<4800).map { Float(sin(2 * Double.pi * 1000 * Double($0) / fs)) }
-        let w = acc.add(samples: sine, sampleRate: fs, startUp: 4.9)
-        XCTAssertEqual(w.count, 1)
-        XCTAssertEqual(w[0].avgDbfs, -3.01, accuracy: 0.05, "full-scale sine RMS = -3 dBFS")
-        XCTAssertEqual(w[0].peakDbfs, 0, accuracy: 0.01)
-        XCTAssertEqual(w[0].t, 5, accuracy: 1e-9, "window ends at the capture time of its last sample")
-        // silence and corrupt samples never produce NaN/inf (would crash the dashboard)
-        let bad = acc.add(samples: [Float](repeating: .nan, count: 4800), sampleRate: fs, startUp: 6)
-        XCTAssertTrue(bad[0].avgDbfs.isFinite && bad[0].peakDbfs.isFinite)
-        XCTAssertEqual(LevelAccumulator.dbfs(.nan), -140)
-        XCTAssertEqual(LevelAccumulator.dbfs(0), -140)
-    }
-}
-
-// MARK: - Health: audio meter staleness
-
-final class AudioHealthTests: XCTestCase {
-    private func inputs(levelAge: Double?, meter: Bool, recorder: Bool, recording: Bool = true) -> HealthInputs {
-        var i = HealthInputs(now: 1060, recordingStartUp: 1000)
-        i.gpsLastFixUp = 1059.5
-        i.audioMeterExpected = meter
-        i.audioLastSoundUp = i.now - 0.5 // the cabin is not silent (silence has its own test)
-        i.audioExpected = recorder
-        i.audioRecording = recording
-        i.streams[.audioLevel] = StreamSnapshot(id: .audioLevel, count: 10, rateHz: 10, age: levelAge, meanRateHz: 10,
-                                                maxGap: 0.1, gapsOver1s: 0, droppedEstimate: 0, available: true)
-        return i
-    }
-
-    func testMeterOnlyModeFlagsASilentMeter() {
-        XCTAssertTrue(HealthEvaluator.evaluate(inputs(levelAge: 0.1, meter: true, recorder: false)).isEmpty)
-        let issues = HealthEvaluator.evaluate(inputs(levelAge: 5, meter: true, recorder: false))
-        XCTAssertEqual(issues.map(\.key), ["audio.meter"])
-        XCTAssertEqual(issues.first?.level, .problem)
-    }
-
-    func testNoDuplicateWhenRecorderAlreadyReportedOff() {
-        let keys = HealthEvaluator.evaluate(inputs(levelAge: 5, meter: true, recorder: true, recording: false)).map(\.key)
-        XCTAssertEqual(keys, ["audio.off"])
-    }
-
-    func testNoAudioSourceNoAudioRule() {
-        XCTAssertTrue(HealthEvaluator.evaluate(inputs(levelAge: nil, meter: false, recorder: false)).isEmpty)
     }
 }
 
@@ -334,47 +255,37 @@ final class UploadRobustnessTests: XCTestCase {
         XCTAssertTrue(wrongDevice.detail.contains("Device ID"))
         XCTAssertFalse(UploadQueue.interpretProbe(status: 404).ok)
         XCTAssertFalse(UploadQueue.interpretProbe(status: 502).ok)
+        // The few words Settings shows next to Test connection.
+        XCTAssertEqual(UploadQueue.interpretProbe(status: 422).short, "Connected")
+        XCTAssertEqual(UploadQueue.interpretProbe(status: 401).short, "Wrong device key")
+        XCTAssertEqual(UploadQueue.interpretProbe(status: 404).short, "Wrong server address")
+        XCTAssertEqual(UploadQueue.interpretProbe(status: 502).short, "Server error (HTTP 502)")
     }
 }
 
-// MARK: - Map decimation
 
-final class MapDecimationTests: XCTestCase {
-    func testDecimateKeepsRecentTrackAndBoundsSize() {
-        let pts = (0..<20_000).map { TrackBuffer.Point(lat: Double($0), lon: 0, speed: 10) }
-        let d = TrackMapView.decimate(pts, max: 1500)
-        XCTAssertLessThanOrEqual(d.count, 1501)
-        XCTAssertEqual(d.first, pts.first)
-        XCTAssertEqual(d.last, pts.last)
-        XCTAssertEqual(Array(d.suffix(750)), Array(pts.suffix(750)), "newest stretch drawn at full resolution")
-        XCTAssertEqual(TrackMapView.decimate(Array(pts.prefix(100))).count, 100, "short tracks untouched")
-    }
-}
-
-// MARK: - RecordingController: alerts + sickness prompt flows
+// MARK: - RecordingController: alerts
 
 @MainActor
 final class FakeAlerter: Alerter {
-    var problems = 0, prompts = 0, labels = 0, stops = 0
+    var problems = 0, labels = 0, stops = 0
     func prepare() {}
     func labelConfirmed() { labels += 1 }
-    func sicknessPrompt() { prompts += 1 }
     func newProblem() { problems += 1 }
     func stopped() { stops += 1 }
 }
 
 @MainActor
 final class RecordingControllerTests: XCTestCase {
-    private func makeController(device: FakeDeviceStatus = FakeDeviceStatus(), audio: FakeAudio = FakeAudio(),
-                                interval: TimeInterval = 120, timeout: TimeInterval = 30) throws -> (RecordingController, FakeAlerter) {
+    private func makeController(device: FakeDeviceStatus = FakeDeviceStatus()) throws -> (RecordingController, FakeAlerter) {
         let deps = RecordingSession.Dependencies(
             motion: SyntheticMotionSource(), location: FakeLocationSource(), altimeter: FakeAltimeter(),
-            activity: FakeActivity(), audio: audio, deviceStatus: device, uploadQueue: nil, deviceId: "D",
+            activity: FakeActivity(), deviceStatus: device, uploadQueue: nil, deviceId: "D",
             appVersion: "t", deviceInfo: .init(model: "x", name: "x", iosVersion: "x"))
         let session = try RecordingSession(store: SessionStore(root: try makeTempDir()), setup: SessionSetup(),
                                            preflight: nil, deps: deps)
         let alerter = FakeAlerter()
-        let c = RecordingController(session: session, sicknessInterval: interval, sicknessTimeout: timeout, alerter: alerter)
+        let c = RecordingController(session: session, alerter: alerter)
         return (c, alerter)
     }
 
@@ -403,86 +314,23 @@ final class RecordingControllerTests: XCTestCase {
         XCTAssertFalse(c.issues.contains { $0.key == "lowpower" })
     }
 
-    /// Spins the main run loop (the controller's 8 Hz timer keeps firing) until `cond` holds.
-    private func waitUntil(_ timeout: TimeInterval, _ cond: () -> Bool) -> Bool {
-        let end = Date().addingTimeInterval(timeout)
-        while Date() < end {
-            if cond() { return true }
-            RunLoop.main.run(until: Date().addingTimeInterval(0.02))
-        }
-        return cond()
-    }
-
-    func testPromptTimesOutAsMissedSkipIsMissedAndStopDuringPromptIsMissed() throws {
-        let (c, alerter) = try makeController(interval: 0.3, timeout: 0.3)
-        c.start()
-        XCTAssertTrue(waitUntil(ciTimeout) { c.sicknessPromptActive })
-        XCTAssertGreaterThanOrEqual(alerter.prompts, 1)
-        XCTAssertTrue(waitUntil(ciTimeout) { c.session.labels.sicknessMissed >= 1 }, "unanswered prompt → sickness_missed")
-        XCTAssertTrue(waitUntil(ciTimeout) { c.sicknessPromptActive })
-        let before = c.session.labels.sicknessMissed
-        c.skipSicknessPrompt() // no run-loop turn in between: deterministic
-        XCTAssertEqual(c.session.labels.sicknessMissed, before + 1)
-        XCTAssertFalse(c.sicknessPromptActive)
-        XCTAssertEqual(c.session.labels.sicknessRatings, 0, "skip never fakes a rating")
-        XCTAssertTrue(waitUntil(ciTimeout) { c.sicknessPromptActive })
-        c.stop()
-        let labels = try String(contentsOf: c.session.folder.appendingPathComponent("labels.csv"), encoding: .utf8)
-        XCTAssertTrue(labels.contains("sickness_missed,,skipped"))
-        XCTAssertTrue(labels.contains("sickness_missed,,recording stopped"))
-        XCTAssertEqual(alerter.stops, 1)
-    }
-
-    func testRatingClosesPromptAndIsLoggedAsPrompted() throws {
-        let (c, _) = try makeController(interval: 0.2, timeout: 5)
-        c.start()
-        defer { c.stop() }
-        XCTAssertTrue(waitUntil(ciTimeout) { c.sicknessPromptActive })
-        c.rateSickness(4)
-        XCTAssertFalse(c.sicknessPromptActive)
-        XCTAssertEqual(c.session.labels.sicknessRatings, 1)
-        XCTAssertEqual(c.snapshot.lastSickness, 4)
-    }
-
-    func testAudioOffSessionHasNoAudioProblemAndIsRecordedAsOff() throws {
-        let meterOnly = FakeAudio()
-        meterOnly.recordsAudio = false
-        let (c, _) = try makeController(audio: meterOnly)
+    /// D48: nothing from the microphone, no audio files or keys, no audio health rule.
+    func testRecordingWritesNoAudio() throws {
+        let (c, _) = try makeController()
         c.start()
         spin(0.5)
-        // Audio recording is OFF: "recorder not recording" must never be raised (meter health is
-        // timing-dependent and tested exactly in AudioHealthTests).
-        XCTAssertFalse(c.issues.contains { $0.key == "audio.off" }, "\(c.issues)")
-        let meta = c.session.stop()
-        XCTAssertFalse(meta.audioEnabled)
-    }
-}
-
-// MARK: - Multi-segment audio bookkeeping
-
-final class AudioSegmentsIntegrationTests: XCTestCase {
-    func testEverySegmentHasStartStopRowsAClockAnchorAndAFile() throws {
-        let audio = FakeAudio()
-        audio.segments = 3
-        let deps = RecordingSession.Dependencies(
-            motion: SyntheticMotionSource(), location: nil, altimeter: nil, activity: nil, audio: audio,
-            deviceStatus: FakeDeviceStatus(), uploadQueue: nil, deviceId: "D", appVersion: "t",
-            deviceInfo: .init(model: "x", name: "x", iosVersion: "x"))
-        let session = try RecordingSession(store: SessionStore(root: try makeTempDir()), setup: SessionSetup(),
-                                           preflight: nil, deps: deps)
-        let e = expectation(description: "run")
-        var meta: SessionMetadata?
-        DispatchQueue.main.async {
-            session.start()
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { meta = session.stop(); e.fulfill() }
-        }
-        wait(for: [e], timeout: ciTimeout)
-        let segs = try readCSV(session.folder.appendingPathComponent("audio_segments.csv")).rows
-        XCTAssertEqual(segs.filter { $0[2] == "start" }.map { $0[3] }, ["audio_000.m4a", "audio_001.m4a", "audio_002.m4a"])
-        XCTAssertEqual(segs.filter { $0[2] == "stop" }.count, 3)
-        let clockStarts = try readCSV(session.folder.appendingPathComponent("clock.csv")).rows.filter { $0[2] == "audio_start" }
-        XCTAssertEqual(clockStarts.count, 3, "n-th audio_start row ↔ audio_00n.m4a")
-        XCTAssertEqual(meta?.stats?.audioFiles, ["audio_000.m4a", "audio_001.m4a", "audio_002.m4a"])
+        XCTAssertFalse(c.issues.contains { $0.key.hasPrefix("audio") }, "\(c.issues)")
+        c.stop()
+        let folder = c.session.folder
+        let files = try FileManager.default.contentsOfDirectory(atPath: folder.path)
+        XCTAssertFalse(files.contains { $0.hasPrefix("audio") }, "\(files)")
+        let json = try XCTUnwrap(JSONSerialization.jsonObject(
+            with: Data(contentsOf: folder.appendingPathComponent(SessionFileName.metadata))) as? [String: Any])
+        XCTAssertNil(json["audioEnabled"])
+        XCTAssertNil((json["requestedRatesHz"] as? [String: Any])?["audioLevel"])
+        let stats = try XCTUnwrap(json["stats"] as? [String: Any])
+        XCTAssertNil(stats["audioFiles"])
+        XCTAssertNil(stats["audioFilesIncomplete"])
     }
 }
 
@@ -504,7 +352,6 @@ final class ContractFixtureTests: XCTestCase {
         acc.add(LocationSample(utcMs: 1_763_716_532_120, lat: 46.77121, lon: 23.62363, alt: 352, ellAlt: 390, hAcc: 4.7,
                                vAcc: 3, speed: 8.4, speedAcc: 0.5, course: 92, courseAcc: 3, isSimulated: false))
         acc.add(AltimeterSample(t: 100.02, relativeAltitudeM: 0.1, pressureKPa: 97.2))
-        acc.add(AudioLevelSample(t: 100.03, avgDbfs: -31, peakDbfs: -12))
         acc.addLabel(t: 100.04, type: "pothole", value: nil, note: nil)
         acc.addLabel(t: 100.05, type: "note", value: nil, note: "a, \"quoted\" note")
         let device = DeviceStatus(batteryLevel: 0.8, batteryState: "charging", thermal: .nominal, lowPowerMode: false,
@@ -520,10 +367,10 @@ final class ContractFixtureTests: XCTestCase {
         var m = SessionMetadataTests.sample()
         m.sessionId = "00000000-0000-4000-8000-000000000001"
         m.endedAtUtc = "2026-11-21T10:00:00.000Z"
-        m.audioEnabled = false
         m.vehicle.type = "bus"; m.vehicle.line = "24B"
+        // sicknessRatings: 1 matches the committed (pre-D47) fixture; the app now always writes 0.
         m.stats = .init(durationSec: 2808.488, streams: [:], labelsCount: 3, sicknessRatings: 1, sicknessMissed: 0,
-                        audioFiles: [], fileSizes: [:], totalBytes: 1, writeErrors: 0, uploadBatchesCreated: 3)
+                        fileSizes: [:], totalBytes: 1, writeErrors: 0, uploadBatchesCreated: 3)
         let body = try RecordingSession.sessionMetadataBody(m, batchCount: 3)
         let obj = try XCTUnwrap(JSONSerialization.jsonObject(with: body) as? [String: Any])
         XCTAssertEqual(obj["batchCount"] as? Int, 3)

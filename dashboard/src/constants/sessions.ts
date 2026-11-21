@@ -62,12 +62,8 @@ export const STREAM_LABELS: Record<string, string> = {
   mag_raw: "Magnetometer",
   location: "GPS",
   altimeter: "Barometer",
-  audio_level: "Audio level",
   device: "Device health",
 };
-
-/** Top of the MISC motion-sickness scale (0 = no problems … 10 = vomiting). */
-export const MISC_MAX = 10;
 
 /** Measured rate below this share of the expected rate is flagged (spec §7: < 90 Hz of 100 Hz). */
 export const STREAM_RATE_WARN_RATIO = 0.9;

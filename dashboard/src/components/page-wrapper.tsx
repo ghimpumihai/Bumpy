@@ -14,7 +14,7 @@ interface PageWrapperProps {
 /** Standard content page: heading, optional actions and a padded, width-limited body. */
 export function PageWrapper({ title, description, actions, children, className }: PageWrapperProps) {
   return (
-    <main className={cn("mx-auto vertical w-full max-w-7xl gap-6 px-4 py-6 sm:px-6", className)}>
+    <main className={cn("mx-auto vertical w-full max-w-7xl gap-6 px-4 pt-20 pb-6 sm:px-6", className)}>
       <header className="flex flex-col gap-3 sm:flex-row sm:items-end sm:justify-between">
         <div className="vertical gap-1">
           <h1 className="text-2xl font-semibold tracking-tight text-foreground">{title}</h1>

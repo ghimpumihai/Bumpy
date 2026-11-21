@@ -1,4 +1,4 @@
-import type { FeatureCollection, Polygon } from "geojson";
+import type { FeatureCollection, MultiLineString, Polygon } from "geojson";
 
 import type { IsoDateTime, VehicleType } from "@/types/common";
 import type { RaterPosture } from "@/types/sessions";
@@ -43,9 +43,12 @@ export interface SegmentAggregate {
   potholeRatio: number | null;
   /** Crowd-confirmed: at least k of n passes, thresholds per vehicle type. */
   potholeConfirmed: boolean;
-  /** Frequency-weighted (Wf) vertical RMS, m/s². Not normalized: it is what passengers feel. */
+  /**
+   * Frequency-weighted RMS, vertical (ISO 2631-1 Wf) and sideways (Donohew & Griffin) combined (D49), m/s²,
+   * over the moving, valid time. Not normalized: it is what passengers feel.
+   */
   sicknessAwRms: number | null;
-  /** Predicted % of unadapted people who may vomit after one hour of this motion. */
+  /** Predicted % of unadapted people who may vomit after one hour of this motion: a_w·√3600 / 3. */
   msi1hPct: number | null;
   /** Sessions with a rigid mount that contributed to the sickness numbers. */
   sicknessSessions: number;
@@ -74,6 +77,9 @@ export interface SegmentSicknessSplit {
   msi1hPct: number | null;
   nSessions: number;
 }
+
+/** `GET /api/heat`: one line per aggregated trip; the dashboard counts the overlap. */
+export type HeatCollection = FeatureCollection<MultiLineString, Record<string, never>>;
 
 /** `GET /api/segments/{h3}`. */
 export interface SegmentDetail {

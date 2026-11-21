@@ -37,7 +37,7 @@ Both features come from the **same motion signal, in different frequency bands**
 | **Road quality** | Where is the road rough? Where are the potholes, speed bumps and cobblestones? | **~1–30 Hz** plus sharp transients | Vertical acceleration, pitch/roll rate, GPS position and speed, road noise (audio) |
 | **Motion sickness** | How likely is this ride to make passengers sick? Which road sections cause it? | **~0.08–0.5 Hz** (slow sway) | Lateral, longitudinal and vertical acceleration over minutes; roll/pitch; gravity orientation |
 
-Motion sickness is computed with **ISO 2631-1 MSDV**. Frequency-weight the acceleration with filter **Wf**, then compute `MSDV = sqrt(∫ a_w(t)² dt)`. Rule of thumb: **% of people who may vomit ≈ MSDV / 3**. We validate this against **real passenger sickness ratings (MISC scale)** collected in the app during the drive.
+Motion sickness is computed with **ISO 2631-1 MSDV**. Frequency-weight the acceleration with filter **Wf**, then compute `MSDV = sqrt(∫ a_w(t)² dt)`. Rule of thumb: **% of people who may vomit ≈ MSDV / 3**. The motion-sickness number is this calculation only (MSDV from the accelerometers, on the backend). *Removed (D47): validating it against passenger MISC ratings collected in the app; there is no time to ask real people how they feel.*
 
 Road quality is roughly band-passed vertical acceleration → RMS per ~10 m of road, normalized by speed → roughness score, plus spike detection → pothole events with GPS position.
 
@@ -62,9 +62,9 @@ The processing will be developed **after** the drive, from the recorded files. E
 | `NSMotionUsageDescription` | "Records vehicle motion to measure road quality and ride comfort." |
 | `NSLocationWhenInUseUsageDescription` | "Maps road quality along the route." |
 | `NSLocationAlwaysAndWhenInUseUsageDescription` | Same, so recording continues if the app goes to the background |
-| `NSMicrophoneUsageDescription` | "Records road noise to classify road surfaces." |
-| `NSCameraUsageDescription` | Only if you implement the mount photo (P1) |
-| `UIBackgroundModes` | `location`, `audio`. These keep the app and sensors alive if it gets backgrounded |
+| ~~`NSMicrophoneUsageDescription`~~ | *Removed (D48): the app records no audio.* |
+| ~~`NSCameraUsageDescription`~~ | *Removed (D51): no setup form, so no mount photo.* |
+| `UIBackgroundModes` | `location` (`audio` removed by D48). Continuous location updates keep the app and sensors alive if it gets backgrounded |
 | `UIFileSharingEnabled` = YES, `LSSupportsOpeningDocumentsInPlace` = YES | Session files become visible in the **Files app** and in Finder over USB. This is the zero-code export fallback |
 
 ---
@@ -85,7 +85,7 @@ Priority:
 | # | Stream | API | Rate | Fields (unit) | Why | Prio |
 |---|---|---|---|---|---|---|
 | M1 | **Device motion (fused)** | `CMMotionManager.startDeviceMotionUpdates(using: .xArbitraryZVertical, to:)` | 100 Hz | `userAcceleration.x/y/z` (g), `gravity.x/y/z` (g), `rotationRate.x/y/z` (rad/s), `attitude.quaternion.w/x/y/z`, `attitude.roll/pitch/yaw` (rad) | Gravity vector = "which way is down", used to rotate into the vehicle frame. Attitude gives roll/pitch for sickness. userAcceleration is handy for road spikes | **P0** |
-| M2 | **Raw accelerometer** | `startAccelerometerUpdates` | 100 Hz | `x/y/z` (g, gravity included) | **Unfused** signal. The fused userAcceleration can filter out the very slow 0.1–0.5 Hz motion that MSDV needs, so the backend must have raw data | **P0** |
+| M2 | **Raw accelerometer** | `startAccelerometerUpdates` | 100 Hz | `x/y/z` (g, gravity included) | **Unfused** signal, kept to cross-check the fused one after the real drive. MSDV and roughness use userAcceleration (D46): vertical heave can't leak into the unit-length gravity estimate | **P0** |
 | M3 | **Raw gyroscope** | `startGyroUpdates` | 100 Hz | `x/y/z` (rad/s, includes bias) | Unfused rotation; pitch spikes help confirm potholes (front then rear axle) | **P0** |
 | M4 | Raw magnetometer | `startMagnetometerUpdates` | 50 Hz | `x/y/z` (µT) | Car metal distorts it, but it's cheap and may help heading or detect electrical noise | P2 |
 
@@ -120,6 +120,8 @@ Notes:
 
 ### 3.5 Audio (AVFoundation)
 
+> **Removed (D48):** the app records no audio: no level meter (S1), no recording (S2), no microphone permission. The rows below describe the original plan; folders from older builds may still hold these files.
+
 | # | Stream | Settings | Why | Prio |
 |---|---|---|---|---|
 | S1 | **Audio level meter** | From the recorder (`isMeteringEnabled`) or an `AVAudioEngine` input tap: compute **RMS dBFS and peak dBFS at 10 Hz** | Road/tyre noise changes strongly with surface (cobblestones, asphalt, gravel). Cheap and anonymous | **P1** |
@@ -141,11 +143,13 @@ Notes:
 
 ### 3.7 Human labels (manual input during the drive), the ground truth
 
+> **Superseded by D51** (no label buttons) **and D47** (no sickness ratings): the app no longer offers label buttons or sickness prompts. `labels.csv` keeps its schema; new trips simply contain no human labels.
+
 The operator is **a passenger, never the driver.**
 
 | # | Label | UI | Why | Prio |
 |---|---|---|---|---|
-| H1 | **Sickness rating (MISC 0–10)** | Prompted **every 2 minutes** with a haptic and a short sound. Big 0–10 grid with short descriptions. Auto-dismisses after 30 s with no answer (logged as `missed`). Can also be entered any time | Ground truth to validate MSDV predictions. **Without it the sickness feature is unvalidated** | **P0** |
+| H1 | ~~Sickness rating (MISC 0–10)~~ | *Removed (D47).* The app no longer prompts for or records ratings; motion sickness comes only from the backend's MSDV calculation | | |
 | H2 | **Bump / pothole** | One big button, tapped the moment the bump is felt | Ground truth for pothole detection | **P0** |
 | H3 | Speed bump | Button | Different signature from a pothole | **P0** |
 | H4 | Surface segment | Toggle buttons with start/end: `cobblestones`, `rough asphalt`, `smooth asphalt`, `gravel`, `tram rails` | Labeled training data for roughness and surface classification | **P0** |
@@ -154,10 +158,7 @@ The operator is **a passenger, never the driver.**
 | H7 | **Sync tap** | Button + instructions (§5) | Alignment of audio and motion | P1 |
 | H8 | Free-text note | Small text field | Anything unexpected | P1 |
 
-**MISC (Misery Scale) labels for the grid:**
-`0` no problems · `1` slight discomfort, no specific symptoms · `2` dizziness, warmth, headache, stomach awareness, sweating: vague · `3` same: some · `4` same: medium · `5` same: severe · `6` nausea: some · `7` nausea: medium · `8` nausea: severe · `9` retching · `10` vomiting
-
-Note: looking at a phone screen itself increases motion sickness. The person rating should only glance at the phone when prompted. Record **who is rating and their seat** in the session metadata.
+Seat and posture (`people.raterSeat`, `people.raterPosture` in §3.8) still describe the passenger whose ride the backend splits the calculated sickness by; the keys keep their names for compatibility.
 
 ### 3.8 Session metadata (entered before recording, in `session.json`)
 
@@ -180,9 +181,8 @@ Note: looking at a phone screen itself increases motion sickness. The person rat
     "photoFile": "mount.jpg"
   },
   "people": { "operatorSeat": "front passenger", "raterSeat": "rear left", "raterPosture": "seated|standing", "passengerCount": 3 },
-  "audioEnabled": true,
   "conditions": { "weather": "dry", "notes": "" },
-  "requestedRatesHz": { "deviceMotion": 100, "accel": 100, "gyro": 100, "mag": 50, "audioLevel": 10 },
+  "requestedRatesHz": { "deviceMotion": 100, "accel": 100, "gyro": 100, "mag": 50 },
   "recovered": false,
   "stats": { "filled at end: sample counts and measured mean rate per stream, drop count, file sizes" : "" }
 }
@@ -208,10 +208,7 @@ Documents/sessions/2026-11-21T09-12-03Z_<shortId>/
 ├── heading.csv           # L2 (P2)
 ├── altimeter.csv         # B1 (+B2 columns or abs_altitude.csv)
 ├── activity.csv          # A1
-├── audio_000.m4a, …      # S2, 5-minute segments (crash-safe; see the app README)
-├── audio_segments.csv    # start/stop/interrupted/reset per audio file; blocked_background = gap until the app is opened
 ├── abs_altitude.csv      # B2
-├── audio_level.csv       # S1
 ├── device.csv            # D1–D5
 ├── labels.csv            # H1–H8
 ├── app_log.txt           # warnings, errors, permission states, rate drops, upload failures
@@ -234,9 +231,9 @@ Common leading columns on every sensor CSV:
 | `heading.csv` | `mag_heading,true_heading,heading_acc,x,y,z` |
 | `altimeter.csv` | `rel_alt_m,pressure_kpa` |
 | `activity.csv` | `stationary,walking,running,automotive,cycling,unknown,confidence` |
-| `audio_level.csv` | `avg_dbfs,peak_dbfs` |
+| `audio_level.csv` | `avg_dbfs,peak_dbfs` (older builds only; not written since D48) |
 | `device.csv` | `battery_level,battery_state,thermal_state,low_power,free_disk_bytes,net_status,net_type` |
-| `labels.csv` | `type,value,note` (e.g. `sickness,4,` / `pothole,,` / `surface_start,cobblestones,` / `surface_end,cobblestones,` / `phone_moved,,` / `sickness_missed,,`) |
+| `labels.csv` | `type,value,note` (e.g. `pothole,,` / `surface_start,cobblestones,` / `surface_end,cobblestones,` / `phone_moved,,`). The types `sickness`, `sickness_prompt` and `sickness_missed` are no longer written (D47); folders from older builds may still contain them |
 | `clock.csv` | `t_up,t_utc_ms,source` (no extra columns) |
 
 Use the same numeric precision everywhere: 6 decimals for sensor values, 8 decimals for lat/lon.
@@ -246,7 +243,7 @@ Use the same numeric precision everywhere: 6 decimals for sensor values, 8 decim
 - Buffer in memory and **flush to disk at least every 1 second**. A crash then loses at most 1 s.
 - Append-only. Never rewrite sensor files.
 - On app launch, if a session folder lacks `endedAtUtc`, mark it `"recovered": true`, keep it, and show it in the session list.
-- **Expected size:** about 100–150 MB per hour total (CSV plus audio). An iPhone 14 Pro has plenty of space; still show free space.
+- **Expected size:** about 70–120 MB per hour of CSV (no audio since D48). An iPhone 14 Pro has plenty of space; still show free space.
 
 ---
 
@@ -257,7 +254,7 @@ Use the same numeric precision everywhere: 6 decimals for sensor values, 8 decim
 - **Anchor:** at session start and then **every 10 s**, write `clock.csv` rows with `systemUptime` and `Date().timeIntervalSince1970*1000` read back-to-back. The conversion is `utc_ms = anchor_utc_ms + (t_up - anchor_up) * 1000`, using the nearest anchor.
 - Keep the screen awake (`UIApplication.shared.isIdleTimerDisabled = true`) so the device never sleeps during recording.
 - **Sync tap (P1):** right after Start, and again before Stop, the operator presses "Sync tap" and then **knocks firmly on the phone/mount 3 times**. That leaves a sharp spike in the accelerometer **and** a click in the audio, so we can align audio and motion to the millisecond later.
-- Record the uptime when `AVAudioRecorder.record()` returns, in `clock.csv` with `source=audio_start`.
+- ~~Record the uptime when `AVAudioRecorder.record()` returns, in `clock.csv` with `source=audio_start`.~~ *Removed (D48).*
 
 ---
 
@@ -296,17 +293,17 @@ x-device-key: <device key>
   "location": [ { "tUtcMs": 1763716532120, "lat": 46.77121, "lon": 23.62363, "alt": 352.1,
                   "hAcc": 4.7, "speed": 8.4, "speedAcc": 0.5, "course": 92.0 } ],
   "altimeter": { "t": [...], "relAltM": [...], "pressureKpa": [...] },
-  "audioLevel": { "t": [...], "avgDbfs": [...], "peakDbfs": [...] },
   "labels": [ { "t": 1.24, "type": "pothole", "value": null, "note": null } ],
   "device": { "battery": 0.82, "thermal": "nominal", "lowPower": false }
 }
 ```
 
   - `t` arrays are **seconds relative to `t0Up`** (columnar to keep payloads small).
+  - No `audioLevel` (nor `audioEnabled` in §6.1) since D48: the app no longer sends them, and the backend accepts and ignores them from older builds.
   - Size: about 30 KB raw / ~10 KB gzipped per batch, roughly 20 MB/hour of mobile data.
 - **Queue on disk** (`Documents/upload_queue/`): write each batch as a `.json.gz` file, upload oldest first, **1 request at a time**, exponential backoff (1 s → 30 s max). Delete on HTTP 2xx. **Treat 409 (duplicate) as success.** Other 4xx: log, move to `upload_failed/`, continue.
 - Idempotency key = `sessionId + batchSeq`.
-- After the drive, a **"Upload full session"** button can send the queued remainder. The raw audio is **not** uploaded.
+- After the drive, a **"Upload full session"** button can send the queued remainder.
 
 ### 6.1 Session metadata (new: the backend needs it for the live path)
 
@@ -329,7 +326,7 @@ x-device-key: <device key>
 
 Everything here is **additive**: the §6 keys keep their names, types and units, so the backend must accept extra keys (no pydantic `extra="forbid"`, no fixed `units` literal). The app's `tools/mock_ingest_server.py` validates all of it and is tested against payloads produced by the app's own encoder (`src/mobile-ios/tools/fixtures/`).
 
-- **Full dataset in every batch** (02 D32, only raw audio stays on the phone): `deviceMotion.roll/pitch/yaw`; `magRaw {t,x,y,z}` (µT, 50 Hz); `heading [{tUtcMs, magHeading, trueHeading, headingAcc, x, y, z}]`; `absAltitude {t, altitudeM, accuracyM, precisionM}`; `activity [{t, stationary, walking, running, automotive, cycling, unknown, confidence, startUtcMs}]`; `location[].ellAlt, vAcc, courseAcc, isSimulated`; `device.batteryState, freeDiskBytes, netStatus, netType`.
+- **Full dataset in every batch** (02 D32): `deviceMotion.roll/pitch/yaw`; `magRaw {t,x,y,z}` (µT, 50 Hz); `heading [{tUtcMs, magHeading, trueHeading, headingAcc, x, y, z}]`; `absAltitude {t, altitudeM, accuracyM, precisionM}`; `activity [{t, stationary, walking, running, automotive, cycling, unknown, confidence, startUtcMs}]`; `location[].ellAlt, vAcc, courseAcc, isSimulated`; `device.batteryState, freeDiskBytes, netStatus, netType`.
 - **Hackathon payload rule** ("device ID, event type, value, unit, UTC timestamp"): `eventType: "sensor_batch"`, `source: "live"`, `t0UtcMs` (sample UTC = `t0UtcMs + t[i]·1000`), `fieldUnits` (the unit of every field). Accelerations stay in **g** as the iPhone delivers them (`1 g = 9.80665 m/s²`); invalid speed/course/accuracies are **−1** as in iOS.
 - **Headers:** `x-idempotency-key: <sessionId>:<batchSeq>` for batches, `<sessionId>:meta-start|meta-stop` for §6.1.
 - **§6.1 body:** `session.json` plus `source: "live"` (the replay tool rewrites it) and, in the Stop copy, `batchCount`. `people.raterName` is removed from the cloud copy (personal data stays on the phone).
@@ -340,6 +337,8 @@ Everything here is **additive**: the §6 keys keep their names, types and units,
 ---
 
 ## 7. App screens and the live health dashboard
+
+> **Superseded by D51** (decisions/README.md): the app is now Start → Recording → Recap with no setup form, no labels and no sickness prompts. The screens below describe the original operator app; the health rules still apply and drive the Recording status line.
 
 ### Screen 1: Sessions
 - List of past sessions (date, duration, size, recovered flag) → tap → detail plus **Export** (share sheet / AirDrop the folder, or open in Files).
@@ -354,12 +353,12 @@ Everything here is **additive**: the §6 keys keep their names, types and units,
 |---|---|
 | Motion permission | authorized |
 | Location permission | authorized + **full accuracy** |
-| Microphone permission | authorized |
+| ~~Microphone permission~~ | *Removed (D48)* |
 | Device motion / accel / gyro available | `is…Available == true` |
 | Barometer available | `CMAltimeter.isRelativeAltitudeAvailable()` |
 | **GPS fix** | `horizontalAccuracy ≤ 10 m` (live value shown) |
 | **Measured motion rate** | ≥ 90 Hz for each motion stream over a 3 s test |
-| **Mount stillness test** | 5 s with vehicle stopped: accel std-dev below threshold (e.g. < 0.01 g). Also stores the gravity vector |
+| **Mount stillness test** | 5 s with vehicle stopped: accel std-dev below 0.03 g (an idling engine exceeds 0.01 g). Also stores the gravity vector |
 | Low Power Mode | **off** |
 | Battery | ≥ 50 % or charging |
 | Thermal | nominal or fair |
@@ -396,14 +395,13 @@ One glance must answer: **is everything recording correctly right now?**
 │ [POTHOLE] [SPEED BUMP] [PHONE MOVED]     │  ← big buttons, haptic feedback on tap
 │ Surface: [cobble][rough][smooth][gravel] │  ← toggles, highlighted while active
 │ Segment: [winding][roundabout][stop&go]  │
-│ [SICKNESS 0–10]  [SYNC TAP]  [NOTE]      │
+│ [SYNC TAP]  [NOTE]                       │
 │                    (hold 2 s to STOP) ■  │
 └──────────────────────────────────────────┘
 ```
 
 - Every row has a **status dot**: green / amber / red.
 - **Last label** shows briefly as a toast ("Pothole logged 09:23:41") so the operator knows the tap registered.
-- Each sickness prompt shows a countdown; answering gives haptic confirmation.
 - Use high contrast, big text, and support for bright sunlight. Dark mode is fine.
 - UI refresh at **5–10 Hz** (not per sample). Plots draw from ring buffers, decimated.
 
@@ -415,7 +413,7 @@ One glance must answer: **is everything recording correctly right now?**
 | Any motion stream rate < 50 Hz, or no sample for > 0.5 s | **PROBLEM** |
 | GPS no fix for > 5 s | WARN; > 15 s **PROBLEM** |
 | GPS `horizontalAccuracy` > 20 m | WARN |
-| Audio recorder not recording | **PROBLEM** |
+| ~~Audio recorder not recording~~ | *Removed (D48)* |
 | Disk write error / file flush fails | **PROBLEM** |
 | Free disk < 1 GB | WARN; < 300 MB **PROBLEM** |
 | Thermal `serious` | WARN; `critical` **PROBLEM** |
@@ -423,12 +421,11 @@ One glance must answer: **is everything recording correctly right now?**
 | Battery < 20 % and not charging | WARN |
 | App went to background | WARN (recording continues via background modes; log it) |
 | Upload queue > 30 batches or last success > 60 s | WARN (never PROBLEM: data is safe on disk) |
-| Sickness prompt missed | info (logged) |
 
 On PROBLEM: red banner with the reason, a strong haptic, and a sound, plus an `app_log.txt` entry with a timestamp.
 
 ### Screen 5: Session summary (after Stop)
-- Duration, per-stream sample count, **mean measured rate**, longest gap per stream, labels count, sickness ratings count, file sizes, upload status.
+- Duration, per-stream sample count, **mean measured rate**, longest gap per stream, labels count, file sizes, upload status.
 - Any stream with gaps > 1 s is listed in red. This is the immediate answer to "did we get good data?"
 - **Export** button.
 
@@ -438,8 +435,8 @@ On PROBLEM: red banner with the reason, a strong haptic, and a sound, plus an `a
 
 - [ ] `isIdleTimerDisabled = true` while recording; restore after.
 - [ ] Stop requires **2 s long-press**; no accidental stop. No "pause" at all; use segment labels instead.
-- [ ] Background modes `location` + `audio` enabled, so if the app goes to the background, recording continues.
-- [ ] Handle audio interruptions (phone call, Siri): log it, try to resume, show WARN.
+- [ ] Background mode `location` enabled (`audio` removed by D48), so if the app goes to the background, recording continues.
+- [ ] ~~Handle audio interruptions (phone call, Siri): log it, try to resume, show WARN.~~ *Removed (D48).*
 - [ ] All sensor callbacks on background queues; the main thread only renders.
 - [ ] Files flushed ≥ 1×/s; unfinished sessions recovered on next launch.
 - [ ] Nothing secret committed: API key entered at runtime.
@@ -465,7 +462,6 @@ On PROBLEM: red banner with the reason, a strong haptic, and a sound, plus an `a
 - **Stop-and-go** traffic (longitudinal sway)
 - Some faster road segment if possible
 - If possible, drive one rough segment **twice at different speeds** (e.g. 20 and 40 km/h). This lets us prove the speed normalization works.
-- Sickness ratings every 2 min from a rear passenger.
 
 **After the drive**
 1. 30 s stationary, engine idling, then SYNC TAP + 3 knocks, then **hold to Stop**.
@@ -482,7 +478,7 @@ Do a **5–10 minute test** (walk or drive around the block) and then verify on 
 # quick_check.py: run on the exported session folder
 import pandas as pd, sys, pathlib
 d = pathlib.Path(sys.argv[1])
-for f in ["device_motion","accel_raw","gyro_raw","location","altimeter","audio_level","labels"]:
+for f in ["device_motion","accel_raw","gyro_raw","location","altimeter","labels"]:
     p = d / f"{f}.csv"
     if not p.exists(): print(f"MISSING {f}"); continue
     df = pd.read_csv(p)
@@ -491,12 +487,11 @@ for f in ["device_motion","accel_raw","gyro_raw","location","altimeter","audio_l
         print(f"{f:15s} rows={len(df):8d} rate={1/dt.median():6.1f}Hz max_gap={dt.max():.3f}s")
     else:
         print(f"{f:15s} rows={len(df)}")
-print("audio", sum(f.stat().st_size for f in d.glob("audio_*.m4a")) or "MISSING")
 ```
 
-The full verifier is `src/mobile-ios/tools/quick_check.py` (stdlib only): headers, rates, gaps, clock alignment, labels, audio segments, coverage and session.json.
+The full verifier is `src/mobile-ios/tools/quick_check.py` (stdlib only): headers, rates, gaps, clock alignment, labels, coverage and session.json (audio files from builds before D48 are reported and ignored).
 
-Pass criteria: motion streams ~100 Hz with max gap < 0.1 s; GPS ~1 Hz with sane coordinates; labels present with the right timestamps; audio file plays; `t_utc_ms` values are the correct real time.
+Pass criteria: motion streams ~100 Hz with max gap < 0.1 s; GPS ~1 Hz with sane coordinates; labels (if any; the app records none since D51) with the right timestamps; `t_utc_ms` values are the correct real time.
 
 ---
 
@@ -504,9 +499,9 @@ Pass criteria: motion streams ~100 Hz with max gap < 0.1 s; GPS ~1 Hz with sane 
 
 1. **Recorder core:** CoreMotion M1–M3 + GPS L1 → CSV writer + clock anchors + idle-timer off. *(Minimum viable: this alone is enough for the drive.)*
 2. **Live dashboard:** stream table with rates, sample counts, ages, status dots, and the banner.
-3. **Labels:** pothole / speed bump / phone moved / surface toggles / sickness prompt.
+3. **Labels:** pothole / speed bump / phone moved / surface toggles.
 4. Preflight checklist + session setup + summary + export.
-5. Audio recording + level meter, barometer, activity, device health.
+5. Barometer, activity, device health (audio recording and level meter dropped by D48).
 6. Live plots + mini map.
 7. Live upload queue to Azure.
 8. P2 extras (magnetometer, heading, absolute altitude, on-device roughness/MSDV estimates).

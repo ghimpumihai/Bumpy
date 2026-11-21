@@ -129,16 +129,17 @@ struct SessionMetadata: Codable, Equatable {
         var durationSec: Double
         var streams: [String: StreamStats]
         var labelsCount: Int
-        var sicknessRatings: Int
-        var sicknessMissed: Int
-        var audioFiles: [String]
+        /// Always 0 since MISC ratings were removed (D47); still written because the committed
+        /// Stop-copy fixture (tools/fixtures/session_meta_stop_v1.json.gz) has them.
+        var sicknessRatings: Int = 0
+        var sicknessMissed: Int = 0
+        // `audioFiles` / `audioFilesIncomplete` are no longer written (D48, no audio); stats from
+        // older builds still decode (unknown keys are ignored).
         var fileSizes: [String: Int64]
         var totalBytes: Int64
         var writeErrors: Int
         /// Batches queued for live upload (0 when upload was off). Key name kept for compatibility.
         var uploadBatchesCreated: Int
-        /// Recovered sessions: audio segments without an MP4 index (recording at the crash).
-        var audioFilesIncomplete: [String]? = nil
     }
 
     struct PreflightCheckResult: Codable, Equatable {
@@ -172,9 +173,7 @@ struct SessionMetadata: Codable, Equatable {
     var mount: Mount
     var people: People
     var conditions: Conditions
-    /// Microphone audio recorded to file (S2). Off on public transport (GDPR, spec §3.5);
-    /// the level meter (S1, numbers only) may still run.
-    var audioEnabled: Bool = true
+    // `audioEnabled` is no longer written (D48, no audio); older files still decode (key ignored).
     var requestedRatesHz: [String: Double]
     var recovered: Bool
     var recoveredAtUtc: String?
@@ -187,7 +186,7 @@ struct SessionMetadata: Codable, Equatable {
     // Explicit encoding so that `endedAtUtc` is written as `null` (spec shows it) instead of omitted.
     enum CodingKeys: String, CodingKey {
         case sessionId, appVersion, device, timezone, startedAtUtc, startUptimeSec, endedAtUtc
-        case vehicle, mount, people, conditions, audioEnabled, requestedRatesHz, recovered, recoveredAtUtc
+        case vehicle, mount, people, conditions, requestedRatesHz, recovered, recoveredAtUtc
         case syntheticSensors, folderName, deviceId, preflight, stats
     }
 
@@ -204,7 +203,6 @@ struct SessionMetadata: Codable, Equatable {
         try c.encode(mount, forKey: .mount)
         try c.encode(people, forKey: .people)
         try c.encode(conditions, forKey: .conditions)
-        try c.encode(audioEnabled, forKey: .audioEnabled)
         try c.encode(requestedRatesHz, forKey: .requestedRatesHz)
         try c.encode(recovered, forKey: .recovered)
         try c.encodeIfPresent(recoveredAtUtc, forKey: .recoveredAtUtc)
@@ -228,7 +226,6 @@ struct SessionMetadata: Codable, Equatable {
         mount = try c.decodeIfPresent(Mount.self, forKey: .mount) ?? Mount()
         people = try c.decodeIfPresent(People.self, forKey: .people) ?? People()
         conditions = try c.decodeIfPresent(Conditions.self, forKey: .conditions) ?? Conditions()
-        audioEnabled = try c.decodeIfPresent(Bool.self, forKey: .audioEnabled) ?? true // older versions always recorded
         requestedRatesHz = try c.decodeIfPresent([String: Double].self, forKey: .requestedRatesHz) ?? Self.requestedRates
         recovered = try c.decodeIfPresent(Bool.self, forKey: .recovered) ?? false
         recoveredAtUtc = try c.decodeIfPresent(String.self, forKey: .recoveredAtUtc)
@@ -241,19 +238,19 @@ struct SessionMetadata: Codable, Equatable {
 
     init(sessionId: String, appVersion: String, device: Device, timezone: String, startedAtUtc: String,
          startUptimeSec: Double, endedAtUtc: String?, vehicle: Vehicle, mount: Mount, people: People,
-         conditions: Conditions, audioEnabled: Bool = true, requestedRatesHz: [String: Double], recovered: Bool,
+         conditions: Conditions, requestedRatesHz: [String: Double], recovered: Bool,
          recoveredAtUtc: String?, syntheticSensors: Bool, folderName: String, deviceId: String,
          preflight: Preflight?, stats: Stats?) {
         self.sessionId = sessionId; self.appVersion = appVersion; self.device = device; self.timezone = timezone
         self.startedAtUtc = startedAtUtc; self.startUptimeSec = startUptimeSec; self.endedAtUtc = endedAtUtc
         self.vehicle = vehicle; self.mount = mount; self.people = people; self.conditions = conditions
-        self.audioEnabled = audioEnabled; self.requestedRatesHz = requestedRatesHz; self.recovered = recovered
+        self.requestedRatesHz = requestedRatesHz; self.recovered = recovered
         self.recoveredAtUtc = recoveredAtUtc; self.syntheticSensors = syntheticSensors; self.folderName = folderName
         self.deviceId = deviceId; self.preflight = preflight; self.stats = stats
     }
 
     static let requestedRates: [String: Double] = [
-        "deviceMotion": 100, "accel": 100, "gyro": 100, "mag": 50, "audioLevel": 10,
+        "deviceMotion": 100, "accel": 100, "gyro": 100, "mag": 50,
     ]
 
     func jsonData() throws -> Data {
@@ -275,17 +272,13 @@ struct SessionMetadata: Codable, Equatable {
 /// The parts of the metadata the operator fills in on the setup screen.
 struct SessionSetup: Equatable {
     var vehicle = SessionMetadata.Vehicle()
-    /// Record microphone audio to file. Defaults to off for bus/tram (spec §3.5).
-    var audioEnabled = true
     var mount = SessionMetadata.Mount()
     var people = SessionMetadata.People()
     var conditions = SessionMetadata.Conditions()
     var mountPhotoJPEG: Data?
 
-    /// Spec §3.5/§3.8: audio defaults to OFF on public transport (GDPR) and ON otherwise; the line
-    /// number only applies to bus/tram. Called when the operator changes the vehicle type.
+    /// The line number only applies to bus/tram (spec §3.8). Called when the vehicle type changes.
     mutating func applyVehicleTypeDefaults() {
-        audioEnabled = !vehicle.isPublicTransport
         if !vehicle.isPublicTransport { vehicle.line = nil }
     }
 }

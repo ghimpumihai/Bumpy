@@ -34,8 +34,10 @@ _BAD_CHARS = re.compile(r"[\x00\ud800-\udfff]")
 SESSION_ID_RE = re.compile(r"^[A-Za-z0-9_-]{1,128}$")
 
 REQUIRED_KEYS = ["schemaVersion", "sessionId", "deviceId", "batchSeq", "t0Utc", "t0Up", "units",
-                 "deviceMotion", "accelRaw", "gyroRaw", "location", "altimeter", "audioLevel",
+                 "deviceMotion", "accelRaw", "gyroRaw", "location", "altimeter",
                  "labels", "device"]
+# No audio since D48. App builds before it may still send `audioLevel` (batch) and `audioEnabled`
+# (session.json): accepted like any other extra key and never read, so those phones keep uploading.
 EXPECTED_UNITS = {"accel": "g", "gyro": "rad/s", "speed": "m/s", "pressure": "kPa"}
 COLUMNAR = {
     "deviceMotion": ["ua_x", "ua_y", "ua_z", "g_x", "g_y", "g_z", "rr_x", "rr_y", "rr_z",
@@ -43,7 +45,6 @@ COLUMNAR = {
     "accelRaw": ["x", "y", "z"],
     "gyroRaw": ["x", "y", "z"],
     "altimeter": ["relAltM", "pressureKpa"],
-    "audioLevel": ["avgDbfs", "peakDbfs"],
 }
 LOCATION_KEYS = ["lat", "lon", "alt", "hAcc", "speed", "speedAcc", "course"]
 # Additive full-dataset blocks (02 D32): optional, validated when present.
@@ -205,8 +206,9 @@ def validate_batch(b) -> None:
         raise Invalid(f"t0Utc is not a valid date/time: {b['t0Utc']!r}")
     if not is_num(b["t0Up"]):
         raise Invalid("t0Up must be a finite number")
-    if b["units"] != EXPECTED_UNITS:
-        raise Invalid(f"units must be {json.dumps(EXPECTED_UNITS)}, got {json.dumps(b['units'])}")
+    # The four units the backend relies on must match; extra keys are allowed (spec §6.2: no fixed literal).
+    if not isinstance(b["units"], dict) or any(b["units"].get(k) != v for k, v in EXPECTED_UNITS.items()):
+        raise Invalid(f"units must include {json.dumps(EXPECTED_UNITS)}, got {json.dumps(b['units'])}")
     for k in ("eventType", "source"):
         if k in b and (not isinstance(b[k], str) or not b[k]):
             raise Invalid(f"{k} must be a non-empty string when present")
@@ -334,8 +336,6 @@ def validate_session_meta(m, path_id: str) -> str:
     for k in ("vehicle", "mount", "people"):
         if not isinstance(m.get(k), dict):
             raise Invalid(f"{k} must be an object")
-    if "audioEnabled" in m and not isinstance(m["audioEnabled"], bool):
-        raise Invalid("audioEnabled must be true/false when present")
     if "batchCount" in m:
         if not is_int(m["batchCount"]) or m["batchCount"] < 0:
             raise Invalid(f"batchCount must be a non-negative integer, got {m['batchCount']!r}")

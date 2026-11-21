@@ -1,60 +1,62 @@
+import type { FeatureCollection, Point } from "geojson";
 import type { MapGeoJSONFeature } from "maplibre-gl";
+import { useMemo } from "react";
 
 import { GeoJsonLayer, type SourceLayer } from "@/components/map/geojson-layer";
 import { useThemeColors } from "@/hooks/use-theme-colors";
-import type { MetricScale } from "@/types/map";
 import type { SegmentCollection } from "@/types/segments";
-import { stepColorExpression } from "@/utils/scale";
 
 import {
-  CONFIRMED_OUTLINE_WIDTH_PX,
-  CONFIRMED_POTHOLE_LAYER_ID,
-  SEGMENT_FILL_LAYER_ID,
-  SEGMENT_FILL_OPACITY,
+  SEGMENT_HIT_LAYER_ID,
+  SEGMENT_HIT_RADIUS_PX,
   SEGMENT_INTERACTIVE_LAYERS,
-  SEGMENT_OUTLINE_LAYER_ID,
-  SEGMENT_OUTLINE_OPACITY,
-  SEGMENT_OUTLINE_WIDTH_PX,
   SEGMENTS_SOURCE_ID,
   SELECTED_OUTLINE_WIDTH_PX,
   SELECTED_SEGMENT_LAYER_ID,
 } from "../utils/constants";
 
-const COLOR_VARS = ["--scale-1", "--scale-2", "--scale-3", "--scale-4", "--scale-5", "--scale-none", "--event-pothole", "--foreground", "--card"] as const;
+const COLOR_VARS = ["--foreground"] as const;
 
 interface SegmentsLayerProps {
   data: SegmentCollection;
   /** Draw below this layer (the event dots), whatever order the requests finish in. */
   beforeId?: string;
-  scale: MetricScale;
   selectedH3: string | undefined;
   onSelect: (h3: string) => void;
 }
 
-export function SegmentsLayer({ data, beforeId, scale, selectedH3, onSelect }: SegmentsLayerProps) {
+/** One point per road segment, only for clicking and selecting: the cells themselves are never drawn. */
+function centroids(data: SegmentCollection): FeatureCollection<Point, { h3: string; nSessions: number }> {
+  return {
+    type: "FeatureCollection",
+    features: data.features.map((feature) => {
+      const ring = feature.geometry.coordinates[0];
+      const lon = ring.reduce((sum, p) => sum + p[0], 0) / ring.length;
+      const lat = ring.reduce((sum, p) => sum + p[1], 0) / ring.length;
+      return {
+        type: "Feature",
+        geometry: { type: "Point", coordinates: [lon, lat] },
+        properties: { h3: feature.properties.h3, nSessions: feature.properties.nSessions },
+      };
+    }),
+  };
+}
+
+export function SegmentsLayer({ data, beforeId, selectedH3, onSelect }: SegmentsLayerProps) {
   const colors = useThemeColors(COLOR_VARS);
-  const bandColors = scale.bands.map((band) => colors[band.colorVar as (typeof COLOR_VARS)[number]]);
+  const points = useMemo(() => centroids(data), [data]);
   const layers: SourceLayer[] = [
     {
-      id: SEGMENT_FILL_LAYER_ID,
-      type: "fill",
-      paint: {
-        "fill-color": stepColorExpression(scale.property, scale.bands, bandColors, colors["--scale-none"]) as never,
-        "fill-opacity": SEGMENT_FILL_OPACITY,
-      },
-    },
-    { id: SEGMENT_OUTLINE_LAYER_ID, type: "line", paint: { "line-color": colors["--card"], "line-width": SEGMENT_OUTLINE_WIDTH_PX, "line-opacity": SEGMENT_OUTLINE_OPACITY } },
-    {
-      id: CONFIRMED_POTHOLE_LAYER_ID,
-      type: "line",
-      filter: ["==", ["get", "potholeConfirmed"], true],
-      paint: { "line-color": colors["--event-pothole"], "line-width": CONFIRMED_OUTLINE_WIDTH_PX },
+      id: SEGMENT_HIT_LAYER_ID,
+      type: "circle",
+      // Not exactly 0: a fully transparent circle is skipped by MapLibre and can no longer be clicked.
+      paint: { "circle-radius": SEGMENT_HIT_RADIUS_PX, "circle-opacity": 0.01 },
     },
     {
       id: SELECTED_SEGMENT_LAYER_ID,
-      type: "line",
+      type: "circle",
       filter: ["==", ["get", "h3"], selectedH3 ?? ""],
-      paint: { "line-color": colors["--foreground"], "line-width": SELECTED_OUTLINE_WIDTH_PX },
+      paint: { "circle-radius": SEGMENT_HIT_RADIUS_PX, "circle-opacity": 0, "circle-stroke-color": colors["--foreground"], "circle-stroke-width": SELECTED_OUTLINE_WIDTH_PX },
     },
   ];
 
@@ -64,13 +66,15 @@ export function SegmentsLayer({ data, beforeId, scale, selectedH3, onSelect }: S
   };
 
   return (
-    <GeoJsonLayer
+    <>
+      <GeoJsonLayer
       id={SEGMENTS_SOURCE_ID}
-      data={data}
+      data={points}
       layers={layers}
       beforeId={beforeId}
       interactiveLayerIds={SEGMENT_INTERACTIVE_LAYERS}
       onFeatureClick={handleClick}
     />
+    </>
   );
 }

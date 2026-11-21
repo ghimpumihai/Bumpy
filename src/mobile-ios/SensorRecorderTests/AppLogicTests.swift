@@ -1,39 +1,6 @@
 import XCTest
 @testable import SensorRecorder
 
-final class SicknessSchedulerTests: XCTestCase {
-    func testPromptsEveryIntervalAndAutoDismisses() {
-        var s = SicknessScheduler(start: 0, interval: 120, timeout: 30)
-        XCTAssertNil(s.tick(now: 119.9))
-        XCTAssertEqual(s.tick(now: 120), .prompt)
-        XCTAssertTrue(s.isPromptActive)
-        XCTAssertEqual(s.remaining(now: 130) ?? -1, 20, accuracy: 1e-9)
-        XCTAssertNil(s.tick(now: 149.9))
-        XCTAssertEqual(s.tick(now: 150), .missed)
-        XCTAssertFalse(s.isPromptActive)
-        XCTAssertNil(s.tick(now: 200))
-        XCTAssertEqual(s.tick(now: 240), .prompt) // fixed cadence from start
-        s.answered()
-        XCTAssertFalse(s.isPromptActive)
-        XCTAssertNil(s.tick(now: 260))
-        XCTAssertEqual(s.tick(now: 360), .prompt)
-    }
-
-    func testManualAnswerDoesNotShiftCadence() {
-        var s = SicknessScheduler(start: 0, interval: 120, timeout: 30)
-        s.answered() // manual rating at t=50
-        XCTAssertEqual(s.tick(now: 120), .prompt)
-    }
-
-    func testLongSuspensionDoesNotBurst() {
-        var s = SicknessScheduler(start: 0, interval: 120, timeout: 30)
-        XCTAssertEqual(s.tick(now: 1000), .prompt)
-        XCTAssertEqual(s.nextPromptAt, 1120)
-        XCTAssertEqual(s.tick(now: 1030), .missed)
-        XCTAssertNil(s.tick(now: 1031))
-    }
-}
-
 final class MotionTestAnalysisTests: XCTestCase {
     func testRatesAndStillness() {
         var accel: [Vec3Sample] = []
@@ -55,22 +22,6 @@ final class MotionTestAnalysisTests: XCTestCase {
     }
 }
 
-final class MapSegmentTests: XCTestCase {
-    func testSegmentsSplitBySpeedBucketAndShareBoundary() {
-        let pts: [TrackBuffer.Point] = [
-            .init(lat: 0, lon: 0, speed: 5),   // 18 km/h
-            .init(lat: 0, lon: 1, speed: 5),
-            .init(lat: 0, lon: 2, speed: 20),  // 72 km/h
-            .init(lat: 0, lon: 3, speed: 20),
-        ]
-        let segs = TrackMapView.segments(pts)
-        XCTAssertEqual(segs.count, 2)
-        XCTAssertEqual(segs[0].coords.map(\.longitude), [0, 1, 2])
-        XCTAssertEqual(segs[1].coords.map(\.longitude), [2, 3])
-        XCTAssertTrue(TrackMapView.segments([pts[0]]).isEmpty)
-    }
-}
-
 final class ExportTests: XCTestCase {
     func testFolderZipProducesZipArchive() throws {
         let dir = try makeTempDir().appendingPathComponent("2026-11-21T09-12-03Z_abcd")
@@ -85,12 +36,12 @@ final class ExportTests: XCTestCase {
     }
 }
 
-// MARK: - Recording lifecycle, late log lines, export state, audio recovery
+// MARK: - Recording lifecycle, late log lines, export state
 
-/// A started session with fakes only (no upload, no audio); stop it with `stopOnMain`.
+/// A started session with fakes only (no upload); stop it with `stopOnMain`.
 private func makeRunningSession(root: URL, clock: ClockSource = SystemClock()) throws -> RecordingSession {
     let deps = RecordingSession.Dependencies(
-        motion: SyntheticMotionSource(), location: nil, altimeter: nil, activity: nil, audio: nil,
+        motion: SyntheticMotionSource(), location: nil, altimeter: nil, activity: nil,
         deviceStatus: FakeDeviceStatus(), uploadQueue: nil, clock: clock, deviceId: "D", appVersion: "t",
         deviceInfo: .init(model: "x", name: "x", iosVersion: "x"))
     let session = try RecordingSession(store: SessionStore(root: root), setup: SessionSetup(), preflight: nil, deps: deps)
@@ -230,57 +181,5 @@ final class ExportStateTests: XCTestCase {
         XCTAssertTrue(FileManager.default.fileExists(atPath: legacy.appendingPathComponent("keep.txt").path))
         XCTAssertTrue(FileManager.default.fileExists(atPath: session.path), "never touches session data")
         FolderZipper.removeExport(zip) // already gone: no throw, no crash
-    }
-}
-
-final class AudioRecoveryPolicyTests: XCTestCase {
-    private func decide(now: Double, rec: Bool = false, blocked: Bool = false, last: Double = 0,
-                        seg: Double = 0, lastRotate: Double = -.infinity) -> AudioSegmentPolicy.Action {
-        AudioSegmentPolicy.decide(now: now, isRecording: rec, segmentStartedUp: seg, wantRecording: true,
-                                  interrupted: false, interruptedAtUp: 0, lastRestartAttemptUp: last,
-                                  backgroundBlocked: blocked, lastRotateAttemptUp: lastRotate)
-    }
-
-    func testBlockedInBackgroundStopsHammering() {
-        XCTAssertEqual(decide(now: 106, last: 100), .restart, "normal cadence: every 5 s")
-        XCTAssertEqual(decide(now: 106, blocked: true, last: 100), .none, "refused in background: slow down")
-        XCTAssertEqual(decide(now: 159, blocked: true, last: 100), .none)
-        XCTAssertEqual(decide(now: 161, blocked: true, last: 100), .restart)
-    }
-
-    func testFailedRotationIsRetriedLaterNotEveryTick() {
-        XCTAssertEqual(decide(now: 300, rec: true), .rotate)
-        XCTAssertEqual(decide(now: 300.1, rec: true, lastRotate: 300), .none, "keeps the running segment")
-        XCTAssertEqual(decide(now: 310, rec: true, lastRotate: 300), .rotate)
-    }
-}
-
-final class CaptureClockTests: XCTestCase {
-    func testBufferIsStampedWithItsCaptureTime() {
-        // Host clock and uptime have different epochs; only the buffer's age matters.
-        let t = CaptureClock.bufferStartUp(bufferHostSec: 5_000.000, nowHostSec: 5_000.045, nowUp: 1_000, bufferDuration: 0.021)
-        XCTAssertEqual(t, 999.955, accuracy: 1e-9, "processed 45 ms after capture")
-    }
-
-    func testInvalidHostTimeFallsBackToBufferEndingNow() {
-        XCTAssertEqual(CaptureClock.bufferStartUp(bufferHostSec: nil, nowHostSec: 1, nowUp: 1_000, bufferDuration: 0.02), 999.98,
-                       accuracy: 1e-9)
-        XCTAssertEqual(CaptureClock.bufferStartUp(bufferHostSec: 10, nowHostSec: 5, nowUp: 1_000, bufferDuration: 0.02), 999.98,
-                       accuracy: 1e-9, "future host time")
-        XCTAssertEqual(CaptureClock.bufferStartUp(bufferHostSec: 0, nowHostSec: 500, nowUp: 1_000, bufferDuration: 0.02), 999.98,
-                       accuracy: 1e-9, "implausibly old")
-    }
-
-    func testWindowsInsideOneBufferGetTheirOwnTimes() {
-        var acc = LevelAccumulator(windowSeconds: 0.1)
-        let fs = 1_000.0
-        let w = acc.add(samples: [Float](repeating: 0.5, count: 250), sampleRate: fs, startUp: 10)
-        XCTAssertEqual(w.count, 2)
-        XCTAssertEqual(w[0].t, 10.1, accuracy: 1e-9, "not both stamped with the processing time")
-        XCTAssertEqual(w[1].t, 10.2, accuracy: 1e-9)
-        // The partial third window continues in the next buffer.
-        let next = acc.add(samples: [Float](repeating: 0.5, count: 50), sampleRate: fs, startUp: 10.25)
-        XCTAssertEqual(next.count, 1)
-        XCTAssertEqual(next[0].t, 10.3, accuracy: 1e-9)
     }
 }

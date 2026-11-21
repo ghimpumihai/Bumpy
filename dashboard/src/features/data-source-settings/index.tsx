@@ -1,9 +1,8 @@
 import { zodResolver } from "@hookform/resolvers/zod";
-import { Database, FlaskConical, RotateCcw } from "lucide-react";
+import { RotateCcw, Settings } from "lucide-react";
 import { useState } from "react";
 import { Controller, useForm, useWatch } from "react-hook-form";
 
-import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle, DialogTrigger } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
@@ -22,10 +21,12 @@ const MODE_LABELS: Record<DataSourceMode, string> = {
 
 interface DataSourceSettingsProps {
   dataSource: DataSource;
+  /** A round icon button (the desktop dock) instead of a full-width menu row. */
+  iconOnly?: boolean;
 }
 
 /** Shows where data comes from and lets a teammate point this browser at another read API. */
-export function DataSourceSettings({ dataSource }: DataSourceSettingsProps) {
+export function DataSourceSettings({ dataSource, iconOnly = false }: DataSourceSettingsProps) {
   const [open, setOpen] = useState(false);
   const saved = readDataSourceOverride();
   const form = useForm<DataSourceFormInput, unknown, DataSourceFormValues>({
@@ -40,18 +41,13 @@ export function DataSourceSettings({ dataSource }: DataSourceSettingsProps) {
   return (
     <Dialog open={open} onOpenChange={setOpen}>
       <DialogTrigger asChild>
-        <Button variant="ghost" size="sm" aria-label={`${dataSource.kind === "mock" ? "Mock data" : "Read API"}: data source settings`}>
-          {dataSource.kind === "mock" ? (
-            <Badge variant="highlight">
-              <FlaskConical aria-hidden="true" />
-              Mock data
-            </Badge>
-          ) : (
-            <Badge variant="success">
-              <Database aria-hidden="true" />
-              Read API
-            </Badge>
-          )}
+        <Button
+          variant="ghost"
+          size={iconOnly ? "icon-sm" : "default"}
+          className={iconOnly ? "rounded-full text-muted-foreground" : "w-full justify-start gap-3 px-3 text-muted-foreground"}
+          aria-label={`${dataSource.kind === "mock" ? "Mock data" : "Read API"}: data source settings`}>
+          <Settings aria-hidden="true" />
+          {!iconOnly && "Data source"}
         </Button>
       </DialogTrigger>
       <DialogContent>

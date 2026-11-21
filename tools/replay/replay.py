@@ -47,6 +47,7 @@ from pathlib import Path
 from typing import Callable, Iterator
 
 BATCH_SEC = 2.0  # the app's batch window (spec §6)
+STALE_FIX_MARGIN_S = 5.0  # RecordingSession.staleFixMargin: fixes kept before the start
 MAX_INFLATED = 200 * 1024  # the ingest function's limit on a decompressed body
 UNITS = {"accel": "g", "gyro": "rad/s", "speed": "m/s", "pressure": "kPa"}
 FIELD_UNITS = {  # IngestBatch.allFieldUnits
@@ -57,7 +58,6 @@ FIELD_UNITS = {  # IngestBatch.allFieldUnits
     "location.alt": "m", "location.hAcc": "m", "location.speed": "m/s (-1 = invalid)",
     "location.speedAcc": "m/s", "location.course": "deg (-1 = invalid)",
     "altimeter.relAltM": "m", "altimeter.pressureKpa": "kPa",
-    "audioLevel.avgDbfs": "dBFS", "audioLevel.peakDbfs": "dBFS",
     "device.battery": "fraction 0-1 (-1 = unknown)",
 }
 
@@ -69,7 +69,6 @@ COLUMNAR = {
     "accelRaw": ("accel_raw", [("x", "x"), ("y", "y"), ("z", "z")]),
     "gyroRaw": ("gyro_raw", [("x", "x"), ("y", "y"), ("z", "z")]),
     "altimeter": ("altimeter", [("relAltM", "rel_alt_m"), ("pressureKpa", "pressure_kpa")]),
-    "audioLevel": ("audio_level", [("avgDbfs", "avg_dbfs"), ("peakDbfs", "peak_dbfs")]),
 }
 LOCATION_COLS = [("lat", "lat", 8), ("lon", "lon", 8), ("alt", "alt", 6), ("hAcc", "h_acc", 6),
                  ("speed", "speed", 6), ("speedAcc", "speed_acc", 6), ("course", "course", 6)]
@@ -235,10 +234,15 @@ class BatchBuilder:
                         for name in [f for f, _ in COLUMNAR.values()] + ["location", "labels", "device"]}
         self._utc_offset: float | None = None  # utc_ms - t_up * 1000, from the latest row seen
         self._device = {"battery": -1.0, "thermal": "nominal", "lowPower": False}
-        # Skip everything before the first window (and use it for the clock and device status).
-        for s in self.streams.values():
+        # Skip everything before the first window (and use it for the clock and device status), except
+        # the fixes of the last STALE_FIX_MARGIN_S: the app sends those in batch 0 (iOS's cached first
+        # fix, kept up to RecordingSession.staleFixMargin before the start).
+        self._early_fixes: list[Row] = []
+        for name, s in self.streams.items():
             for r in s.take_before(plan.start_up):
                 self._note(r)
+                if name == "location" and r.t_up >= plan.start_up - STALE_FIX_MARGIN_S:
+                    self._early_fixes.append(r)
 
     def close(self) -> None:
         for s in self.streams.values():
@@ -269,6 +273,8 @@ class BatchBuilder:
         offset = (first.utc_ms - first.t_up * 1000.0) if first else self._utc_offset
         if offset is None:
             raise ReplayError("no t_utc_ms in any stream: cannot place the trip in time")
+        if seq == 0:
+            rows["location"] = self._early_fixes + rows["location"]
         for rs in rows.values():
             for r in rs:
                 self._note(r)

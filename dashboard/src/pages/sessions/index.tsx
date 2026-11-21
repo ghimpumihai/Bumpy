@@ -9,10 +9,7 @@ export function SessionsPage() {
       <Helmet>
         <title>Sessions · Road &amp; Ride</title>
       </Helmet>
-      <PageWrapper
-        title="Sessions"
-        description="Every trip. Trips are streamed from the phone while driving and count in the aggregated map once they are finalized; laptop uploads are the fallback for trips that never reached the cloud, and replays never count."
-      >
+      <PageWrapper title="Sessions">
         <SessionsView />
       </PageWrapper>
     </>

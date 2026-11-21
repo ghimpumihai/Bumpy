@@ -9,11 +9,11 @@ import pytest
 from roadride import aggregate as agg
 
 
-def _obs(sid, cell, vehicle, speed, rough, *, potholes=0, aw=0.3, dur=2.0, ok=True, seat="front",
-         posture="seated"):
+def _obs(sid, cell, vehicle, speed, rough, *, potholes=0, aw=0.3, dur=2.0, ok=True, sick=None, seat="front",
+         posture="seated", sick_s=None, sick_aw=None):
     return agg.Obs(session_id=sid, h3=cell, vehicle=vehicle, duration_s=dur, speed=speed, roughness=rough,
-                   aw_rms=aw, pothole_count=potholes, roughness_eligible=ok, sickness_eligible=ok,
-                   rater_seat=seat, rater_posture=posture)
+                   aw_rms=aw, pothole_count=potholes, roughness_eligible=ok, sickness_eligible=ok if sick is None else sick,
+                   rater_seat=seat, rater_posture=posture, sickness_s=sick_s, sickness_aw_rms=sick_aw)
 
 
 def _world(beta=0.6, bus=0.4, n_cells=40, seed=2):
@@ -41,6 +41,45 @@ def test_fit_recovers_beta_and_vehicle_effect():
     assert len(rows) == 40 and all(a["roughness_method"] == "model" and a["roughness"] > 0 for a in rows)
 
 
+def test_a_vehicle_the_fit_cant_identify_doesnt_switch_the_model_off():
+    """A vehicle type that never shares a multi-pass segment with the others (a lone bike, or
+    `unknown` from a session.json without a vehicle type) has no identifiable effect. It is left out
+    of the fit, which stays the same for the others; its cells get no car-equivalent roughness."""
+    base = agg.compute(_world())
+    lone = [_obs("bike1", f"b{i}", "bike", 8, 2.0) for i in range(3)]  # single-pass cells
+    lone += [_obs("unk1", "u1", "unknown", 8, 2.0), _obs("unk1", "u1", "unknown", 12, 2.5)]  # its own loop
+    result = agg.compute(_world() + lone)
+    assert result.method == "model"
+    assert result.fit.beta == pytest.approx(base.fit.beta, abs=1e-12)
+    assert result.fit.effects == pytest.approx(base.fit.effects, abs=1e-12)
+    assert "bike" not in result.fit.effects and "unknown" not in result.fit.effects
+    u1 = next(a for a in result.aggs if a["h3"] == "u1" and a["vehicle_type"] == "all")
+    assert u1["roughness"] is None and u1["roughness_method"] == "percentile" and u1["roughness_pctl"] is not None
+
+
+def test_without_cars_overlapping_there_is_no_car_equivalent():
+    # Buses and trams only: their effects relative to a car are undefined, so the fallback stays.
+    rows = [_obs(o.session_id, o.h3, "tram" if o.vehicle == "car" else o.vehicle, o.speed, o.roughness)
+            for o in _world()]
+    result = agg.compute(rows)
+    assert result.method == "percentile" and result.fit is None
+
+
+def test_sickness_counts_moving_valid_time_only():
+    """Plan §10: bus stops and idling are separated using speed near zero. A bus standing 300 s at a
+    stop used to pull the cell from 0.40 to 0.12 m/s²."""
+    rows = [_obs(f"car{i}", "c1", "car", 10, 1.0, aw=0.40, dur=3.0, sick_s=3.0, sick_aw=0.40) for i in range(9)]
+    rows.append(_obs("bus1", "c1", "bus", 0.0, None, aw=0.03, dur=300.0, sick_s=0.0, sick_aw=None))
+    result = agg.compute(rows)
+    every = next(a for a in result.aggs if a["vehicle_type"] == "all")
+    assert every["sickness_aw_rms"] == pytest.approx(0.40)
+    assert every["msi_1h_pct"] == pytest.approx(0.40 * 60 / 3)
+    assert every["sickness_sessions"] == 9  # the standing bus contributed no moving time
+    bus = next(a for a in result.aggs if a["vehicle_type"] == "bus")
+    assert bus["sickness_aw_rms"] is None and bus["msi_1h_pct"] is None and bus["sickness_sessions"] == 0
+    assert {s["vehicle_type"] for s in result.sickness} == {"car"}
+
+
 def test_too_little_overlap_falls_back_to_percentiles():
     rows = [_obs("a", "c1", "car", 10, 1.0), _obs("a", "c2", "car", 10, 2.0), _obs("b", "c1", "bus", 10, 1.5)]
     result = agg.compute(rows)
@@ -66,15 +105,17 @@ def test_potholes_are_crowd_confirmed_per_vehicle_type():
 
 
 def test_sickness_is_duration_weighted_and_split_by_seat():
+    # Observations finalized before sickness_s existed: weighted by their whole duration.
     rows = [_obs("a", "c1", "bus", 10, 1.0, aw=0.2, dur=1.0, seat="front"),
             _obs("b", "c1", "bus", 10, 1.0, aw=0.4, dur=3.0, seat="rear", posture="standing"),
-            _obs("c", "c1", "bus", 10, 1.0, aw=9.0, dur=3.0, ok=False)]  # experimental: left out
+            _obs("c", "c1", "bus", 10, 1.0, aw=0.6, dur=2.0, ok=False, sick=True),  # hand-held: counts (D41)
+            _obs("d", "c1", "bus", 10, 1.0, aw=9.0, dur=3.0, ok=False, sick=False)]  # unknown context: left out
     result = agg.compute(rows)
     bus = next(a for a in result.aggs if a["vehicle_type"] == "bus")
-    expected = math.sqrt((0.2 ** 2 * 1 + 0.4 ** 2 * 3) / 4)
+    expected = math.sqrt((0.2 ** 2 * 1 + 0.4 ** 2 * 3 + 0.6 ** 2 * 2) / 6)
     assert bus["sickness_aw_rms"] == pytest.approx(expected)
     assert bus["msi_1h_pct"] == pytest.approx(expected * 60 / 3)
-    assert bus["sickness_sessions"] == 2
+    assert bus["sickness_sessions"] == 3
     assert {(s["rater_seat"], s["rater_posture"]) for s in result.sickness} == {("front", "seated"), ("rear", "standing")}
 
 
@@ -99,3 +140,12 @@ def test_hexagon_is_a_closed_ring_around_the_center():
     coords = polygon.removeprefix("POLYGON((").removesuffix("))").split(", ")
     assert coords[0] == coords[-1] and len(coords) == 7
     assert point.startswith("POINT(23.6") and " 46.7" in point
+
+
+def test_percentile_ranks_average_ties_and_skip_idle_passes():
+    """Equal roughness got arbitrary ranks (0, 0.5, 1), and idle passes that never count were ranked
+    and shifted the moving ones."""
+    rows = [_obs("s", "a", "car", 10, 0.5), _obs("s", "b", "car", 10, 0.5), _obs("s", "c", "car", 10, 0.5),
+            _obs("s", "d", "car", 10, 0.9), _obs("s", "e", "car", 0.5, 0.1)]  # the last one is idle
+    agg._percent_ranks(rows)
+    assert [r.percentile for r in rows] == [pytest.approx(1 / 3)] * 3 + [1.0, None]

@@ -239,9 +239,9 @@ The dashboard is already built (`dashboard/`, React + MapLibre + uPlot) and runs
 
 | Page | What you see | Fed by |
 |---|---|---|
-| **Live** (the main screen) | Each vehicle that sent data in the last 60 s moves on the map with its last ~2 minutes of track; speed, current roughness, motion-sickness dose so far, the passenger's latest MISC rating, and how fresh the data is. Polled every 2 s. | stream processor (`live_state`) |
+| **Live** (the main screen) | Each vehicle that sent data in the last 60 s moves on the map with its last ~2 minutes of track; speed, current roughness, motion-sickness dose so far, and how fresh the data is. Polled every 2 s. | stream processor (`live_state`) |
 | **Map** | All finished trips combined: H3 hexagons coloured by normalized roughness or sickness score, filtered by vehicle type; confirmed potholes; a panel per segment. | finalize job + aggregation |
-| **Sessions** / **Session** | The list of trips, and one trip: acceleration, speed and sickness dose over time with the MISC ratings, its track and events on the map, detection scores. | processor while live, finalize job after |
+| **Sessions** / **Session** | The list of trips, and one trip: acceleration, speed and sickness dose over time, its track and events on the map, detection scores. | processor while live, finalize job after |
 | **Quality** | The data-quality panel for every trip (§10). | processor + finalize job |
 | **Method** | How the numbers are computed, including the fitted vehicle effects and β. | aggregation |
 
@@ -364,7 +364,7 @@ If the project ever grows to thousands of vehicles, the design moves to Kafka cl
 | `segments` | road piece | H3 cell ID, geometry |
 | `segment_observations` | session × segment × pass | speed, raw roughness, MSDV contribution, sample count, quality flags |
 | `events` | detected pothole or speed bump | position, time, type, confidence, session |
-| `labels` | manual tap or rating | type, value, time (from the app's `labels.csv`) |
+| `labels` | manual tap | type, value, time (from the app's `labels.csv`; MISC ratings from older app builds are stored but never shown, D47) |
 | `session_series` | downsampled chart data | about 5 Hz vertical and lateral acceleration, speed, MSDV so far |
 | `live_state` | device | last position, speed, current scores (for the live view) |
 | `segment_agg` | segment × vehicle type | normalized roughness, pothole confirmation ratio, sickness score, number of sessions; rebuilt by the aggregation step |
@@ -385,19 +385,21 @@ Raw values are always stored as measured; normalization happens only in the aggr
 3. **Quality checks.** Measure sample rates and gaps. Mark windows invalid when `phone_moved` was tapped, when gravity drifts in the phone's frame, or when the gyro's turn rate disagrees with GPS. Report what fraction of the session is valid.
 4. **Road roughness.** Band-pass vertical acceleration (about 1 to 30 Hz), compute RMS per segment pass, and record speed with it.
 5. **Potholes and speed bumps.**
-   - A pothole is a sharp jump in high-passed vertical acceleration, counted only above 15 km/h.
+   - A pothole is a sharp jump in band-passed (1–30 Hz) vertical acceleration, counted only above 15 km/h.
    - A speed bump shows a double peak in pitch rate (front axle, then rear axle).
    - Detections are scored against manual taps within ±1.5 s, since people react late, as precision and recall.
 6. **Motion sickness.**
    - Vertical acceleration through the ISO 2631-1 Wf filter (f1 0.08, f2 0.63, f4 0.25 with Q 0.86, f5 0.0625 with Q 0.80, f6 0.1 with Q 0.80 Hz), then MSDV = √(∫a_w² dt). Roughly MSDV/3 percent of unadapted people may vomit.
-   - The prediction is compared against the passengers' MISC ratings.
+   - The sickness number comes from the measured motion only. Passengers are not asked how they feel, so there is no comparison with ratings (D47, §19).
    - The filter has a unit test checking its frequency response against reference values.
-   - Known limit, to state openly: the ISO metric only covers up-and-down motion, while in cars sideways sway is likely a strong cause of sickness. A sideways metric was considered and dropped (§19).
+   - Side-to-side sway (D49, 2026-11-21): lateral acceleration goes through the Donohew & Griffin (2004) lateral weighting (flat 0.0315–0.25 Hz, then −12 dB per octave), and its dose is added to the vertical one as energy: MSDV = √(∫(a_wz² + a_wy²) dt) = √(MSDV_z² + MSDV_y²), the root sum of squares ISO 2631-1 uses to combine axes for comfort and health (for sickness it covers vertical motion only), with k_y = 1. The combined value is the one shown everywhere and divided by 3 for the MSI; the vertical and lateral parts are stored too.
+   - How Wy is built (D50, 2026-11-21): the paper gives only the straight-line weighting. Butterworth corners at 0.0315 and 0.25 Hz read 3 dB (29 %) low at both edges of the flat band, the 0.25 Hz break included, where much of a car's sway sits. D50 keeps the band-limiting high-pass below the paper's range (0.0172 Hz) and puts a second-order low-pass at the 0.25 Hz break with its Q fitted (0.91, minimax) to the straight line: the realized gain stays within ±0.8 dB of it from 0.0315 to 0.8 Hz, inside the ±1 dB tolerance ISO 2631-1 gives its own weightings.
+   - Known limits, to state openly: the lateral weighting isn't part of ISO 2631-1 and its exact coefficients weren't published (the corners and k_y are provisional), the MSDV/3 rule was fitted to vertical motion (ISO 2631-1 gives it for exposures of 20 minutes to 6 hours), the paper's weighting may not apply where roll comes with the lateral motion, as in a car, lateral is only counted once the forward axis has been learned from GPS speed changes, and in long curves a tilted gravity estimate (D46) adds an error of about θ·g to the horizontal acceleration the lateral dose is built from.
 
 **Across sessions** (the aggregation step). It runs at the end of every finalize job, and can be re-run by hand with the **aggregate** job (for example after changing the method). It takes a PostgreSQL advisory lock, so two runs never overlap, and rebuilds `segment_agg` in one transaction.
-- **Roughness is normalized per vehicle.** A bus and a car feel the same road differently. We fit one model across all observations: `log(roughness) = road segment effect + vehicle effect + β·log(speed)`. Segments driven by several vehicles tie the vehicle effects together. If there is too little overlap, the fallback is per-session percentiles.
+- **Roughness is normalized per vehicle.** A bus and a car feel the same road differently. We fit one model across all observations: `log(roughness) = road segment effect + vehicle effect + β·log(speed)`. Segments driven by several vehicles tie the vehicle effects together. A vehicle type that shares no segment with the car (directly or through other vehicles) can't be tied to it: it is left out of the fit and its segments show their percentile (D45). If there is too little overlap, the fallback is per-session percentiles.
 - **Potholes are crowd-confirmed.** A pothole counts as confirmed when it was detected in at least *k* of *n* passes over that segment, with thresholds set per vehicle type.
-- **Sickness is not normalized.** It measures what passengers actually feel, so "the bus is worse than the car on this route" is a finding, not an error. Results are split by seat and by seated or standing.
+- **Sickness is not normalized.** It measures what passengers actually feel, so "the bus is worse than the car on this route" is a finding, not an error. Results are split by seat and by seated or standing. Per segment it counts only moving, valid time (speed ≥ 1 m/s, phone not handled), so a bus standing at a stop doesn't dilute it (D45).
 
 **Plan the trips for overlap.** Crowd confirmation only works if the same streets are driven several times. Pick one fixed loop that shares streets with a bus or tram line, and drive it several times, including at two different speeds.
 
@@ -405,10 +407,10 @@ Raw values are always stored as measured; normalization happens only in the aggr
 
 ## 10. Data quality and session rules
 
-- **A rigid mount is required for roughness.** Tape or clamp the phone; run the stillness preflight. Sessions with `mount.rigid = false` or `handheld = true` are excluded from roughness and marked "experimental" for sickness.
+- **A rigid mount is required for roughness.** Tape or clamp the phone; run the stillness preflight. Sessions with `mount.rigid = false` or `handheld = true` are excluded from roughness; they count for sickness (D41) and are marked "experimental" on the trip page.
 - **Buses.** Frequent stops, door cycles, kneeling and idling engines are separated using speed near zero and the activity data.
 - **Trams.** Rail joints cause regular, repeating impacts. They are labelled as rail joints so they don't count as potholes.
-- **Audio is off on public transport** (other passengers, GDPR).
+- **No audio** (D48): the backend ignores the sound level, and the app stops recording audio.
 - **Only finalized trips count in aggregates.** A trip still recording, or one whose context (vehicle, mount) never arrived, shows on the live view but not in the aggregated map. Replays never count.
 - A **data-quality panel** on the dashboard shows per session: sample rates, gaps, GPS accuracy, valid fraction and rejected batches.
 
@@ -425,7 +427,7 @@ Raw values are always stored as measured; normalization happens only in the aggr
 | Permissions | One managed identity per service, least privilege; key-based access off on Storage, Event Hubs and Service Bus |
 | CI/CD credentials | GitHub OIDC with federated credentials; no stored Azure secrets; deploy identity usable only from the protected `prod` environment |
 | Secrets in the repo | None; gitleaks scans every push |
-| Privacy | Raw audio never uploaded live; audio off on public transport; GPS shown whole, start and end included (D40: the start/end trim hid every short test drive and isn't wanted; everyone recording accepts that their routes are visible to anyone with the dashboard link) |
+| Privacy | No audio (D48); GPS shown whole, start and end included (D40: the start/end trim hid every short test drive and isn't wanted; everyone recording accepts that their routes are visible to anyone with the dashboard link) |
 
 ---
 
@@ -578,8 +580,9 @@ These were in earlier versions of the plan. We removed them because they mainly 
 |---|---|---|---|
 | SQL on raw files (Athena + Glue on AWS) | SQL queries directly on raw files in storage | Nobody would use it in 3 days; pandas on the Parquet files does the same job | DuckDB on the `lake` container, or Synapse serverless SQL; the `session=` folders already fit |
 | OpenStreetMap road snapping | Segments that follow real roads, no blurring at junctions or parallel roads | H3 hexagons are good enough for aggregation and need no map import | Import an OSM extract, cut roads into 25 m pieces, add a road ID to `segments` |
-| Lateral (sideways) sickness metric | A second, non-standard sickness score based on Donohew & Griffin (2004) | Scientifically interesting, not required. The ISO vertical metric covers the requirement | The lateral acceleration is still stored in `session_series`, so the metric can be computed later from existing data |
+| Lateral (sideways) sickness metric (back in scope: D49, §9 step 6) | A second, non-standard sickness score based on Donohew & Griffin (2004) | Scientifically interesting, not required. The ISO vertical metric covers the requirement | The lateral acceleration is still stored in `session_series`, so the metric can be computed later from existing data |
 | checkov in CI | Automatic checks for Terraform misconfigurations | Extra checks that judges rarely open; gitleaks stays for secrets | Add one step to `security.yml` |
+| Passenger MISC ratings (D47, 2026-11-21) | A 0–10 "how do you feel" prompt every 2 minutes in the app, shown next to the dose, and a rank correlation between the two | No time to collect ratings from real passengers; the dose from ISO 2631-1 is the result we show | The `labels` table and `labels.csv` still take a `sickness` label; bring back the app prompt (spec §3.7 H1) and the read API's `ratings` / `latestRating` |
 
 ---
 

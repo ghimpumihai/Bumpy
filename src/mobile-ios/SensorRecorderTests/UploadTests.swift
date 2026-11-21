@@ -15,7 +15,6 @@ final class IngestBatchTests: XCTestCase {
         acc.add(LocationSample(utcMs: 1_763_716_532_120.4, lat: 46.771212345, lon: 23.62363, alt: 352.1, ellAlt: 0,
                                hAcc: 4.7, vAcc: 3, speed: 8.4, speedAcc: 0.5, course: 92, courseAcc: 1, isSimulated: false))
         acc.add(AltimeterSample(t: 500.5, relativeAltitudeM: 0.25, pressureKPa: 97.1))
-        acc.add(AudioLevelSample(t: 500.1, avgDbfs: -31, peakDbfs: -10))
         acc.addLabel(t: 501.24, type: "pothole", value: nil, note: nil)
 
         let device = DeviceStatus(batteryLevel: 0.82, batteryState: "charging", thermal: .nominal, lowPowerMode: false,
@@ -29,9 +28,9 @@ final class IngestBatchTests: XCTestCase {
         XCTAssertEqual(acc.batchesCreated, 2)
 
         let obj = try XCTUnwrap(JSONSerialization.jsonObject(with: b.jsonData()) as? [String: Any])
-        // Spec §6 keys (all must stay) + additive hackathon-rule keys.
+        // Spec §6 keys (all must stay; `audioLevel` was dropped by D48) + additive hackathon-rule keys.
         let specKeys: Set<String> = ["schemaVersion", "sessionId", "deviceId", "batchSeq", "t0Utc", "t0Up", "units",
-                                     "deviceMotion", "accelRaw", "gyroRaw", "location", "altimeter", "audioLevel",
+                                     "deviceMotion", "accelRaw", "gyroRaw", "location", "altimeter",
                                      "labels", "device"]
         XCTAssertEqual(Set(obj.keys), specKeys.union(["eventType", "source", "t0UtcMs", "fieldUnits",
                                                        "magRaw", "heading", "absAltitude", "activity"]))
@@ -40,7 +39,7 @@ final class IngestBatchTests: XCTestCase {
         XCTAssertEqual((obj["t0UtcMs"] as? NSNumber)?.int64Value, 1_763_716_532_000)
         let fieldUnits = try XCTUnwrap(obj["fieldUnits"] as? [String: String])
         XCTAssertEqual(fieldUnits["location.lat"], "deg")
-        XCTAssertEqual(fieldUnits["audioLevel.avgDbfs"], "dBFS")
+        XCTAssertFalse(fieldUnits.keys.contains { $0.hasPrefix("audioLevel") })
         XCTAssertEqual(obj["schemaVersion"] as? Int, 1)
         XCTAssertEqual(obj["t0Utc"] as? String, "2025-11-21T09:15:32.000Z")
         XCTAssertEqual(obj["units"] as? [String: String], ["accel": "g", "gyro": "rad/s", "speed": "m/s", "pressure": "kPa"])
@@ -63,8 +62,6 @@ final class IngestBatchTests: XCTestCase {
         XCTAssertTrue(label["note"] is NSNull)
         let alt = try XCTUnwrap(obj["altimeter"] as? [String: [Double]])
         XCTAssertEqual(Set(alt.keys), ["t", "relAltM", "pressureKpa"])
-        let audio = try XCTUnwrap(obj["audioLevel"] as? [String: [Double]])
-        XCTAssertEqual(Set(audio.keys), ["t", "avgDbfs", "peakDbfs"])
         let dev = try XCTUnwrap(obj["device"] as? [String: Any])
         XCTAssertEqual(dev["thermal"] as? String, "nominal")
         XCTAssertEqual(dev["lowPower"] as? Bool, false)
@@ -149,6 +146,8 @@ final class UploadQueueTests: XCTestCase {
         XCTAssertEqual(o3, .permanentFailure(status: 400))
         XCTAssertEqual(queue.failedFiles().count, 1)
         XCTAssertEqual(queue.status.failedCount, 1)
+        XCTAssertEqual(queue.failedCount(sessionId: "S1"), 1)
+        XCTAssertEqual(queue.failedCount(sessionId: "other"), 0)
         let o4 = await queue.processOnce()
         XCTAssertEqual(o4, .uploaded(status: 200))
         XCTAssertTrue(queue.pendingFiles().isEmpty)
@@ -429,7 +428,7 @@ final class BatchSeqWithoutHolesTests: XCTestCase {
                             },
                             config: { UploadConfig(baseURL: URL(string: "https://fn.test"), deviceKey: "k") })
         let deps = RecordingSession.Dependencies(
-            motion: SyntheticMotionSource(), location: nil, altimeter: nil, activity: nil, audio: nil,
+            motion: SyntheticMotionSource(), location: nil, altimeter: nil, activity: nil,
             deviceStatus: FakeDeviceStatus(), uploadQueue: q, deviceId: "D", appVersion: "t",
             deviceInfo: .init(model: "x", name: "x", iosVersion: "x"))
         let session = try RecordingSession(store: SessionStore(root: try makeTempDir()), setup: SessionSetup(),
@@ -459,5 +458,29 @@ final class BatchSeqWithoutHolesTests: XCTestCase {
         XCTAssertEqual(stopMeta["batchCount"] as? Int, batches.count, "batchCount = batches actually queued")
         XCTAssertEqual(Int64(totalDM), session.metadata.stats?.streams["deviceMotion"]?.samples,
                        "the window that failed to queue was retried, not dropped")
+    }
+}
+
+/// The recap's "Trip in the cloud" must never overstate: rejected batches are not sent, and the
+/// session.json start/stop items are not part of the trip's data.
+final class UploadBatchCountTests: XCTestCase {
+    func testCountsOnlyThisSessionsBatchesAndReportsRejectedOnes() throws {
+        let q = UploadQueue(directory: try makeTempDir().appendingPathComponent("upload_queue"), transport: MockTransport(),
+                            backgroundTime: nil,
+                            config: { UploadConfig(baseURL: URL(string: "https://fn.test"), deviceKey: "k") })
+        let body = try Gzip.compress(Data("{}".utf8))
+        try q.enqueue(gzippedBody: body, sessionId: "S", seq: 1, createdUtcMs: 1)
+        try q.enqueue(gzippedBody: body, sessionId: "S", seq: 2, createdUtcMs: 2)
+        try q.enqueue(gzippedBody: body, sessionId: "T", seq: 1, createdUtcMs: 3)
+        try q.enqueueSessionMetadata(json: Data("{}".utf8), sessionId: "S", phase: .stop, createdUtcMs: 4)
+        let rejected = UploadQueue.fileName(createdUtcMs: 0, sessionId: "S", seq: 0)
+        try body.write(to: q.failedDirectory.appendingPathComponent(rejected))
+
+        let c = q.batchCounts(sessionId: "S")
+        XCTAssertEqual(c.pending, 2, "metadata and other sessions don't count")
+        XCTAssertEqual(c.failed, 1)
+        XCTAssertEqual(q.waitingTripCount(), 2, "trips, not files; rejected files are not waiting")
+        try q.enqueueSessionMetadata(json: Data("{}".utf8), sessionId: "U", phase: .start, createdUtcMs: 5)
+        XCTAssertEqual(q.waitingTripCount(), 3, "a trip with only its Start copy left is still waiting")
     }
 }

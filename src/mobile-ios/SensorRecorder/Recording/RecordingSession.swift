@@ -2,7 +2,6 @@ import Foundation
 
 /// Labels written to `labels.csv` (spec §3.7). Raw values are the CSV `type` column.
 enum LabelType: String, Sendable {
-    case sickness, sicknessMissed = "sickness_missed", sicknessPrompt = "sickness_prompt"
     case pothole, speedBump = "speed_bump", phoneMoved = "phone_moved"
     case surfaceStart = "surface_start", surfaceEnd = "surface_end"
     case segmentStart = "segment_start", segmentEnd = "segment_end"
@@ -54,7 +53,6 @@ final class RecordingSession: @unchecked Sendable {
         var location: LocationSource?
         var altimeter: AltimeterSource?
         var activity: ActivitySource?
-        var audio: AudioSource?
         var deviceStatus: DeviceStatusSource
         var uploadQueue: UploadQueue?
         var clock: ClockSource = SystemClock()
@@ -72,16 +70,12 @@ final class RecordingSession: @unchecked Sendable {
         var device: DeviceStatus = .unknown
         var inBackground = false
         var returnedFromBackgroundUp: TimeInterval?
-        var audioLastSoundUp: TimeInterval?
     }
 
     struct LabelState {
         var count = 0
-        var sicknessRatings = 0
-        var sicknessMissed = 0
         var activeSurface: SurfaceKind?
         var activeSegments: Set<SegmentKind> = []
-        var lastSickness: (value: Int, date: Date)?
     }
 
     let id: UUID
@@ -171,7 +165,7 @@ final class RecordingSession: @unchecked Sendable {
             sessionId: id.uuidString, appVersion: deps.appVersion, device: deps.deviceInfo,
             timezone: deps.timezone, startedAtUtc: ISO8601.string(startDate), startUptimeSec: anchor.up,
             endedAtUtc: nil, vehicle: setup.vehicle, mount: mount, people: setup.people,
-            conditions: setup.conditions, audioEnabled: deps.audio?.recordsAudio ?? false,
+            conditions: setup.conditions,
             requestedRatesHz: SessionMetadata.requestedRates,
             recovered: false, recoveredAtUtc: nil, syntheticSensors: deps.motion.isSynthetic,
             folderName: folder.lastPathComponent, deviceId: deps.deviceId, preflight: preflight, stats: nil)
@@ -206,7 +200,6 @@ final class RecordingSession: @unchecked Sendable {
         startLocation()
         startAltimeter()
         startActivity()
-        startAudio()
         startTimers()
         writer.log(.info, "recording started")
     }
@@ -232,7 +225,6 @@ final class RecordingSession: @unchecked Sendable {
         deps.location?.stopRecording()
         deps.altimeter?.stop()
         deps.activity?.stop()
-        deps.audio?.stop()
 
         makeBatch() // last partial window (and any batch that couldn't be queued earlier)
         let notQueued = unqueuedBatches.withLock { w -> Int in defer { w.removeAll() }; return w.count }
@@ -416,34 +408,6 @@ final class RecordingSession: @unchecked Sendable {
         }
     }
 
-    private func startAudio() {
-        guard let audio = deps.audio else {
-            monitors[.audioLevel]?.setAvailable(false)
-            return
-        }
-        let tb = timeBase, w = writer, mon = monitors, acc = accumulator
-        var cb = AudioCallbacks()
-        let latestAudio = latestBox
-        cb.level = { s in
-            if s.avgDbfs > HealthEvaluator.audioSilenceDbfs { latestAudio.withLock { $0.audioLastSoundUp = s.t } }
-            w.append(.audioLevel, CSV.row([CSV.f6(s.t), CSV.ms(tb.utcMs(fromUptime: s.t)),
-                                           CSV.f6(s.avgDbfs), CSV.f6(s.peakDbfs)]))
-            mon[.audioLevel]?.record(t: s.t, arrival: s.t)
-            acc.add(s)
-        }
-        cb.segmentEvent = { [weak self] t, event, file in
-            let utc = tb.utcMs(fromUptime: t)
-            w.append(.audioSegments, CSV.row([CSV.f6(t), CSV.ms(utc), event, file]))
-            if event == "start" {
-                // spec §5: uptime at which AVAudioRecorder.record() returned
-                self?.writeClockRow(ClockAnchor(up: t, utcMs: utc), source: "audio_start")
-            }
-        }
-        cb.log = { level, msg in w.log(level, msg) }
-        let ok = audio.start(folder: folder, cb)
-        writer.log(ok ? .info : .problem, ok ? "audio recording started (\(audio.formatDescription))" : "audio recording FAILED to start")
-    }
-
     private func startTimers() {
         func make(_ interval: TimeInterval, fireNow: Bool, _ body: @escaping () -> Void) {
             let t = DispatchSource.makeTimerSource(queue: timerQueue)
@@ -587,11 +551,7 @@ final class RecordingSession: @unchecked Sendable {
         writer.append(.labels, CSV.row([CSV.f6(t), CSV.ms(timeBase.utcMs(fromUptime: t)), type.rawValue,
                                         CSV.escape(value), CSV.escape(note)]))
         accumulator.addLabel(t: t, type: type.rawValue, value: value, note: note)
-        labelBox.withLock { s in
-            s.count += 1
-            if type == .sickness { s.sicknessRatings += 1; if let v = value.flatMap(Int.init) { s.lastSickness = (v, label.date) } }
-            if type == .sicknessMissed { s.sicknessMissed += 1 }
-        }
+        labelBox.withLock { $0.count += 1 }
         return label
     }
 
@@ -658,17 +618,7 @@ final class RecordingSession: @unchecked Sendable {
         let l = latestBox.current
         i.gpsLastFixUp = l.gpsFixUp
         i.gpsHorizontalAccuracy = l.gps?.hAcc
-        // "Audio recorder not recording" is a PROBLEM only when this session records audio;
-        // with recording OFF (public transport) only the optional level meter runs.
-        i.audioMeterExpected = deps.audio != nil
-        i.audioLastSoundUp = l.audioLastSoundUp
         i.locationDegraded = deps.location?.degradedReason
-        if let audio = deps.audio, audio.recordsAudio {
-            i.audioExpected = true
-            i.audioRecording = audio.isRecording
-        } else {
-            i.audioExpected = false
-        }
         let we = writer.writeErrors
         i.lastWriteErrorUp = we.lastAtUp
         i.lastWriteError = we.last
@@ -691,11 +641,6 @@ final class RecordingSession: @unchecked Sendable {
         return i
     }
 
-    var audioBytes: Int64 { deps.audio?.bytesWritten ?? 0 }
-    var audioLevel: AudioLevelSample? { deps.audio?.latestLevel }
-    var audioRecording: Bool { deps.audio?.isRecording ?? false }
-    var recordsAudio: Bool { deps.audio?.recordsAudio ?? false }
-    var hasAudioSource: Bool { deps.audio != nil }
     var uploadStatus: UploadStatus? { deps.uploadQueue?.status }
     var deviceStatus: DeviceStatus { deps.deviceStatus.currentStatus() }
 
@@ -704,14 +649,12 @@ final class RecordingSession: @unchecked Sendable {
     private func buildStats(endUp: TimeInterval) -> SessionMetadata.Stats {
         let fm = FileManager.default
         var sizes: [String: Int64] = [:]
-        var audioFiles: [String] = []
         var total: Int64 = 0
         if let files = try? fm.contentsOfDirectory(at: folder, includingPropertiesForKeys: nil) {
             for f in files {
                 let s = fm.fileSize(f)
                 sizes[f.lastPathComponent] = s
                 total += s
-                if f.pathExtension == "m4a" { audioFiles.append(f.lastPathComponent) }
             }
         }
         var streams: [String: SessionMetadata.StreamStats] = [:]
@@ -725,8 +668,7 @@ final class RecordingSession: @unchecked Sendable {
         }
         let l = labelBox.current
         return .init(durationSec: endUp - startUp, streams: streams, labelsCount: l.count,
-                     sicknessRatings: l.sicknessRatings, sicknessMissed: l.sicknessMissed,
-                     audioFiles: audioFiles.sorted(), fileSizes: sizes, totalBytes: total,
+                     fileSizes: sizes, totalBytes: total,
                      writeErrors: writer.writeErrors.count, uploadBatchesCreated: accumulator.batchesCreated)
     }
 }

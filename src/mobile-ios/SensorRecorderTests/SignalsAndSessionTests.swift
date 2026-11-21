@@ -33,17 +33,77 @@ final class LiveSignalsTests: XCTestCase {
     }
 
     func testProjectionFlatPhone() {
-        // Phone flat, screen up: gravity = -z. Upward bump = +z user accel.
-        let p = LiveSignals.project(sample(t: 0, ua: Vec3(x: 0.1, y: 0.05, z: 0.3), g: Vec3(x: 0, y: 0, z: -1)))
+        // Phone flat, screen up: gravity = -z. CoreMotion reports minus the phone's acceleration, so
+        // ua.z = -0.3 is the phone accelerating up at 0.3 g, and ua.x = +0.1 is it accelerating
+        // towards -x, the vehicle's left.
+        let p = LiveSignals.project(sample(t: 0, ua: Vec3(x: 0.1, y: 0.05, z: -0.3), g: Vec3(x: 0, y: 0, z: -1)))
         XCTAssertEqual(p.vertical, 0.3, accuracy: 1e-12)
         XCTAssertEqual(p.lateral, 0.1, accuracy: 1e-12)
     }
 
     func testProjectionTiltedPhone() {
-        // Phone upright in portrait (gravity = -y). Up = +y; lateral = device x.
-        let p = LiveSignals.project(sample(t: 0, ua: Vec3(x: -0.2, y: 0.4, z: 0.1), g: Vec3(x: 0, y: -1, z: 0)))
+        // Phone upright in portrait facing the driver (gravity = -y): up = +y, device +x = the vehicle's right.
+        let p = LiveSignals.project(sample(t: 0, ua: Vec3(x: -0.2, y: -0.4, z: 0.1), g: Vec3(x: 0, y: -1, z: 0)))
         XCTAssertEqual(p.vertical, 0.4, accuracy: 1e-12)
-        XCTAssertEqual(p.lateral, -0.2, accuracy: 1e-12)
+        XCTAssertEqual(p.lateral, -0.2, accuracy: 1e-12) // accelerating to the right
+    }
+
+    func testFreeFallReadsMinusOneG() {
+        // Screen up in free fall: the accelerometer reads 0, so userAcceleration = 0 - gravity = +1 g on z.
+        let p = LiveSignals.project(sample(t: 0, ua: Vec3(x: 0, y: 0, z: 1), g: Vec3(x: 0, y: 0, z: -1)))
+        XCTAssertEqual(p.vertical, -1, accuracy: 1e-12)
+    }
+
+    func testLeftTurnIsPositiveLateral() {
+        // A left turn pushes the phone towards the vehicle's left (-x when flat, top to the front);
+        // CoreMotion reports the opposite, +x. The backend (dsp.py) also has lateral positive to the left.
+        let p = LiveSignals.project(sample(t: 0, ua: Vec3(x: 0.2, y: 0, z: 0), g: Vec3(x: 0, y: 0, z: -1)))
+        XCTAssertEqual(p.lateral, 0.2, accuracy: 1e-12)
+    }
+
+    /// A deterministic ±2 ms jitter, as CoreMotion's timestamps have around the nominal 100 Hz.
+    private func jitteredTimes(seconds: Double) -> [Double] {
+        var seed: UInt64 = 42
+        return (0..<Int(seconds * 100)).map { n in
+            seed = seed &* 6364136223846793005 &+ 1442695040888963407
+            let u = Double(seed >> 11) / Double(1 << 53) // [0, 1)
+            return Double(n) * 0.01 + (u - 0.5) * 0.004
+        }
+    }
+
+    func testLiveMSDVWithJitteredTimestampsMatchesTheWeighting() {
+        // 300 s of 0.1 g vertical sway at 0.2 Hz: MSDV = a·|Wf(0.2 Hz)|/√2·√T. Blocks that restarted at
+        // their last sample took 11 samples whenever the clock jittered and read ~6 % low.
+        let live = LiveSignals()
+        let amp = 0.1, f = 0.2, seconds = 300.0
+        for t in jitteredTimes(seconds: seconds) {
+            live.add(sample(t: t, ua: Vec3(x: 0, y: 0, z: -amp * sin(2 * .pi * f * t)), g: Vec3(x: 0, y: 0, z: -1)))
+        }
+        let expected = amp * LiveSignals.g * WfFilter(fs: 10).magnitude(at: f) / 2.0.squareRoot() * seconds.squareRoot()
+        XCTAssertEqual(live.snapshot().msdv / expected, 1, accuracy: 0.02)
+        XCTAssertEqual(live.snapshot().lateral.count, 600) // 10 Hz blocks (ring holds 60 s)
+    }
+
+    func testRoughnessBandIsTheBackends() {
+        // scipy.signal.sosfreqz of the backend's SOS_BAND
+        let band = RoughnessBand()
+        XCTAssertEqual(band.magnitude(at: 10), 0.999999914489249, accuracy: 1e-9)
+        XCTAssertEqual(band.magnitude(at: 25), 0.9687437975974774, accuracy: 1e-9)
+        XCTAssertEqual(band.magnitude(at: 0.5), 0.058147542080446604, accuracy: 1e-9)
+    }
+
+    func testRoughnessNowMatchesTheBackend() {
+        // 60 s of a vertical sine with RMS 1 m/s²; the backend's band-pass + 5 s EMA (computed with
+        // scipy) gives 1.0008 at 10 Hz and 0.0586 at 0.5 Hz, which is sway, not roughness.
+        for (f, expected) in [(10.0, 1.0008316430477706), (0.5, 0.05856751893422164)] {
+            let live = LiveSignals()
+            let amp = 2.0.squareRoot() / LiveSignals.g
+            for n in 0..<6000 {
+                let t = Double(n) * 0.01
+                live.add(sample(t: t, ua: Vec3(x: 0, y: 0, z: -amp * sin(2 * .pi * f * t)), g: Vec3(x: 0, y: 0, z: -1)))
+            }
+            XCTAssertEqual(live.snapshot().roughnessRms, expected, accuracy: 0.002, "\(f) Hz")
+        }
     }
 
     func testBuffersRoughnessAndMSDV() {
@@ -76,7 +136,7 @@ final class LiveSignalsTests: XCTestCase {
     }
 }
 
-/// End-to-end: a real RecordingSession with synthetic 100 Hz motion and fake GPS/baro/audio/activity,
+/// End-to-end: a real RecordingSession with synthetic 100 Hz motion and fake GPS/baro/activity,
 /// writing to a temp folder. Verifies the files a backend would read.
 final class RecordingSessionIntegrationTests: XCTestCase {
     func testThreeSecondRecordingProducesValidSession() throws {
@@ -88,7 +148,7 @@ final class RecordingSessionIntegrationTests: XCTestCase {
                                       config: { UploadConfig(baseURL: URL(string: "https://api.test"), deviceKey: "k") })
         let deps = RecordingSession.Dependencies(
             motion: SyntheticMotionSource(), location: FakeLocationSource(), altimeter: FakeAltimeter(),
-            activity: FakeActivity(), audio: FakeAudio(), deviceStatus: FakeDeviceStatus(), uploadQueue: uploadQueue,
+            activity: FakeActivity(), deviceStatus: FakeDeviceStatus(), uploadQueue: uploadQueue,
             deviceId: "DEV-1", appVersion: "1.0.0 (1) test",
             deviceInfo: .init(model: "iPhone15,2", name: "iPhone 14 Pro", iosVersion: "18.1"))
         var setup = SessionSetup()
@@ -113,7 +173,6 @@ final class RecordingSessionIntegrationTests: XCTestCase {
             session.toggleSurface(.gravel)      // ends cobblestones, starts gravel
             session.toggleSegment(.winding)
             session.addLabel(.note, value: nil, note: "bump, then \"silence\"")
-            session.addLabel(.sickness, value: "3", note: "prompt")
             started.fulfill()
         }
         wait(for: [started], timeout: ciTimeout)
@@ -147,7 +206,6 @@ final class RecordingSessionIntegrationTests: XCTestCase {
         let stats = try XCTUnwrap(meta.stats)
         XCTAssertGreaterThanOrEqual(stats.durationSec, 3.2 - 0.01, "at least the time we recorded for")
         XCTAssertLessThanOrEqual(stats.durationSec, wallEnd - wallStart + 0.01, "never longer than the test itself")
-        XCTAssertEqual(stats.audioFiles, ["audio_000.m4a"])
         XCTAssertGreaterThan(stats.uploadBatchesCreated, 1)
 
         // Motion CSVs: ~100 Hz, monotonic t_up, t_utc_ms consistent with the clock anchors
@@ -155,7 +213,7 @@ final class RecordingSessionIntegrationTests: XCTestCase {
         XCTAssertEqual(clock.header, ["t_up", "t_utc_ms", "source"])
         XCTAssertEqual(clock.rows.first?[2], "start")
         XCTAssertEqual(clock.rows.last?[2], "stop")
-        XCTAssertTrue(clock.rows.contains { $0[2] == "audio_start" })
+        XCTAssertFalse(clock.rows.contains { $0[2] == "audio_start" }, "no audio (D48)")
         let anchorUp = Double(clock.rows[0][0])!, anchorMs = Double(clock.rows[0][1])!
 
         for file in ["device_motion.csv", "accel_raw.csv", "gyro_raw.csv", "mag_raw.csv"] {
@@ -188,8 +246,8 @@ final class RecordingSessionIntegrationTests: XCTestCase {
         XCTAssertGreaterThanOrEqual(try readCSV(folder.appendingPathComponent("abs_altitude.csv")).rows.count, 3)
         XCTAssertGreaterThanOrEqual(try readCSV(folder.appendingPathComponent("heading.csv")).rows.count, 3)
         XCTAssertEqual(try readCSV(folder.appendingPathComponent("activity.csv")).rows.first?[5], "1") // automotive
-        XCTAssertGreaterThan(try readCSV(folder.appendingPathComponent("audio_level.csv")).rows.count, 20)
-        XCTAssertEqual(try readCSV(folder.appendingPathComponent("audio_segments.csv")).rows.first?[2], "start")
+        let names = try FileManager.default.contentsOfDirectory(atPath: folder.path)
+        XCTAssertFalse(names.contains { $0.hasPrefix("audio") }, "no audio files (D48): \(names)")
         XCTAssertGreaterThanOrEqual(try readCSV(folder.appendingPathComponent("device.csv")).rows.count, 1)
         XCTAssertTrue(FileManager.default.fileExists(atPath: folder.appendingPathComponent("mount.jpg").path))
 
@@ -199,11 +257,10 @@ final class RecordingSessionIntegrationTests: XCTestCase {
             String(line.split(separator: ",", omittingEmptySubsequences: false)[2])
         }
         XCTAssertEqual(types, ["sync_tap", "surface_start", "surface_end", "surface_start", "segment_start", "note",
-                               "sickness", "surface_end", "segment_end"])
+                               "surface_end", "segment_end"])
         XCTAssertTrue(labelsText.contains(",note,,\"bump, then \"\"silence\"\"\"\n"))
         XCTAssertTrue(labelsText.contains(",surface_end,gravel,auto at stop\n"))
-        XCTAssertEqual(stats.labelsCount, 9)
-        XCTAssertEqual(stats.sicknessRatings, 1)
+        XCTAssertEqual(stats.labelsCount, 8)
 
         // Upload queue, in send order: Start metadata, batches 0..n-1, Stop metadata with batchCount = n (§6.1)
         let all = uploadQueue.pendingFiles()
@@ -240,25 +297,4 @@ final class RecordingSessionIntegrationTests: XCTestCase {
         XCTAssertEqual(analysis.streams[.accel]?.count, stats.streams["accel"]?.samples)
     }
 
-    func testAudioFailureIsReportedAsProblem() throws {
-        let root = try makeTempDir()
-        let audio = FakeAudio()
-        audio.failToStart = true
-        let deps = RecordingSession.Dependencies(
-            motion: SyntheticMotionSource(), location: nil, altimeter: nil, activity: nil, audio: audio,
-            deviceStatus: FakeDeviceStatus(), uploadQueue: nil, deviceId: "D", appVersion: "t",
-            deviceInfo: .init(model: "x", name: "x", iosVersion: "x"))
-        let session = try RecordingSession(store: SessionStore(root: root), setup: SessionSetup(), preflight: nil, deps: deps)
-        let e = expectation(description: "start")
-        DispatchQueue.main.async { session.start(); e.fulfill() }
-        wait(for: [e], timeout: ciTimeout)
-        Thread.sleep(forTimeInterval: 0.5)
-        let issues = HealthEvaluator.evaluate(session.healthInputs(now: ProcessInfo.processInfo.systemUptime))
-        XCTAssertTrue(issues.contains { $0.key == "audio.off" && $0.level == .problem })
-        let e2 = expectation(description: "stop")
-        DispatchQueue.main.async { session.stop(); e2.fulfill() }
-        wait(for: [e2], timeout: ciTimeout)
-        let log = try String(contentsOf: session.folder.appendingPathComponent("app_log.txt"), encoding: .utf8)
-        XCTAssertTrue(log.contains("[PROBLEM] audio recording FAILED to start"))
-    }
 }

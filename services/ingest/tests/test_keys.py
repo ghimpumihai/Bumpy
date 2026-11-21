@@ -2,7 +2,7 @@ import json
 
 import pytest
 
-from ingest_core.keys import KeyStore, hash_key, may_send_as, parse_secret
+from ingest_core.keys import KeyStore, StaleKeys, hash_key, may_send_as, parse_secret
 
 
 class Clock:
@@ -143,3 +143,37 @@ def test_failed_reload_for_an_unknown_key_or_a_mismatch_raises():
     clock.t = 122
     with pytest.raises(RuntimeError):
         store.identify("k", refresh=True)
+
+
+def test_cached_keys_expire_after_a_long_key_vault_outage():
+    """A revoked key keeps working through a Key Vault outage only up to max_stale_s; after that
+    every request is refused with an error (503), until Key Vault answers again."""
+    state = {"fail": False}
+
+    def loader():
+        if state["fail"]:
+            raise RuntimeError("vault down")
+        return {hash_key("k"): {"PHONE-1"}}
+
+    clock = Clock()
+    store = KeyStore(loader, min_reload_s=60, max_age_s=300, max_stale_s=6 * 3600, clock=clock)
+    assert store.check("k")
+    state["fail"] = True
+    clock.t = 6 * 3600  # failing reloads all along: the cached keys still serve
+    assert store.check("k")
+    clock.t = 6 * 3600 + 1
+    with pytest.raises(StaleKeys):
+        store.check("k")
+    with pytest.raises(StaleKeys):
+        store.identify("k", refresh=True)
+    clock.t += 61
+    with pytest.raises(StaleKeys):  # tried again, still failing
+        store.check("k")
+    state["fail"] = False
+    clock.t += 61
+    assert store.check("k")  # Key Vault is back: fresh keys again
+
+
+def test_default_max_stale_is_generous():
+    store = KeyStore(lambda: {})
+    assert store._max_stale_s >= 3600  # a Key Vault blip of minutes never stops uploads

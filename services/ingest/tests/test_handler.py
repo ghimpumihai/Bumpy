@@ -315,3 +315,141 @@ def test_session_idempotency_key_must_name_phase(session_meta, keys, sinks):
 def test_session_wrong_key_is_401(session_meta, keys, sinks):
     sid = session_meta["sessionId"]
     assert handle_session(sid, headers(**{"x-device-key": "bad"}), gz(session_meta), keys, sinks).status == 401
+
+
+def test_key_vault_outage_beyond_the_stale_limit_is_503(batch, sinks):
+    from ingest_core.keys import hash_key
+
+    class Clock:
+        t = 0.0
+
+        def __call__(self):
+            return self.t
+
+    state = {"fail": False}
+
+    def loader():
+        if state["fail"]:
+            raise RuntimeError("vault down")
+        return {hash_key(DEVICE_KEY): {batch["deviceId"]}}
+
+    clock = Clock()
+    keys = KeyStore(loader, max_stale_s=3600, clock=clock)
+    assert handle_batch(headers(), gz(batch), keys, sinks).status == 200
+    state["fail"] = True
+    clock.t = 3000
+    assert handle_batch(headers(), gz(batch), keys, sinks).status == 200  # cached keys still serve
+    clock.t = 3601
+    resp = handle_batch(headers(), gz(batch), keys, sinks)
+    assert resp.status == 503  # the app retries; the batch waits on the phone
+    assert len(sinks.events) == 2
+
+
+def test_huge_integer_is_400_not_500(batch, keys, sinks):
+    """10**400 doesn't fit a float: math.isfinite would raise OverflowError (500, retried forever)."""
+    for mutate in (lambda b: b["accelRaw"]["x"].__setitem__(0, 10**400),
+                   lambda b: b.update(t0Up=10**400), lambda b: b.update(batchSeq=10**400),
+                   lambda b: b["location"][0].update(tUtcMs=10**400)):
+        b = json.loads(json.dumps(batch))
+        mutate(b)
+        resp = handle_batch(headers(), gzip.compress(json.dumps(b).encode()), keys, sinks)
+        assert resp.status == 400, resp.body
+    assert not sinks.events and not sinks.blobs
+
+
+def test_huge_integer_in_session_metadata_is_400(session_meta, keys, sinks):
+    session_meta["startUptimeSec"] = 10**400
+    sid = session_meta["sessionId"]
+    assert handle_session(sid, headers(), gz(session_meta), keys, sinks).status == 400
+
+
+# --- A session belongs to the device that sent it first (D53) ---------------------------------
+
+def _as_other_phone(batch):
+    forged = json.loads(json.dumps(batch))
+    forged["deviceId"] = "OTHER-PHONE"  # the deviceId OTHER_KEY is stored under
+    forged["labels"] = []
+    return forged
+
+
+def test_another_device_cant_add_to_a_session_or_take_its_archive_blobs(batch, keys, sinks):
+    real = gz(batch)
+    assert handle_batch(headers(), real, keys, sinks).status == 200
+    assert sinks.owners == {batch["sessionId"]: batch["deviceId"]}
+
+    forged = _as_other_phone(batch)
+    for seq in (batch["batchSeq"], batch["batchSeq"] + 1):  # a copy, and a batch the phone hasn't sent
+        forged["batchSeq"] = seq
+        resp = handle_batch(headers(**{"x-device-key": OTHER_KEY}), gz(forged), keys, sinks)
+        assert resp.status == 403
+        assert "belongs to another device" in resp.body["error"]
+        assert batch["deviceId"] not in resp.body["error"]  # the owner isn't told to the sender
+    assert len(sinks.events) == 1
+    assert list(sinks.blobs.values()) == [real]
+
+    batch["batchSeq"] += 1  # the phone's next batch still gets through
+    assert handle_batch(headers(), gz(batch), keys, sinks).status == 200
+
+
+def test_another_device_cant_put_session_metadata(batch, session_meta, keys, sinks):
+    sid = session_meta["sessionId"]
+    assert handle_batch(headers(), gz(batch), keys, sinks).status == 200
+    session_meta.update(deviceId="OTHER-PHONE", batchCount=1, recovered=True)
+    resp = handle_session(sid, headers(**{"x-device-key": OTHER_KEY}), gz(session_meta), keys, sinks)
+    assert resp.status == 403
+    assert set(sinks.blobs) == {f"raw/session={sid}/{batch['batchSeq']:08d}.json.gz"}
+
+
+def test_session_metadata_first_also_records_the_owner(batch, session_meta, keys, sinks):
+    # The app's Start copy is queued before batch 0, so it usually claims the session.
+    sid = session_meta["sessionId"]
+    assert handle_session(sid, headers(), gz(session_meta), keys, sinks).status == 200
+    assert sinks.owners == {sid: session_meta["deviceId"]}
+    assert handle_batch(headers(**{"x-device-key": OTHER_KEY}), gz(_as_other_phone(batch)),
+                        keys, sinks).status == 403
+    assert handle_batch(headers(), gz(batch), keys, sinks).status == 200
+
+
+def test_owner_is_compared_case_insensitively(batch, keys, sinks):
+    assert handle_batch(headers(), gz(batch), keys, sinks).status == 200
+    batch["deviceId"] = batch["deviceId"].lower()
+    batch["batchSeq"] += 1
+    assert handle_batch(headers(), gz(batch), keys, sinks).status == 200
+
+
+def test_a_replay_owns_its_new_session_but_never_the_phones(batch, keys, sinks):
+    assert handle_batch(headers(), gz(batch), keys, sinks).status == 200
+    replayed = json.loads(json.dumps(batch))
+    replayed.update(deviceId=f"replay-{batch['deviceId']}", source="replay")
+    resp = handle_batch(headers(**{"x-device-key": REPLAY_KEY}), gz(replayed), keys, sinks)
+    assert resp.status == 403  # the phone's sessionId
+    replayed["sessionId"] = "11111111-2222-4333-8444-555555555555"  # tools/replay: a new one
+    assert handle_batch(headers(**{"x-device-key": REPLAY_KEY}), gz(replayed), keys, sinks).status == 200
+    assert sinks.owners[replayed["sessionId"]] == replayed["deviceId"]
+
+
+def test_owner_check_failure_is_503_and_nothing_is_stored(batch, session_meta, keys):
+    sinks = FakeSinks(owner_fail=True)
+    assert handle_batch(headers(), gz(batch), keys, sinks).status == 503
+    sid = session_meta["sessionId"]
+    assert handle_session(sid, headers(), gz(session_meta), keys, sinks).status == 503
+    assert not sinks.events and not sinks.blobs
+    sinks.owner_fail = False  # the phone's retry, once storage is back
+    assert handle_batch(headers(), gz(batch), keys, sinks).status == 200
+
+
+def test_rejected_requests_never_touch_the_owner_marker(batch, keys, sinks):
+    sid = batch["sessionId"]
+    handle_batch(headers(**{"x-probe": "1"}), gz({"probe": True, "deviceId": batch["deviceId"]}), keys, sinks)
+    handle_batch(headers(**{"x-idempotency-key": "x:1"}), gz(batch), keys, sinks)  # 400
+    handle_batch(headers(**{"x-device-key": OTHER_KEY}), gz(batch), keys, sinks)  # 403 key binding
+    handle_batch(headers(), gz(dict(batch, batchSeq=-1)), keys, sinks)  # 400 schema
+    assert sinks.owner_calls == 0 and not sinks.owners
+    assert handle_batch(headers(), gz(batch), keys, sinks).status == 200
+    assert sinks.owners == {sid: batch["deviceId"]}
+
+
+def test_retries_keep_working_once_owned(batch, keys, sinks):
+    for _ in range(3):  # the app retries a batch whose answer it never got
+        assert handle_batch(headers(), gz(batch), keys, sinks).status == 200
+    assert len(sinks.blobs) == 1

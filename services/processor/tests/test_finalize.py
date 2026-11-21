@@ -39,6 +39,35 @@ def test_unsupported_and_unknown_messages_are_dead_lettered(tmp_path):
     assert fz.handle(None, archive, b"[]")[0] == "dead_letter"
 
 
+# --- The raw archive ------------------------------------------------------------------------
+
+class _ContentEncodingGzipClient:
+    """Stands in for the SDK's ContainerClient on a blob ingest wrote with Content-Encoding: gzip:
+    download_blob inflates it unless decompress=False."""
+
+    def __init__(self, blobs: dict[str, bytes]):
+        self.blobs = blobs
+
+    def list_blobs(self, name_starts_with: str):
+        return [type("Blob", (), {"name": n})() for n in sorted(self.blobs) if n.startswith(name_starts_with)]
+
+    def download_blob(self, name: str, decompress: bool = True):
+        data = self.blobs[name]
+        out = gzip.decompress(data) if decompress else data
+        return type("Downloader", (), {"readall": lambda self: out})()
+
+
+def test_blob_archive_returns_the_stored_gzip_not_the_inflated_json(batch, session_meta):
+    sid = batch["sessionId"]
+    blobs = {f"raw/session={sid}/00000000.json.gz": gzip.compress(json.dumps(batch).encode()),
+             f"raw/session={sid}/session-start.json.gz": gzip.compress(json.dumps(session_meta).encode())}
+    archive = object.__new__(fz.BlobArchive)
+    archive._client = _ContentEncodingGzipClient(blobs)
+    trip = fz.load_trip(archive, sid)
+    assert [b.batch_seq for b in trip.batches] == [batch["batchSeq"]]
+    assert trip.meta and trip.meta[0]["sessionId"] == sid
+
+
 # --- Segment passes -------------------------------------------------------------------------
 
 def _series(n, speed=10.0, start=T0):

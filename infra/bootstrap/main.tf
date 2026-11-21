@@ -2,6 +2,7 @@
 #   - the stack's resource group (so CI can be scoped to it and `terraform destroy` empties it),
 #   - the storage account + container that hold the main stack's Terraform state,
 #   - the GitHub Actions identities with OIDC federated credentials (plan §5, D36),
+#   - the team's Entra group (Owner on the project resource groups),
 #   - resource provider registration (done by the provider block below).
 # Its own state stays local (terraform.tfstate in this folder, gitignored).
 

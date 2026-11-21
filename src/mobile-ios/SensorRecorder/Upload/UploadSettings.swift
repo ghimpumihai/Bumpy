@@ -99,7 +99,6 @@ enum AppSettings {
         return URL(string: s)
     }
 
-    /// Stable per-install id (identifierForVendor, persisted so it never changes mid-session).
     /// Stable per-install, per-device id. Kept in the Keychain as *ThisDeviceOnly*, so restoring a
     /// backup onto another phone can't give two phones the same id (UserDefaults would be copied).
     static var deviceId: String {

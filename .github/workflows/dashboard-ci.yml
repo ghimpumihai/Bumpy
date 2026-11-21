@@ -1,7 +1,7 @@
 name: dashboard-ci
 
 # The dashboard's "done" definition (dashboard/CLAUDE.md): typecheck, lint, dependency rules, unit tests,
-# build, and the end-to-end suite (mock backend + the read-API contract server, axe-core in both themes).
+# build, and the end-to-end suite (mock backend + the read-API contract server, axe-core in the dark theme).
 # `real-api` runs the dashboard against services/read-api itself on a PostGIS seeded through the
 # processor's write path, so a change on either side that breaks the other fails here.
 

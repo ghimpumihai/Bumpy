@@ -287,7 +287,7 @@ function allEvents(query: URLSearchParams): RoadEventCollection {
   return eventsOf(sims, enumParam(query, "type", Object.values(RoadEventType)));
 }
 
-/** Route table: the same paths the read API Lambda serves (dashboard/API.md). */
+/** Route table: the same paths the read API serves (dashboard/API.md). */
 const ROUTES: [RegExp, Handler][] = [
   [/^\/api\/overview$/, () => overview()],
   [/^\/api\/sessions$/, (_, query) => sessionList(query)],

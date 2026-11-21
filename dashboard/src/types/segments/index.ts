@@ -50,7 +50,7 @@ export interface SegmentAggregate {
   sicknessAwRms: number | null;
   /** Predicted % of unadapted people who may vomit after one hour of this motion: a_w·√3600 / 3. */
   msi1hPct: number | null;
-  /** Sessions with a rigid mount that contributed to the sickness numbers. */
+  /** Sessions with a known context that contributed to the sickness numbers (any mount, D41). */
   sicknessSessions: number;
 }
 

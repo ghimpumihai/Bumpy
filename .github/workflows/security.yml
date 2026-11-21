@@ -1,7 +1,7 @@
 name: security
 
 # Plan 02 §13: gitleaks scans for committed secrets (keys, tokens, connection strings) on every PR and
-# every push to main. It scans the whole history, so a secret removed in a later commit is still found:
+# every push to main or staging. It scans the whole history, so a secret removed in a later commit is still found:
 # rotate it, don't just delete it. False positives go in a .gitleaksignore file (fingerprints).
 # The gitleaks binary is pinned by version and SHA-256, so no third-party action runs here.
 

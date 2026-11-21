@@ -3,8 +3,8 @@
 Connection settings come from the standard libpq variables (PGHOST, PGDATABASE, PGUSER, PGPORT,
 PGSSLMODE), set by Terraform on Azure. There, AZURE_CLIENT_ID names the service's managed identity and
 the password is a Microsoft Entra token for it (plan §5 "Database logins"); a token is only needed to
-open a connection. Locally and in CI, PGPASSWORD (from your environment or the POSTGRES_PASSWORD repo
-secret) is used as is.
+open a connection. Locally and in CI, PGPASSWORD (from your environment; CI runs PostgreSQL with trust auth and a dummy
+value) is used as is.
 """
 
 from __future__ import annotations

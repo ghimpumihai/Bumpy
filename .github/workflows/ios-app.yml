@@ -110,9 +110,10 @@ jobs:
             COMPILER_INDEX_STORE_ENABLE=NO test 2>&1 \
             | tee build-logs/unit-tests.log
 
-      # The unit tests regenerate tools/fixtures/ingest_batch_v1.json.gz from the app's real
-      # encoder; the tools suite POSTs it to the mock backend (cross-language contract test).
-      - name: Python tools tests (contract test against the fresh fixture)
+      # The unit tests check that the app's real encoder still produces the committed
+      # tools/fixtures/*.json.gz byte for byte; the tools suite POSTs them to the mock backend
+      # (cross-language contract test).
+      - name: Python tools tests (contract test against the committed fixtures)
         run: |
           set -o pipefail
           python3 --version

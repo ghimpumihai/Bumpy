@@ -128,6 +128,15 @@ def test_replay_never_aggregates(db, batch):
         ("replay", False, ["replay", "unknown_context"])
 
 
+def test_replay_metadata_first_records_the_original_trip(db, batch, session_meta):
+    # tools/replay sends the Start copy before any batch: the trip is a replay from the start.
+    s = _store(db)
+    with db.transaction():
+        s.apply_session(parse_session(dict(session_meta, replayOf="orig-session", source="replay")))
+    assert _one(db, "SELECT source, replay_of, exclusion_reasons FROM sessions") == \
+        ("replay", "orig-session", ["replay"])
+
+
 def test_signal_processing_writes_series_events_and_dose(db, batch):
     import math
 

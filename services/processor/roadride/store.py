@@ -284,13 +284,15 @@ class Store:
               started_at = COALESCE(%s, started_at),
               ended_at = COALESCE(%s, ended_at),
               expected_batch_count = COALESCE(%s, expected_batch_count),
+              replay_of = COALESCE(%s, replay_of),
+              source = CASE WHEN %s::text IS NOT NULL THEN 'replay' ELSE source END,
               updated_at = now()
             WHERE session_id = %s
             """,
             (s.device_id, s.vehicle_type, s.vehicle_make_model, s.vehicle_line,
              Jsonb(s.mount), Jsonb(s.people), Jsonb(s.conditions) if s.conditions is not None else None,
              s.audio_enabled, s.synthetic_sensors, s.recovered, Jsonb(s.metadata),
-             s.started_at, s.ended_at, s.batch_count, s.session_id),
+             s.started_at, s.ended_at, s.batch_count, s.replay_of, s.replay_of, s.session_id),
         )
         self._mark_processing_when_complete(s.session_id)
         self._refresh_exclusions(s.session_id)

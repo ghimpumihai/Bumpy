@@ -139,6 +139,7 @@ class SessionFacts:
     ended_at: dt.datetime | None
     batch_count: int | None
     metadata: dict
+    replay_of: str | None = None  # set by tools/replay: the session this trip re-sends
 
 
 def parse_session(m: dict) -> SessionFacts:
@@ -162,6 +163,7 @@ def parse_session(m: dict) -> SessionFacts:
         ended_at=parse_iso(m.get("endedAtUtc")),
         batch_count=m.get("batchCount"),
         metadata=m,
+        replay_of=m["replayOf"] if isinstance(m.get("replayOf"), str) and m["replayOf"] else None,
     )
 
 

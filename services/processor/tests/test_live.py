@@ -22,6 +22,12 @@ def test_fixture_batch_facts(batch):
     assert f.battery == 0.800000011920929 and f.thermal == "nominal" and f.low_power is False
 
 
+def test_replay_of_comes_from_session_metadata(session_meta):
+    assert parse_session(session_meta).replay_of is None
+    assert parse_session(dict(session_meta, replayOf="orig")).replay_of == "orig"
+    assert parse_session(dict(session_meta, replayOf="")).replay_of is None
+
+
 def test_minus_one_means_unknown(batch):
     batch["location"][0].update(speed=-1, course=-1)
     batch["device"]["battery"] = -1

@@ -1,0 +1,35 @@
+name: replay-ci
+
+on:
+  pull_request:
+    paths:
+      - "tools/replay/**"
+      - "services/ingest/ingest_core/**"
+      - "services/processor/roadride/live.py"
+      - "src/mobile-ios/tools/fixtures/**"
+      - ".github/workflows/replay-ci.yml"
+  push:
+    branches: [main]
+    paths:
+      - "tools/replay/**"
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      # The tool itself is standard library only; pytest runs it against the real ingest
+      # contract and the processor's batch parser.
+      - name: Install
+        run: pip install pytest
+
+      - name: Tests (ingest contract, processor parser, end to end over HTTP)
+        run: pytest -q tools/replay

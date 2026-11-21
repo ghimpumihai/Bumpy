@@ -27,6 +27,7 @@ iPhone app ──2 s gzip batches──▶ ingest function ──▶ Event Hubs 
 | **Stream processor** | [`services/processor/`](services/processor/README.md) | Reads Event Hubs and writes the tables above. Drops duplicates, keeps late batches off the live map, and marks a trip as ended once its Stop message and all batches are in. Each write commits together with the stream checkpoint, so a restart loses and repeats nothing. |
 | **Signal processing** | [`services/processor/roadride/dsp.py`](services/processor/README.md#signal-processing-roadridedsppy) | Per batch: vertical acceleration, road roughness (1–30 Hz), the ISO 2631-1 Wf motion-sickness dose (MSDV), pothole detection above 15 km/h, and a 5 Hz chart series. It gives the same results fed batch by batch or as one whole trip. |
 | **Read API** | [`services/read-api/`](services/read-api/README.md) | All 12 routes of [`dashboard/API.md`](dashboard/API.md), read-only. Hides the first and last 200 m of every trip for privacy. |
+| **Replay tool** | [`tools/replay/`](tools/replay/README.md) | Re-sends a recorded trip through the live path as a new trip (`source=replay`, never aggregated), at real speed or faster. Used for the end-to-end test without driving, for the demo, and for tuning the pothole threshold on real data. |
 | **CI/CD** | [`.github/workflows/`](.github/workflows) | Tests on every PR, including integration tests against a real PostGIS. Merges to `main` deploy the ingest function and the processor + read API (migrations first, then a check that every API route answers). |
 
 ### Done, waiting on one step
@@ -35,17 +36,16 @@ iPhone app ──2 s gzip batches──▶ ingest function ──▶ Event Hubs 
 |---|---|
 | **Dashboard** ([`dashboard/`](dashboard/README.md)) | Built, and the deploy workflow exists, but **deploy-dashboard hasn't been run yet**. Until it is, the website runs on its built-in mock data. Run it from the Actions tab: it points the site at the real read API and uploads it. |
 | **iPhone app** ([`src/mobile-ios/`](src/mobile-ios/README.md)) | Built and tested by the team. The phone needs the ingest URL and a device key in its upload settings: `.\infra\scripts\add-device-key.ps1 -DeviceId <name>` creates the key. |
-| **End-to-end test** | Every piece is tested on its own, and the deploys check the Azure logins. **No real batch has gone from a phone to the dashboard yet**; the first real drive will be that test. If the Live page stays empty, check the ingest function's logs first. |
+| **End-to-end test** | Every piece is tested on its own, and the deploys check the Azure logins. **No real batch has gone from a phone to the dashboard yet.** The first test is either a real drive or a [replay](tools/replay/README.md) of a recorded session folder. If the Live page stays empty, check the ingest function's logs first. |
 
 ### Not built yet
 
 In the plan's build order:
 
-1. **Replay tool**: re-sends a recorded trip through the live path, for testing without driving and for the demo. It's also how the provisional pothole threshold gets tuned on real data.
-2. **Speed bumps**: need the vehicle's pitch axis.
-3. **Finalize job + road segments (H3) + aggregation**: turns finished trips into the shared roughness map and crowd-confirmed potholes. The Map page stays empty until this exists.
-4. **Trip end on silence**: a trip whose Stop message never arrives stays "recording" for now; the plan closes it after 15 minutes.
-5. From the plan's cut list: laptop upload fallback, monitoring workbook, Terraform plan on PRs.
+1. **Speed bumps**: need the vehicle's pitch axis.
+2. **Finalize job + road segments (H3) + aggregation**: turns finished trips into the shared roughness map and crowd-confirmed potholes. The Map page stays empty until this exists.
+3. **Trip end on silence**: a trip whose Stop message never arrives stays "recording" for now; the plan closes it after 15 minutes.
+4. From the plan's cut list: laptop upload fallback, monitoring workbook, Terraform plan on PRs.
 
 ## Repository
 
@@ -58,6 +58,7 @@ services/read-api/    FastAPI read API for the dashboard
 db/migrations/        SQL migrations
 dashboard/            React + MapLibre + uPlot web app (mock backend built in)
 src/mobile-ios/       the iPhone recorder (Swift)
+tools/replay/         re-sends a recorded trip through the live path (Python, stdlib only)
 .github/workflows/    CI and deploys
 docker-compose.yml    local PostGIS for development
 ```
@@ -71,3 +72,4 @@ docker-compose.yml    local PostGIS for development
 | Processor, migrations, read API | automatic on merge to `main` (`deploy-services`) |
 | Dashboard | manual: Actions → **deploy-dashboard** → Run workflow |
 | A phone's device key | `.\infra\scripts\add-device-key.ps1 -DeviceId <name>` (prints the key once) |
+| A replay of a recorded trip | `python tools/replay/replay.py <session folder or .zip>` with `$env:REPLAY_API_URL` and `$env:REPLAY_DEVICE_KEY` set ([tools/replay](tools/replay/README.md)) |

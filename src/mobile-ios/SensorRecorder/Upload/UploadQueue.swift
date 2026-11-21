@@ -61,7 +61,7 @@ struct UploadStatus: Equatable, Sendable {
 /// - A file that can't be sent at all (a name we didn't write, e.g. a Files-app copy, or unreadable)
 ///   is moved to `upload_failed/` so it never blocks the queue.
 /// - Idempotency key = `sessionId:batchSeq` (also inside the body).
-final class UploadQueue: @unchecked Sendable {
+final class UploadQueue: Sendable {
     enum Outcome: Equatable {
         case uploaded(status: Int)
         case duplicate
@@ -81,7 +81,7 @@ final class UploadQueue: @unchecked Sendable {
     private let uptime: @Sendable () -> TimeInterval
     private let statusBox = Locked(UploadStatus())
     private let kickFlag = Locked(false)
-    private var loopTask: Task<Void, Never>?
+    private let loopTask = Locked<Task<Void, Never>?>(nil)
 
     /// Session metadata answered 404/405 (backend without the PUT route, or a redeploy in progress)
     /// this many times in a row is set aside in `upload_failed/`, so it never blocks the batches for
@@ -113,7 +113,13 @@ final class UploadQueue: @unchecked Sendable {
     static let minBackoff: TimeInterval = 1
     static let maxBackoff: TimeInterval = 30
 
-    var onEvent: (@Sendable (LogLevel, String) -> Void)?
+    typealias EventHandler = @Sendable (LogLevel, String) -> Void
+    private let eventHandler = Locked<EventHandler?>(nil)
+    /// Set by the app after init; read from the upload loop's thread.
+    var onEvent: EventHandler? {
+        get { eventHandler.current }
+        set { eventHandler.withLock { $0 = newValue } }
+    }
 
     init(directory: URL, transport: HTTPTransport = URLSessionTransport(),
          uptime: @escaping @Sendable () -> TimeInterval = { ProcessInfo.processInfo.systemUptime },
@@ -494,27 +500,29 @@ final class UploadQueue: @unchecked Sendable {
     // MARK: Loop
 
     func start() {
-        guard loopTask == nil else { return }
-        loopTask = Task.detached(priority: .utility) { [weak self] in
-            while !Task.isCancelled {
-                guard let self else { return }
-                let outcome = await self.processOnce()
-                let wait: TimeInterval
-                switch outcome {
-                // The file just handled is gone or skipped (see `leftovers`), so this never re-sends it.
-                case .uploaded, .duplicate, .permanentFailure, .skipped: wait = 0
-                case .retry: wait = self.status.currentBackoff
-                case .disabled: wait = 2
-                case .empty: wait = 1
+        loopTask.withLock { loopTask in
+            guard loopTask == nil else { return }
+            loopTask = Task.detached(priority: .utility) { [weak self] in
+                while !Task.isCancelled {
+                    guard let self else { return }
+                    let outcome = await self.processOnce()
+                    let wait: TimeInterval
+                    switch outcome {
+                    // The file just handled is gone or skipped (see `leftovers`), so this never re-sends it.
+                    case .uploaded, .duplicate, .permanentFailure, .skipped: wait = 0
+                    case .retry: wait = self.status.currentBackoff
+                    case .disabled: wait = 2
+                    case .empty: wait = 1
+                    }
+                    if wait > 0 { await self.sleep(wait) }
                 }
-                if wait > 0 { await self.sleep(wait) }
             }
         }
     }
 
     func stop() {
-        loopTask?.cancel()
-        loopTask = nil
+        let task = loopTask.withLock { t -> Task<Void, Never>? in defer { t = nil }; return t }
+        task?.cancel()
         releaseBackgroundTime()
     }
 

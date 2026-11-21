@@ -137,8 +137,9 @@ def test_live_trip_end_to_end(client, seed, fixture_batch):
 
     labels = _ok(client, f"/api/sessions/{SID}/labels")["labels"]
     assert [lab["type"] for lab in labels] == ["sickness"] and ISO.match(labels[0]["tUtc"])
-    assert _ok(client, f"/api/sessions/{SID}/series") == \
-        {"t": [], "aVert": [], "aLat": [], "aLon": [], "speed": [], "msdv": []}
+    series = _ok(client, f"/api/sessions/{SID}/series")
+    assert set(series) == {"t", "aVert", "aLat", "aLon", "speed", "msdv"}
+    assert len({len(v) for v in series.values()}) == 1  # columnar: equal lengths
 
     ov = _ok(client, "/api/overview")
     assert ov["sessions"]["total"] == 1 and ov["sessions"]["live"] == 1
@@ -181,6 +182,57 @@ def test_unknown_context_defaults_keep_the_shape(client, seed, fixture_batch):
     assert s["mount"] == {"location": "", "phoneOrientation": "", "rigid": False, "handheld": False}
     assert set(s["people"]) == {"operatorSeat", "raterSeat", "raterPosture", "passengerCount"}
     assert "unknown_context" in s["exclusionReasons"] and s["roughnessEligible"] is False
+
+
+def _with_motion(b: dict, vert) -> dict:
+    """Replace the batch's deviceMotion with 2 s of 100 Hz samples (phone screen up)."""
+    import numpy as np
+
+    rel = np.arange(200) / 100.0
+    t0 = b["t0UtcMs"] / 1000
+    zeros = [0.0] * 200
+    b["deviceMotion"] = {"t": rel.tolist(), "ua_x": zeros, "ua_y": zeros,
+                         "ua_z": (vert(t0 + rel) / 9.80665).tolist(),
+                         "g_x": zeros, "g_y": zeros, "g_z": [-1.0] * 200,
+                         "rr_x": zeros, "rr_y": zeros, "rr_z": zeros,
+                         "q_w": [1.0] * 200, "q_x": zeros, "q_y": zeros, "q_z": zeros}
+    return b
+
+
+def test_signal_results_are_served(client, seed, fixture_batch):
+    import numpy as np
+
+    start = dt.datetime.now(UTC) - dt.timedelta(seconds=60)
+    pothole_at = start.timestamp() + 2 * 15 + 1.0  # batch 15, ≈ 830 m in: outside the privacy zones
+
+    def vert(t):
+        return 0.8 * np.sin(2 * np.pi * 0.2 * t) + 15.0 * np.exp(-((t - pothole_at) / 0.01) ** 2)
+
+    batches = [_with_motion(b, vert) for b in _trip(fixture_batch, 30, start=start)]
+    seed(meta=[session_meta(SID)], batches=batches)
+
+    series = _ok(client, f"/api/sessions/{SID}/series")
+    assert 290 <= len(series["t"]) <= 300 and all(isinstance(t, int) for t in series["t"])
+    assert series["msdv"] == sorted(series["msdv"])  # a dose only grows
+    assert max(abs(v) for v in series["aVert"]) > 5  # the pothole spike
+
+    s = _ok(client, f"/api/sessions/{SID}")
+    assert s["msdvZ"] > 0 and s["msiPct"] == pytest.approx(s["msdvZ"] / 3, abs=1e-4)
+    assert s["sickness"]["msdvZ"] == s["msdvZ"]
+    assert s["eventCounts"] == {"pothole": 1, "speed_bump": 0, "rail_joint": 0}
+
+    (ev,) = _ok(client, f"/api/sessions/{SID}/events")["features"]
+    props = ev["properties"]
+    assert ev["geometry"]["type"] == "Point" and props["type"] == "pothole"
+    assert set(props) == {"id", "sessionId", "type", "tUtc", "speedKmh", "magnitude", "confidence",
+                          "matchedLabel", "vehicleType"}
+    assert props["speedKmh"] == 36.0 and props["vehicleType"] == "bus" and ISO.match(props["tUtc"])
+
+    (dev,) = _ok(client, "/api/live")["devices"]
+    assert dev["msdvSoFar"] == pytest.approx(s["msdvZ"], rel=1e-3) and dev["roughnessNow"] is not None
+
+    # Not finalized, so not part of the shared map yet.
+    assert _ok(client, "/api/events", vehicle="all")["features"] == []
 
 
 def test_cors_only_for_configured_origin(dbname, monkeypatch):

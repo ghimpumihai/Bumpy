@@ -5,10 +5,16 @@ from __future__ import annotations
 
 import datetime as dt
 
+import numpy as np
 from psycopg import Connection
 from psycopg.types.json import Jsonb
 
+from .dsp import Pipeline
 from .live import BatchFacts, SessionFacts, exclusion_reasons
+
+
+def from_epoch(seconds: float) -> dt.datetime:
+    return dt.datetime.fromtimestamp(seconds, tz=dt.timezone.utc)
 
 
 class Store:
@@ -154,12 +160,67 @@ class Store:
         )
 
         if not late:
-            self._update_live_state(f, received_at)
+            # Late batches skip the signal processing: the filters have moved past them. The
+            # finalize job recomputes the whole trip in one pass.
+            roughness_now, msdv = self._process_signal(f)
+            self._update_live_state(f, received_at, roughness_now, msdv)
         self._mark_processing_when_complete(f.session_id)
         self._refresh_exclusions(f.session_id)
         return "late" if late else "new"
 
-    def _update_live_state(self, f: BatchFacts, received_at: dt.datetime) -> None:
+    def _process_signal(self, f: BatchFacts) -> tuple[float | None, float]:
+        """Runs one batch through the trip's pipeline and saves its results and state."""
+        row = self.conn.execute(
+            "SELECT state, last_batch_seq FROM signal_state WHERE session_id = %s FOR UPDATE",
+            (f.session_id,),
+        ).fetchone()
+        # A missing batch means the filters would see a jump: restart them (the dose is kept).
+        reset = row is not None and f.batch_seq != row[1] + 1
+        pipeline = Pipeline(row[0] if row else None)
+        out = pipeline.feed(
+            np.asarray(f.motion_t, dtype=float),
+            np.asarray(f.motion_ua, dtype=float).reshape(-1, 3),
+            np.asarray(f.motion_g, dtype=float).reshape(-1, 3),
+            [(x.t.timestamp(), x.speed_ms) for x in f.fixes],
+            reset=reset,
+        )
+        if out.series:
+            with self.conn.cursor() as cur:
+                cur.executemany(
+                    "INSERT INTO session_series (session_id, t, a_vert, a_lat, a_lon, speed_ms, msdv) "
+                    "VALUES (%s, %s, %s, %s, %s, %s, %s) ON CONFLICT (session_id, t) DO NOTHING",
+                    [(f.session_id, from_epoch(p.t), p.a_vert, p.a_lat, p.a_lon, p.speed, p.msdv)
+                     for p in out.series],
+                )
+        for e in out.events:
+            # Position of the nearest GPS fix of this trip (≈ 1 Hz, so within about half a second).
+            self.conn.execute(
+                """
+                INSERT INTO events (session_id, type, t, geom, speed_ms, magnitude, confidence)
+                VALUES (%s, %s, %s,
+                        (SELECT geom FROM track_points WHERE session_id = %s
+                         ORDER BY abs(extract(epoch FROM t - %s)) LIMIT 1),
+                        %s, %s, %s)
+                ON CONFLICT (session_id, type, t) DO NOTHING
+                """,
+                (f.session_id, e.type, from_epoch(e.t), f.session_id, from_epoch(e.t), e.speed,
+                 e.magnitude, e.confidence),
+            )
+        self.conn.execute(
+            """
+            INSERT INTO signal_state (session_id, state, last_batch_seq, gaps, updated_at)
+            VALUES (%s, %s, %s, %s, now())
+            ON CONFLICT (session_id) DO UPDATE SET
+              state = EXCLUDED.state, last_batch_seq = EXCLUDED.last_batch_seq,
+              gaps = signal_state.gaps + EXCLUDED.gaps, updated_at = now()
+            """,
+            (f.session_id, Jsonb(pipeline.to_state()), f.batch_seq, int(out.reset)),
+        )
+        self.conn.execute("UPDATE sessions SET msdv_z = %s WHERE session_id = %s", (out.msdv, f.session_id))
+        return out.roughness_now, out.msdv
+
+    def _update_live_state(self, f: BatchFacts, received_at: dt.datetime,
+                           roughness_now: float | None, msdv: float | None) -> None:
         fix = f.last_fix
         # Without a new fix, keep the previous position, but only within the same trip.
         keep = "CASE WHEN EXCLUDED.fix_at IS NOT NULL THEN EXCLUDED.{c} " \
@@ -168,8 +229,9 @@ class Store:
         self.conn.execute(
             f"""
             INSERT INTO live_state (device_id, session_id, updated_at, received_at, fix_at, lat, lon,
-                                    speed_ms, course_deg, h_acc_m, battery, thermal, low_power)
-            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                                    speed_ms, course_deg, h_acc_m, battery, thermal, low_power,
+                                    roughness_now, msdv_so_far)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
             ON CONFLICT (device_id) DO UPDATE SET
               session_id = EXCLUDED.session_id,
               updated_at = EXCLUDED.updated_at,
@@ -177,13 +239,16 @@ class Store:
               {", ".join(f"{c} = {keep.format(c=c)}" for c in cols)},
               battery = EXCLUDED.battery,
               thermal = EXCLUDED.thermal,
-              low_power = EXCLUDED.low_power
+              low_power = EXCLUDED.low_power,
+              roughness_now = EXCLUDED.roughness_now,
+              msdv_so_far = EXCLUDED.msdv_so_far
             WHERE EXCLUDED.updated_at >= live_state.updated_at
             """,
             (f.device_id, f.session_id, f.end_utc, received_at,
              fix.t if fix else None, fix.lat if fix else None, fix.lon if fix else None,
              fix.speed_ms if fix else None, fix.course_deg if fix else None,
-             fix.h_acc_m if fix else None, f.battery, f.thermal, f.low_power),
+             fix.h_acc_m if fix else None, f.battery, f.thermal, f.low_power,
+             roughness_now, msdv),
         )
 
     # --- session metadata ----------------------------------------------------------------

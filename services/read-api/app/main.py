@@ -117,9 +117,10 @@ def create_app(pool: ConnectionPool | None = None) -> FastAPI:
 
     @app.get("/api/events")
     def events(vehicle: str | None = None, type: str | None = None):  # noqa: A002 - API.md name
-        q.enum_param(vehicle, "vehicle", q.VEHICLE_FILTERS)
-        q.enum_param(type, "type", q.EVENT_TYPES)
-        return q.empty_feature_collection()
+        vehicle = q.enum_param(vehicle, "vehicle", q.VEHICLE_FILTERS)
+        etype = q.enum_param(type, "type", q.EVENT_TYPES)
+        with pool.connection() as conn:
+            return q.all_events(conn, vehicle, etype)
 
     @app.get("/api/live")
     def live():

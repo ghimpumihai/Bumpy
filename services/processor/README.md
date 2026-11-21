@@ -23,7 +23,23 @@ Every batch of events from one partition is written in **one transaction togethe
 
 Each committed batch logs one line with the partition, the event count, the sequence number, `lag_s` (now minus the time Event Hubs received the last event) and the outcomes.
 
-Signal processing (roughness, potholes, motion-sickness dose, H3 segments, chart series) is not in yet: `roughness_now` and `msdv_so_far` stay `null`.
+## Signal processing (`roadride/dsp.py`)
+
+Each new, in-order batch runs through the trip's pipeline (plan §9):
+
+- **Vertical acceleration:** user acceleration projected on "up" (minus the gravity direction), in m/s², resampled onto a uniform 100 Hz grid.
+- **Roughness:** 1–30 Hz band-pass. `roughness_now` on the live view is its RMS over roughly the last 5 s.
+- **Motion sickness:** ISO 2631-1 **Wf** applied at 20 Hz after low-pass and decimation. MSDV = (∫a_w² dt)^½ is accumulated over the whole trip: `msdv_so_far` live, `sessions.msdv_z`, and `msdv` in the series.
+- **Potholes:** band-passed vertical above 5 m/s², only above 15 km/h, the peak within 0.3 s, at most one per second. Position comes from the nearest GPS fix. They're written to `events`.
+- **Chart series:** `session_series` at 5 Hz, with vertical (the largest value of each 0.2 s window), lateral/longitudinal and speed.
+- **Forward axis:** learned from GPS speed changes, so lateral/longitudinal stay 0 until about ten clear accelerations or brakings have been seen.
+
+The pipeline keeps all its memory in a JSON state saved in `signal_state`, in the same transaction as its rows and the stream checkpoint. A test feeds a 10-minute signal whole and in random 1–3 s chunks (with a JSON round trip each time) and requires the same output, so the finalize job can reuse it unchanged.
+
+- **Late batches** skip the signal processing.
+- **A missing batch or a time gap** restarts the filters (counted in `signal_state.gaps`) and keeps the dose.
+
+**Provisional:** the pothole threshold and the forward-axis estimate haven't seen a real drive yet. Speed bumps, H3 segment observations, the finalize job and aggregation come next.
 
 ## Database logins
 

@@ -128,6 +128,43 @@ def test_replay_never_aggregates(db, batch):
         ("replay", False, ["replay", "unknown_context"])
 
 
+def test_signal_processing_writes_series_events_and_dose(db, batch):
+    import math
+
+    import numpy as np
+
+    from conftest import motion_batch
+
+    t0 = 1_795_000_000.0
+    pothole_at = t0 + 2 * 10 + 1.0  # inside batch 10
+
+    def vert(t):
+        return 0.8 * np.sin(2 * np.pi * 0.2 * t) + 15.0 * np.exp(-((t - pothole_at) / 0.01) ** 2)
+
+    s = _store(db)
+    sid = batch["sessionId"]
+    with db.transaction():
+        for seq in range(30):
+            s.apply_batch(parse_batch(motion_batch(batch, sid, seq, t0 + 2 * seq, vert)), RECEIVED)
+
+    n_series = _one(db, "SELECT count(*) FROM session_series WHERE session_id = %s", sid)[0]
+    assert 295 <= n_series <= 300  # 60 s at 5 Hz
+    (etype, has_geom, speed, magnitude), = db.execute(
+        "SELECT type, geom IS NOT NULL, speed_ms, magnitude FROM events").fetchall()
+    assert etype == "pothole" and has_geom and speed == 12.0 and magnitude > 5
+
+    msdv_z = _one(db, "SELECT msdv_z FROM sessions")[0]
+    rough, msdv_live = _one(db, "SELECT roughness_now, msdv_so_far FROM live_state")
+    assert msdv_z > 0 and math.isclose(msdv_live, msdv_z) and rough is not None
+    assert _one(db, "SELECT last_batch_seq, gaps FROM signal_state") == (29, 0)
+
+    # A missing batch restarts the filters (counted) but keeps the dose.
+    with db.transaction():
+        s.apply_batch(parse_batch(motion_batch(batch, sid, 31, t0 + 62, vert)), RECEIVED)
+    assert _one(db, "SELECT last_batch_seq, gaps FROM signal_state") == (31, 1)
+    assert _one(db, "SELECT msdv_z FROM sessions")[0] >= msdv_z
+
+
 def test_checkpoints_roundtrip(db):
     s = _store(db)
     with db.transaction():

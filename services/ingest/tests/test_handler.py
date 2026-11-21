@@ -317,6 +317,34 @@ def test_session_wrong_key_is_401(session_meta, keys, sinks):
     assert handle_session(sid, headers(**{"x-device-key": "bad"}), gz(session_meta), keys, sinks).status == 401
 
 
+def test_key_vault_outage_beyond_the_stale_limit_is_503(batch, sinks):
+    from ingest_core.keys import hash_key
+
+    class Clock:
+        t = 0.0
+
+        def __call__(self):
+            return self.t
+
+    state = {"fail": False}
+
+    def loader():
+        if state["fail"]:
+            raise RuntimeError("vault down")
+        return {hash_key(DEVICE_KEY): {batch["deviceId"]}}
+
+    clock = Clock()
+    keys = KeyStore(loader, max_stale_s=3600, clock=clock)
+    assert handle_batch(headers(), gz(batch), keys, sinks).status == 200
+    state["fail"] = True
+    clock.t = 3000
+    assert handle_batch(headers(), gz(batch), keys, sinks).status == 200  # cached keys still serve
+    clock.t = 3601
+    resp = handle_batch(headers(), gz(batch), keys, sinks)
+    assert resp.status == 503  # the app retries; the batch waits on the phone
+    assert len(sinks.events) == 2
+
+
 def test_huge_integer_is_400_not_500(batch, keys, sinks):
     """10**400 doesn't fit a float: math.isfinite would raise OverflowError (500, retried forever)."""
     for mutate in (lambda b: b["accelRaw"]["x"].__setitem__(0, 10**400),

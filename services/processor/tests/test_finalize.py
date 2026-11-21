@@ -406,3 +406,14 @@ def test_finalize_scores_detections_and_marks_handled_and_drifting_windows(db, b
     rough_windows = _one(db, "SELECT sum(n_windows) FILTER (WHERE roughness_rms IS NOT NULL) FROM segment_observations")[0]
     all_windows = _one(db, "SELECT sum(n_windows) FROM segment_observations")[0]
     assert all_windows - rough_windows >= 50
+
+
+def test_a_window_is_placed_at_its_middle():
+    """A series point's t is its window's end; placing the window there shifted every pass by half a
+    window. Lat grows 1° per second here, and the cell boundary is at t = 1.15 s."""
+    series = [SeriesPoint(t=0.2 * (k + 1), a_vert=0.0, a_lat=0.0, a_lon=0.0, speed=10.0, msdv=0.0)
+              for k in range(10)]
+    fixes = [(float(s), float(s), 0.0) for s in range(4)]
+    passes = fz.build_passes(series, fixes, [], cell_of=lambda lat, lon: "A" if lat < 1.15 else "B")
+    # Windows ending at 0.2 … 1.2 s have their middles at 0.1 … 1.1 s, all before the boundary.
+    assert [(p.h3, p.n_windows) for p in passes] == [("A", 6), ("B", 4)]

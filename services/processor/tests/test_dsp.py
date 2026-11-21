@@ -404,3 +404,43 @@ def test_a_trip_saved_before_rotation_rate_continues():
     q = dsp.Pipeline(old)
     out = q.feed(t[half:], ua[half:], grav[half:], [f for f in fixes if f[0] >= t[half]])
     assert not out.reset and [e.type for e in out.events + q.flush()] == ["pothole"]
+
+
+# --- Resets ---------------------------------------------------------------------------------
+
+def test_a_reset_does_not_inject_dose_from_its_first_sample():
+    """User acceleration is zero-mean: starting the 2 Hz low-pass as if the first sample had lasted
+    forever released a step into Wf (x0 = 2 m/s² gave 0.096 m²/s³ of dose from nothing)."""
+    vert = lambda t: np.where(np.arange(len(t)) == 0, 2.0, 0.0)  # noqa: E731
+    t, ua, grav, fixes = synth(60, vert=vert, jitter=False)
+    out, p = run_whole(t, ua, grav, fixes)
+    assert p.dose < 0.001
+
+
+def test_window_dose_adds_up_to_the_trip_across_resets():
+    """A reset cut the open 5 Hz window and dropped its dose, so Σ dose_inc < dose (and passes' a_w
+    came out low). The cut-short dose now goes into the next window."""
+    vert = lambda t: np.sin(2 * np.pi * 0.2 * t)  # noqa: E731
+    t, ua, grav, fixes = synth(60, vert=vert)
+    m = ~(((t >= T0 + 20.03) & (t < T0 + 20.6)) | ((t >= T0 + 41.11) & (t < T0 + 41.7)))
+    out, p = run_whole(t[m], ua[m], grav[m], fixes)
+    assert out.reset
+
+    def open_dose(pipe):  # the window still open at the end of the data, not emitted yet
+        return pipe.grid["win"]["aw2"] + pipe.carry_aw2
+
+    assert sum(pt.dose_inc for pt in out.series) + open_dose(p) == pytest.approx(p.dose, rel=1e-9)
+    # Also when the reset comes between feeds (a missing batch).
+    q = dsp.Pipeline()
+    half = int(np.searchsorted(t, T0 + 30.07))
+    a = q.feed(t[:half], ua[:half], grav[:half], [f for f in fixes if f[0] < t[half]])
+    b = q.feed(t[half:], ua[half:], grav[half:], [f for f in fixes if f[0] >= t[half]], reset=True)
+    assert sum(pt.dose_inc for pt in a.series + b.series) + open_dose(q) == pytest.approx(q.dose, rel=1e-9)
+
+
+def test_no_pothole_at_exactly_15_kmh():
+    """Plan §9 step 5 and the pass ratio: above 15 km/h, not at it."""
+    out_at, _ = run_whole(*synth(10, vert=_spike(5.0), speed=lambda t: 0 * t + dsp.POTHOLE_MIN_SPEED_MS))
+    assert not [e for e in out_at.events if e.type == "pothole"]
+    out_above, _ = run_whole(*synth(10, vert=_spike(5.0), speed=lambda t: 0 * t + dsp.POTHOLE_MIN_SPEED_MS + 0.1))
+    assert [e.type for e in out_above.events] == ["pothole"]

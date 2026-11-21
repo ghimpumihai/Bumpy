@@ -248,7 +248,7 @@ def build_passes(series: list[SeriesPoint], fixes: list[tuple[float, float, floa
         return []
     fa = np.asarray(fixes, dtype=float)
     ft = fa[:, 0]
-    t = np.array([p.t for p in series])
+    t = quality.window_mids([p.t for p in series], WINDOW_S)  # a point's t is its window's end
     lat, lon = (np.interp(t, ft, col) for col in (fa[:, 1], fa[:, 2]))
     if len(ft) > 1:
         i = np.clip(np.searchsorted(ft, t), 1, len(ft) - 1)

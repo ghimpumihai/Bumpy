@@ -14,8 +14,12 @@ def iso(value: dt.datetime | None) -> str | None:
     return value.strftime("%Y-%m-%dT%H:%M:%S.") + f"{value.microsecond // 1000:03d}Z"
 
 
+_EPOCH = dt.datetime(1970, 1, 1, tzinfo=UTC)
+
+
 def epoch_ms(value: dt.datetime) -> int:
-    return int(round(value.timestamp() * 1000))
+    # Truncated like iso(), in exact integer arithmetic, so an event's id/series ms and its tUtc agree.
+    return (value.astimezone(UTC) - _EPOCH) // dt.timedelta(milliseconds=1)
 
 
 def rnd(value: float | None, digits: int = 6) -> float | None:

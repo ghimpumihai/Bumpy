@@ -178,6 +178,9 @@ class Pipeline:
         self.pending_fixes = [tuple(f) for f in s.get("pending_fixes", [])]
         self.held = [list(h) for h in s.get("held", [])]  # potholes [t, peak, speed] waiting for POTHOLE_HOLD_S
         self.last_bump_t = s.get("last_bump_t")
+        # ∫ a_w² dt of a 5 Hz window cut short by a reset, added to the next window's dose_inc so that
+        # Σ dose_inc over the series stays the trip's dose.
+        self.carry_aw2 = float(s.get("carry_aw2", 0.0))
         if self.grid is not None:
             self._upgrade_grid(self.grid)
 
@@ -188,7 +191,7 @@ class Pipeline:
             "last_event_t": self.last_event_t, "open_event": self.open_event,
             "rough_ema": self.rough_ema, "grid": self.grid,
             "pending_fixes": [list(f) for f in self.pending_fixes],
-            "held": self.held, "last_bump_t": self.last_bump_t,
+            "held": self.held, "last_bump_t": self.last_bump_t, "carry_aw2": self.carry_aw2,
         }
 
     @staticmethod
@@ -219,12 +222,12 @@ class Pipeline:
         return self.forward_n >= FWD_MIN_EVIDENCE and np.linalg.norm(self.forward_sum) > 0
 
     def _new_grid(self, t: float, sample: list[float]) -> dict:
-        ua_g = np.array(sample[:6])
-        x0 = self._vert(ua_g[None, :])[0]
         return {
             "origin": t, "k": 0, "prev": [t] + list(sample),
             "zi_band": _zeros(SOS_BAND)[0],
-            "zi_low": (signal.sosfilt_zi(SOS_LOW) * x0).tolist(),
+            # Zero, not the steady state of the first sample: user acceleration has zero mean, so a
+            # start "as if x0 forever" releases a step of x0 into Wf (x0 = 2 m/s²: 0.096 m²/s³ of false dose).
+            "zi_low": _zeros(SOS_LOW)[0],
             "zi_h": _zeros(SOS_LOW, 3),
             "zi_wf": _zeros(SOS_WF)[0],
             "zi_pitch": _zeros(SOS_PITCH)[0],
@@ -282,11 +285,11 @@ class Pipeline:
         samples = np.hstack([np.asarray(ua, float).reshape(-1, 3), np.asarray(grav, float).reshape(-1, 3),
                              rr])[order]
         if reset:
-            self.grid = None
+            self._drop_grid()
             out.reset = True
         if len(t) and self.grid is not None and abs(t[0] - self.grid["prev"][0]) > MAX_GAP_S:
             # A hole, or the clock jumped backwards: either way the filters can't continue.
-            self.grid = None
+            self._drop_grid()
             out.reset = True
         if len(t) == 0:
             self.pending_fixes = fixes  # no samples to place them against yet
@@ -299,7 +302,7 @@ class Pipeline:
         cuts = (np.flatnonzero(np.diff(t) > MAX_GAP_S) + 1).tolist()
         for i, (a, b) in enumerate(zip([0] + cuts, cuts + [len(t)])):
             if i > 0:
-                self.grid = None
+                self._drop_grid()
                 out.reset = True
             self._feed_segment(t[a:b], samples[a:b], fixes, out)
             fixes, self.pending_fixes = self.pending_fixes, []
@@ -335,6 +338,11 @@ class Pipeline:
         else:
             self.pending_fixes = fixes
         gr["prev"] = [float(src_t[-1])] + src[-1].tolist()
+
+    def _drop_grid(self) -> None:
+        if self.grid is not None:
+            self.carry_aw2 += self.grid["win"].get("aw2", 0.0)
+        self.grid = None
 
     def _rough(self) -> float | None:
         return None if self.rough_ema is None else math.sqrt(self.rough_ema)
@@ -408,8 +416,10 @@ class Pipeline:
                         t=tt, a_vert=round(win["peak"], 4), a_lat=round(win["lat"] / win["n"], 4),
                         a_lon=round(win["lon"] / win["n"], 4), speed=self._speed_at(tt),
                         msdv=round(math.sqrt(self.dose), 5),
-                        rough_rms=math.sqrt(win.get("b2", 0.0) / win["n"]), dose_inc=win.get("aw2", 0.0)))
+                        rough_rms=math.sqrt(win.get("b2", 0.0) / win["n"]),
+                        dose_inc=win.get("aw2", 0.0) + self.carry_aw2))
                     win.update(n=0, peak=0.0, lat=0.0, lon=0.0, b2=0.0, aw2=0.0)
+                    self.carry_aw2 = 0.0
             i = j
         gr["zi_pitch"] = zp.tolist()
         self.pending_fixes = list(fixes[fix_i:])  # later than the last sample: taken next time
@@ -504,7 +514,7 @@ class Pipeline:
         if self.last_event_t is not None and t - self.last_event_t < POTHOLE_REFRACTORY_S:
             return
         speed = self._speed_at(t)
-        if speed is None or speed < POTHOLE_MIN_SPEED_MS:
+        if speed is None or speed <= POTHOLE_MIN_SPEED_MS:  # "above 15 km/h", like the pass ratio
             return
         self.open_event = [t, abs(b), speed]
         self.last_event_t = t

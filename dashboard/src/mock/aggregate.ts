@@ -102,16 +102,27 @@ function fitRoughnessModel(rows: Row[]): { beta: number; effects: Record<string,
   return { beta: solution[0], effects };
 }
 
+const isRoughUsable = (r: Row) =>
+  r.input.roughnessEligible && Boolean(r.obs.roughnessRms) && r.obs.meanSpeedMs >= MIN_ROUGHNESS_SPEED_MS;
+
+/** Per session, over the passes the percentile mean uses (idle ones don't shift the moving ones); ties get their average rank. */
 function percentRanks(rows: Row[]) {
   const bySession = new Map<string, Row[]>();
   for (const row of rows) {
-    if (!row.input.roughnessEligible || !row.obs.roughnessRms) continue;
+    if (!isRoughUsable(row)) continue;
     const id = row.input.sim.spec.sessionId;
     bySession.set(id, [...(bySession.get(id) ?? []), row]);
   }
   for (const group of bySession.values()) {
     const sorted = [...group].sort((a, b) => (a.obs.roughnessRms ?? 0) - (b.obs.roughnessRms ?? 0));
-    sorted.forEach((row, i) => (row.percentile = sorted.length > 1 ? i / (sorted.length - 1) : 0.5));
+    const n = sorted.length;
+    let i = 0;
+    while (i < n) {
+      let j = i;
+      while (j + 1 < n && sorted[j + 1].obs.roughnessRms === sorted[i].obs.roughnessRms) j++;
+      for (let k = i; k <= j; k++) sorted[k].percentile = n > 1 ? (i + j) / 2 / (n - 1) : 0.5;
+      i = j + 1;
+    }
   }
 }
 

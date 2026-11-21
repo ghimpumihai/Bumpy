@@ -129,14 +129,23 @@ def fit_roughness(rows: list[Obs]) -> Fit | None:
 
 
 def _percent_ranks(rows: list[Obs]) -> None:
+    """Per session, over the passes the percentile mean uses (rough_usable, so idle passes don't shift
+    the moving ones); equal roughness gets the average of its ranks."""
     by_session: dict[str, list[Obs]] = defaultdict(list)
     for r in rows:
-        if r.roughness_eligible and r.roughness:
+        if r.rough_usable:
             by_session[r.session_id].append(r)
     for group in by_session.values():
         ordered = sorted(group, key=lambda r: r.roughness)
-        for i, r in enumerate(ordered):
-            r.percentile = i / (len(ordered) - 1) if len(ordered) > 1 else 0.5
+        n = len(ordered)
+        i = 0
+        while i < n:
+            j = i
+            while j + 1 < n and ordered[j + 1].roughness == ordered[i].roughness:
+                j += 1
+            for k in range(i, j + 1):
+                ordered[k].percentile = (i + j) / 2 / (n - 1) if n > 1 else 0.5
+            i = j + 1
 
 
 def _mean(values: list[float]) -> float | None:
@@ -221,7 +230,7 @@ def load_observations(conn: Connection) -> list[Obs]:
         SELECT o.session_id, o.h3, s.vehicle_type, o.duration_s, o.mean_speed_ms, o.roughness_rms,
                o.aw_rms, o.pothole_count, s.context_known, s.mount,
                COALESCE(NULLIF(s.people->>'raterSeat', ''), 'unknown'),
-               COALESCE(NULLIF(s.people->>'raterPosture', ''), 'unknown')
+               COALESCE(NULLIF(s.people->>'raterPosture', ''), 'seated')  -- the app's and summary's default
         FROM segment_observations o JOIN sessions s USING (session_id)
         WHERE s.include_in_agg
         ORDER BY o.session_id, o.pass_idx

@@ -168,8 +168,6 @@ struct SessionStatsSections: View {
                     .accessibilityElement(children: .combine)
                     .accessibilityValue("\(stats.labelsCount)")
                     .accessibilityIdentifier("stat.labelsCount")
-                row("Sickness ratings", "\(stats.sicknessRatings)")
-                row("Sickness prompts missed", "\(stats.sicknessMissed)")
             }
             Section("Storage") {
                 row("Total size", ByteFormat.string(stats.totalBytes))

@@ -1,7 +1,7 @@
 import { cellToBoundary, cellToLatLng, isValidCell } from "h3-js";
 
 import { MS_PER_SECOND, MS_TO_KMH, METERS_PER_KM, SECONDS_PER_HOUR } from "@/constants/units";
-import { ProcessingStatus, RoadEventType, SessionSource, VehicleType } from "@/types/common";
+import { RoadEventType, SessionSource, VehicleType } from "@/types/common";
 import type { LiveDevice, LiveResponse } from "@/types/live";
 import type { Overview } from "@/types/overview";
 import type { HeatCollection, SegmentCollection, SegmentDetail, VehicleFilter } from "@/types/segments";
@@ -44,8 +44,7 @@ type Params = Record<string, string>;
 type Handler = (params: Params, query: URLSearchParams) => unknown;
 
 /** Live devices that sent nothing for this long disappear from the live view. */
-const LIVE_WINDOW_S = 300; // a recording trip stays listed through 5 min of silence
-const LIVE_ENDED_WINDOW_S = 60; // an ended trip stays listed for 1 min (D40)
+const LIVE_WINDOW_S = 60; // devices heard from in the last minute
 const LIVE_TRACK_S = 120;
 const ROUGHNESS_NOW_WINDOW_S = 3;
 const TRACK_HZ = 1;
@@ -232,9 +231,7 @@ function live(): LiveResponse {
       const last = lastSampleIndex(sim, now);
       // Recording devices heard from in the last 5 min (a dead zone keeps them listed, stale); ended trips for 1 min.
       const receivedAt = receivedAtMs(sim, now);
-      const windowS = processingStatus(sim, now) === ProcessingStatus.LIVE ? LIVE_WINDOW_S : LIVE_ENDED_WINDOW_S;
-      if (now - receivedAt > windowS * MS_PER_SECOND) return [];
-      const latest = sim.ratings.filter((rating) => rating.sampleIndex <= last).at(-1);
+      if (now - receivedAt > LIVE_WINDOW_S * MS_PER_SECOND) return [];
       const window = ROUGHNESS_NOW_WINDOW_S * SERIES_HZ;
       let sumSquares = 0;
       for (let k = Math.max(0, last - window); k <= last; k++) sumSquares += sim.aVert[k] ** 2;
@@ -263,7 +260,6 @@ function live(): LiveResponse {
           roughnessNow: round(Math.sqrt(sumSquares / (window + 1)), 3),
           msdvSoFar: round(sim.msdv[last], 3),
           battery: round(Math.max(0.05, LIVE_BATTERY_START - hoursRunning * LIVE_BATTERY_DRAIN_PER_HOUR), 2),
-          latestRating: latest ? { value: latest.value, tUtc: latest.tUtc } : null,
           thermal: "nominal",
           track: trackPoints,
         },

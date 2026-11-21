@@ -9,7 +9,7 @@ import pytest
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1]))
 
 from app.fmt import epoch_ms, iso  # noqa: E402
-from app.queries import BadRequest, enum_param, is_h3_cell, rating_value  # noqa: E402
+from app.queries import BadRequest, enum_param, is_h3_cell  # noqa: E402
 
 UTC = dt.timezone.utc
 
@@ -38,11 +38,6 @@ def test_h3_cell():
     assert not is_h3_cell("8a1fb46622dfffz")
 
 
-def test_rating_value():
-    assert rating_value("3") == 3 and rating_value("4.0") == 4 and rating_value(5) == 5
-    assert rating_value(None) is None and rating_value("") is None and rating_value("skip") is None
-    assert rating_value("inf") is None and rating_value("nan") is None
-
 
 def test_telemetry_off_without_connection_string(monkeypatch):
     pytest.importorskip("fastapi")
@@ -51,3 +46,12 @@ def test_telemetry_off_without_connection_string(monkeypatch):
 
     monkeypatch.delenv("APPLICATIONINSIGHTS_CONNECTION_STRING", raising=False)
     assert configure_telemetry() is False
+
+
+def test_epoch_ms_and_iso_name_the_same_millisecond():
+    """iso() truncates to the ms; epoch_ms rounded, so an event's id/series ms and its tUtc could
+    differ by 1 ms."""
+    t = dt.datetime(2026, 11, 21, 9, 12, 3, 512999, tzinfo=UTC)
+    assert iso(t) == "2026-11-21T09:12:03.512Z" and epoch_ms(t) == 1795252323512
+    ms = epoch_ms(t)
+    assert dt.datetime.fromtimestamp(ms / 1000, UTC).strftime("%S.%f")[:6] == iso(t)[17:23]

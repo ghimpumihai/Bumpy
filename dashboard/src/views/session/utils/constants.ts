@@ -4,8 +4,6 @@ export const TRACK_SOURCE_ID = "session-track";
 export const TRACK_EVENTS_SOURCE_ID = "session-events";
 export const TRACK_LINE_WIDTH_PX = 4;
 export const CHART_HEIGHT_PX = 170;
-/** Most recent MISC ratings listed next to the prediction. */
-export const MAX_RATING_ROWS = 12;
 
 /** Track colour by speed, km/h. */
 export const SPEED_BANDS: ScaleBand[] = [

@@ -165,9 +165,10 @@ def test_signal_processing_writes_series_events_and_dose(db, batch):
         "SELECT type, geom IS NOT NULL, speed_ms, magnitude FROM events").fetchall()
     assert etype == "pothole" and has_geom and speed == 12.0 and magnitude > 5
 
-    msdv_z = _one(db, "SELECT msdv_z FROM sessions")[0]
+    msdv_z, msdv_y = _one(db, "SELECT msdv_z, msdv_y FROM sessions")
     rough, msdv_live = _one(db, "SELECT roughness_now, msdv_so_far FROM live_state")
-    assert msdv_z > 0 and math.isclose(msdv_live, msdv_z) and rough is not None
+    assert msdv_z > 0 and msdv_y is not None and rough is not None
+    assert math.isclose(msdv_live, math.hypot(msdv_z, msdv_y))  # live shows the combined dose (D49)
     assert _one(db, "SELECT last_batch_seq, gaps FROM signal_state") == (29, 0)
 
     # A missing batch restarts the filters (counted) but keeps the dose.

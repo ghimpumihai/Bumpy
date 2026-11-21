@@ -21,8 +21,6 @@ final class AppModel {
     let audio = AudioRecorderService()
     let audioMeter = AudioLevelMeterService()
     let uploadQueue: UploadQueue
-    let sicknessInterval: TimeInterval
-    let sicknessTimeout: TimeInterval
 
     var sessions: [SessionStore.Entry] = []
     var path = NavigationPath()
@@ -51,13 +49,6 @@ final class AppModel {
         #endif
         try? store.ensureRoot()
         uploadQueue = UploadQueue(directory: UploadQueue.defaultDirectory, config: { AppSettings.uploadConfig })
-        // Launch arguments `-sicknessInterval <s> -sicknessTimeout <s>` (NSArgumentDomain) override
-        // the spec defaults (120 s / 30 s); used by UI tests and for dry runs.
-        let d = UserDefaults.standard
-        let interval = d.double(forKey: "sicknessInterval")
-        let timeout = d.double(forKey: "sicknessTimeout")
-        sicknessInterval = interval > 0 ? interval : 120
-        sicknessTimeout = timeout > 0 ? timeout : 30
         setup = SetupDefaults.load()
         // Upload events go to the latest session's app_log.txt (spec §4) and to the unified log.
         let logTarget = uploadLogSession
@@ -169,8 +160,7 @@ final class AppModel {
         SetupDefaults.save(setup)
         let deps = makeDependencies()
         let session = try RecordingSession(store: store, setup: setup, preflight: preflight, deps: deps)
-        let controller = RecordingController(session: session, sicknessInterval: sicknessInterval,
-                                             sicknessTimeout: sicknessTimeout)
+        let controller = RecordingController(session: session)
         location.stopPreview()
         recording = controller
         uploadLogSession.withLock { $0 = session }

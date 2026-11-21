@@ -124,7 +124,7 @@ Sources: [OpenFreeMap](https://openfreemap.org/), [uPlot](https://github.com/lee
 
 ## Signal processing
 
-- **ISO 2631-1 Wf** (motion sickness, vertical axis). Parameters agree between memory and an independent open-source implementation; the ISO table itself has not been read:
+- **ISO 2631-1 Wf** (motion sickness, vertical axis). Parameters agree between memory and an independent open-source implementation. Checked (2026-11-21) against Wf's one-third-octave values 0.02–4 Hz as calculated by Virtins and the first row of ISO's Table 3 (ANSI S2.72 preview): the analog filter is within 0.06 %, the backend's digital one within 1 % up to 0.63 Hz:
   - f1 = 0.08 Hz, f2 = 0.63 Hz (band-limiting, Q = 1/√2);
   - f4 = 0.25 Hz with Q4 = 0.86;
   - f5 = 0.0625 Hz with Q5 = 0.80;
@@ -137,10 +137,10 @@ Sources: [OpenFreeMap](https://openfreemap.org/), [uPlot](https://github.com/lee
   - −1.4 dB at 0.25 Hz;
   - −13.0 dB at 0.5 Hz;
   - −32.6 dB at 1 Hz.
-- **MSDV** = √(∫ a_w² dt) in m/s^1.5. Motion sickness incidence ≈ (1/3) · MSDV_z, as a percentage of unadapted adults who may vomit (one secondary source).
-- **Lateral weighting (Donohew & Griffin, 2004):** flat from 0.0315 to 0.25 Hz, then −12 dB per octave to 0.8 Hz. Exact coefficients not found. TNO (Bos, 2024) reports that the ISO weighting may underestimate symptoms and that the sickness peak sits near 0.23 Hz.
+- **MSDV** = √(∫ a_w² dt) in m/s^1.5. Motion sickness incidence ≈ (1/3) · MSDV_z, as a percentage of unadapted adults who may vomit, for exposures of 20 minutes to 6 hours (secondary sources: the VTI report quoting ISO 2631-1 and Lawther & Griffin 1987). The backend applies it to the combined vertical + lateral MSDV (D49); no published factor exists for lateral motion.
+- **Lateral weighting (Donohew & Griffin, 2004):** an acceleration weighting, flat from 0.0315 to 0.25 Hz, then −12 dB per octave (proportional to displacement) to 0.8 Hz; it "may not apply where roll accompanies lateral motion" (abstract). Exact coefficients not found; D50 fits a realizable filter to the straight line. BS 6841 and ISO 2631-1 weight only vertical motion for sickness. TNO (Bos, 2024) reports that the ISO weighting may underestimate symptoms and that the sickness peak sits near 0.23 Hz.
 - **Road roughness:** RMS of vertical acceleration is the most common proxy. Studies use ~100 m segments; 10 m is too noisy. Speed dependence follows a power law, so fit it from data rather than dividing by speed.
 - **Pothole detection:** Z-threshold, Z-diff, std-dev and G-zero methods (Mednis et al.). They need a fixed mount; evaluate with precision and recall against labels.
 - **Map matching:** OSRM `/match`, Valhalla Meili, or PostGIS snapping. H3 hexagons are a no-import alternative.
 
-Sources: [ISO2631.m reference implementation](https://github.com/janiex/SimulinkMatlab/blob/master/Matlab/ISO2631.m), [NI human vibration filters](https://www.ni.com/en/support/documentation/supplemental/08/human-vibration-weighting-filters-in-labview-sound-and-vibration.html), [Donohew & Griffin 2004](https://eprints.soton.ac.uk/28230), [TNO Bos 2024](https://publications.tno.nl/publication/34645611/uTQT32eq/bos-2024-advancing.pdf), [smartphone roughness validation](https://arxiv.org/pdf/1902.10699), [roughness review](https://arxiv.org/pdf/2411.07315).
+Sources: [ISO2631.m reference implementation](https://github.com/janiex/SimulinkMatlab/blob/master/Matlab/ISO2631.m), [NI human vibration filters](https://www.ni.com/en/support/documentation/supplemental/08/human-vibration-weighting-filters-in-labview-sound-and-vibration.html), [Virtins weighting tables](https://www.virtins.com/doc/Frequency-Weightings-for-Sound-and-Vibration-Perceived-by-Humans-using-Multi-Instrument.pdf), [ANSI S2.72 / ISO 2631-1 preview](https://webstore.ansi.org/preview-pages/ASA/preview_ANSI+S2.72+Part+1-2002+(R+2007)+++ISO+2631-1-1997.pdf), [VTI report (MSI)](https://www.diva-portal.org/smash/get/diva2:675200/FULLTEXT01.pdf), [Donohew & Griffin 2004](https://eprints.soton.ac.uk/28230), [TNO Bos 2024](https://publications.tno.nl/publication/34645611/uTQT32eq/bos-2024-advancing.pdf), [smartphone roughness validation](https://arxiv.org/pdf/1902.10699), [roughness review](https://arxiv.org/pdf/2411.07315).

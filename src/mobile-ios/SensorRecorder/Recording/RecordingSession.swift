@@ -2,7 +2,6 @@ import Foundation
 
 /// Labels written to `labels.csv` (spec §3.7). Raw values are the CSV `type` column.
 enum LabelType: String, Sendable {
-    case sickness, sicknessMissed = "sickness_missed", sicknessPrompt = "sickness_prompt"
     case pothole, speedBump = "speed_bump", phoneMoved = "phone_moved"
     case surfaceStart = "surface_start", surfaceEnd = "surface_end"
     case segmentStart = "segment_start", segmentEnd = "segment_end"
@@ -77,11 +76,8 @@ final class RecordingSession: @unchecked Sendable {
 
     struct LabelState {
         var count = 0
-        var sicknessRatings = 0
-        var sicknessMissed = 0
         var activeSurface: SurfaceKind?
         var activeSegments: Set<SegmentKind> = []
-        var lastSickness: (value: Int, date: Date)?
     }
 
     let id: UUID
@@ -587,11 +583,7 @@ final class RecordingSession: @unchecked Sendable {
         writer.append(.labels, CSV.row([CSV.f6(t), CSV.ms(timeBase.utcMs(fromUptime: t)), type.rawValue,
                                         CSV.escape(value), CSV.escape(note)]))
         accumulator.addLabel(t: t, type: type.rawValue, value: value, note: note)
-        labelBox.withLock { s in
-            s.count += 1
-            if type == .sickness { s.sicknessRatings += 1; if let v = value.flatMap(Int.init) { s.lastSickness = (v, label.date) } }
-            if type == .sicknessMissed { s.sicknessMissed += 1 }
-        }
+        labelBox.withLock { $0.count += 1 }
         return label
     }
 
@@ -725,7 +717,6 @@ final class RecordingSession: @unchecked Sendable {
         }
         let l = labelBox.current
         return .init(durationSec: endUp - startUp, streams: streams, labelsCount: l.count,
-                     sicknessRatings: l.sicknessRatings, sicknessMissed: l.sicknessMissed,
                      audioFiles: audioFiles.sorted(), fileSizes: sizes, totalBytes: total,
                      writeErrors: writer.writeErrors.count, uploadBatchesCreated: accumulator.batchesCreated)
     }

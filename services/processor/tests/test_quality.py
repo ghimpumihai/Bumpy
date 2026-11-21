@@ -90,6 +90,15 @@ def test_detection_scores_against_taps_within_1_5_s():
                                      "precision": 0.0, "recall": 0.0}
 
 
+def test_recall_is_over_taps_when_one_pothole_is_detected_twice():
+    # Front and rear axle 1.3 s apart both hit the first tap; the other two taps are missed.
+    events = [(T0 + 10.0, "pothole"), (T0 + 11.3, "pothole")]
+    taps = [(T0 + 10.5, "pothole"), (T0 + 40.0, "pothole"), (T0 + 70.0, "pothole")]
+    metrics, _ = qc.score_detections(events, taps)
+    assert metrics["pothole"] == {"truePositives": 2, "falsePositives": 0, "falseNegatives": 2,
+                                  "precision": 1.0, "recall": 0.3333}
+
+
 def test_detection_without_taps_or_detections_has_no_ratios():
     metrics, matched = qc.score_detections([], [])
     assert matched == []

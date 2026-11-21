@@ -11,13 +11,16 @@ import numpy as np
 from psycopg import Connection
 from psycopg.types.json import Jsonb
 
+from . import clock
 from .db import is_connection_loss, is_retryable_conflict
 from .dsp import Pipeline
-from .live import BatchFacts, SessionFacts, exclusion_reasons
+from .live import MAX_HACC_M, BatchFacts, SessionFacts, exclusion_reasons
 
 log = logging.getLogger(__name__)
 
 T = TypeVar("T")
+# Half of finalize.MAX_FIX_GAP_S: no point the finalize job places between two fixes is further from one.
+EVENT_FIX_MAX_S = 5.0
 
 
 
@@ -226,15 +229,18 @@ class Store:
             # Late batches skip the signal processing: the filters have moved past them. The
             # finalize job recomputes the whole trip in one pass.
             ok, result = self._optional("signal", f.session_id, lambda: self._process_signal(f))
-            if ok:
+            covered = ok and result is None  # already in the finalize job's state (trip reopened above)
+            if ok and not covered:
                 roughness_now, msdv = result
-            else:
+            elif not ok:
                 # signal_state wasn't advanced, so the next batch restarts the filters (a gap).
                 roughness_now = None
-                msdv = self.conn.execute("SELECT msdv_z FROM sessions WHERE session_id = %s",
-                                         (f.session_id,)).fetchone()[0]
-            self._optional("live_state", f.session_id,
-                           lambda: self._update_live_state(f, received_at, roughness_now, msdv))
+                msdv = self.conn.execute(
+                    "SELECT sqrt(msdv_z ^ 2 + coalesce(msdv_y, 0) ^ 2) FROM sessions WHERE session_id = %s",
+                    (f.session_id,)).fetchone()[0]
+            if not covered:
+                self._optional("live_state", f.session_id,
+                               lambda: self._update_live_state(f, received_at, roughness_now, msdv))
         self._mark_processing_when_complete(f.session_id)
         self._refresh_exclusions(f.session_id)
         return "late" if late else "new"
@@ -247,25 +253,34 @@ class Store:
                 [(f.session_id, lab.t, lab.type, lab.value, lab.note) for lab in f.labels],
             )
 
-    def _process_signal(self, f: BatchFacts) -> tuple[float | None, float]:
-        """Runs one batch through the trip's pipeline and saves its results and state."""
+    def _process_signal(self, f: BatchFacts) -> tuple[float | None, float] | None:
+        """Runs one batch through the trip's pipeline and saves its results and state. None: the
+        state already covers this batch."""
         row = self.conn.execute(
             "SELECT state, last_batch_seq FROM signal_state WHERE session_id = %s FOR UPDATE",
             (f.session_id,),
         ).fetchone()
+        if row is not None and row[1] is not None and f.batch_seq <= row[1]:
+            # The finalize job read the archive further than the stream (a trip closed while its
+            # batches were still in the backlog) and saved its one-pass state. Feeding this batch
+            # again would count its dose twice and write a second set of series rows.
+            return None
         # A missing batch means the filters would see a jump: restart them (the dose is kept).
         reset = row is not None and f.batch_seq != row[1] + 1
         pipeline = Pipeline(row[0] if row else None)
         # The pipeline runs on the phone's uptime clock; GPS fixes (UTC) are moved onto it and the
-        # outputs back to UTC with this batch's offset.
-        off = f.clock_offset
+        # outputs back to UTC with the trip clock's offset, which never runs backwards (clock.py).
+        trip_clock = clock.TripClock.from_state((row[0] or {}).get("clock") if row else None)
+        off = trip_clock.offset(f.clock_offset)
+        shift = off - f.clock_offset  # derived time − phone time, for looking up the stored fixes
         out = pipeline.feed(
             np.asarray(f.motion_t, dtype=float),
             np.asarray(f.motion_ua, dtype=float).reshape(-1, 3),
             np.asarray(f.motion_g, dtype=float).reshape(-1, 3),
-            [(x.t.timestamp() - off, x.speed_ms) for x in f.fixes],
+            [(clock.fix_uptime(f, x), x.speed_ms) for x in f.fixes],
             reset=reset,
             rr=np.asarray(f.motion_rr, dtype=float).reshape(-1, 3),
+            moved=f.phone_moved_up,
         )
         if out.series:
             with self.conn.cursor() as cur:
@@ -277,18 +292,20 @@ class Store:
                 )
         for e in out.events:
             e.t += off
-            # Position of the nearest GPS fix of this trip (≈ 1 Hz, so within about half a second).
+            # Position of the nearest usable GPS fix of this trip (≈ 1 Hz, so within about half a
+            # second), none further than EVENT_FIX_MAX_S. The finalize job interpolates it instead.
             self.conn.execute(
                 """
                 INSERT INTO events (session_id, type, t, geom, speed_ms, magnitude, confidence)
                 VALUES (%s, %s, %s,
-                        (SELECT geom FROM track_points WHERE session_id = %s
+                        (SELECT geom FROM track_points WHERE session_id = %s AND h_acc_m <= %s
+                           AND abs(extract(epoch FROM t - %s)) <= %s
                          ORDER BY abs(extract(epoch FROM t - %s)) LIMIT 1),
                         %s, %s, %s)
                 ON CONFLICT (session_id, type, t) DO NOTHING
                 """,
-                (f.session_id, e.type, from_epoch(e.t), f.session_id, from_epoch(e.t), e.speed,
-                 e.magnitude, e.confidence),
+                (f.session_id, e.type, from_epoch(e.t), f.session_id, MAX_HACC_M, from_epoch(e.t - shift),
+                 EVENT_FIX_MAX_S, from_epoch(e.t - shift), e.speed, e.magnitude, e.confidence),
             )
         self.conn.execute(
             """
@@ -298,9 +315,11 @@ class Store:
               state = EXCLUDED.state, last_batch_seq = EXCLUDED.last_batch_seq,
               gaps = signal_state.gaps + EXCLUDED.gaps, updated_at = now()
             """,
-            (f.session_id, Jsonb(pipeline.to_state()), f.batch_seq, int(out.reset)),
+            (f.session_id, Jsonb({**pipeline.to_state(), "clock": trip_clock.to_state()}), f.batch_seq,
+             int(out.reset)),
         )
-        self.conn.execute("UPDATE sessions SET msdv_z = %s WHERE session_id = %s", (out.msdv, f.session_id))
+        self.conn.execute("UPDATE sessions SET msdv_z = %s, msdv_y = %s WHERE session_id = %s",
+                          (out.msdv_z, out.msdv_y, f.session_id))
         return out.roughness_now, out.msdv
 
     def _update_live_state(self, f: BatchFacts, received_at: dt.datetime,
@@ -326,7 +345,9 @@ class Store:
               low_power = EXCLUDED.low_power,
               roughness_now = EXCLUDED.roughness_now,
               msdv_so_far = EXCLUDED.msdv_so_far
-            WHERE EXCLUDED.updated_at >= live_state.updated_at
+            -- By arrival, not by the phone's clock: after a backward step the device would stay frozen,
+            -- into its next trip, until the clock caught up.
+            WHERE EXCLUDED.received_at >= live_state.received_at
             """,
             (f.device_id, f.session_id, f.end_utc, received_at,
              fix.t if fix else None, fix.lat if fix else None, fix.lon if fix else None,
@@ -359,7 +380,7 @@ class Store:
               context_known = true,
               vehicle_type = %s, vehicle_make_model = %s, vehicle_line = %s,
               mount = %s, people = %s, conditions = %s,
-              audio_enabled = %s, synthetic_sensors = %s, recovered = %s,
+              synthetic_sensors = %s, recovered = %s,
               metadata = %s,
               started_at = COALESCE(%s, started_at),
               ended_at = COALESCE(%s, ended_at),
@@ -371,7 +392,7 @@ class Store:
             """,
             (s.device_id, s.vehicle_type, s.vehicle_make_model, s.vehicle_line,
              Jsonb(s.mount), Jsonb(s.people), Jsonb(s.conditions) if s.conditions is not None else None,
-             s.audio_enabled, s.synthetic_sensors, s.recovered, Jsonb(s.metadata),
+             s.synthetic_sensors, s.recovered, Jsonb(s.metadata),
              s.started_at, s.ended_at, s.batch_count, s.replay_of, s.replay_of, s.session_id),
         )
         if s.phase == "stop" and not has_stop and status != "live":

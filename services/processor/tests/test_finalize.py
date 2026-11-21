@@ -121,6 +121,25 @@ def test_invalid_windows_do_not_count_for_roughness():
     assert p.roughness_rms is None and p.mean_speed_ms == 10.0
 
 
+def test_pass_sickness_counts_moving_valid_windows_only():
+    """Plan §10: idling is separated out of sickness, and so is the phone being handled (the windows
+    roughness drops too). aw_rms stays the whole pass, as measured."""
+    series = _series(10)
+    for k in range(3):  # stopped: 0.3 m/s, with a big dose
+        series[k].speed, series[k].dose_inc = 0.3, 1.0 * 0.2
+    series[3].dose_inc = 2.0 * 0.2  # handled
+    for k in range(4, 10):
+        series[k].dose_inc = 0.16 * 0.2  # a_w 0.4 while moving
+    invalid = np.zeros(10, dtype=bool)
+    invalid[3] = True
+    (p,) = fz.build_passes(series, [(T0, 46, 23), (T0 + 3, 46, 23)], [], cell_of=_band_cell, invalid=invalid)
+    assert p.sickness_s == pytest.approx(6 * 0.2)
+    assert p.sickness_aw_rms == pytest.approx(0.4)
+    assert p.aw_rms == pytest.approx(math.sqrt((3 * 1.0 + 2.0 + 6 * 0.16) / 10))
+    (p,) = fz.build_passes(_series(10, speed=0.3), [(T0, 46, 23), (T0 + 3, 46, 23)], [], cell_of=_band_cell)
+    assert p.sickness_s == 0.0 and p.sickness_aw_rms is None
+
+
 def test_real_h3_cells_at_resolution_11():
     import h3
 
@@ -222,6 +241,53 @@ def _one(db, sql, *args):
 
 
 @requires_db
+def test_events_and_passes_are_placed_only_from_usable_fixes(db, batch, session_meta, tmp_path):
+    """The pothole's batch has an invalid fix (hAcc -1) far off the track. Live, the event takes the
+    nearest usable fix stored so far; finalized, it is interpolated between the usable fixes around it, and no pass
+    lands in the invalid fix's cell."""
+    import h3
+
+    sid = "trip-badfix"
+    batches, metas = _trip(batch, session_meta, sid)
+    bad = batches[10]["location"][0]  # seq 10: t0 = T0 + 20, the pothole at T0 + 21
+    bad.update(hAcc=-1.0, lat=bad["lat"] + 0.05)
+    _stream(db, batches, metas)
+    step = 0.0002  # conftest.motion_batch: north by step_deg per batch, fix at t0 + 0.3 s
+    lat_of = lambda seq: 46.77 + seq * step  # noqa: E731
+    live = _one(db, "SELECT ST_Y(geom::geometry) FROM events WHERE type = 'pothole'")[0]
+    # Reported during seq 10, before seq 11's fix arrived: the nearest usable one so far is seq 9's.
+    assert live == pytest.approx(lat_of(9), abs=1e-9)
+
+    _write_archive(tmp_path, sid, batches, metas)
+    assert fz.handle(db, fz.DirArchive(tmp_path), json.dumps({"sessionId": sid}).encode())[0] == "complete"
+    final = _one(db, "SELECT ST_Y(geom::geometry) FROM events WHERE type = 'pothole'")[0]
+    t_event = _one(db, "SELECT extract(epoch FROM t) FROM events WHERE type = 'pothole'")[0]
+    frac = (float(t_event) - (T0 + 18.3)) / 4.0  # between the fixes of seq 9 and seq 11
+    assert final == pytest.approx(lat_of(9) + frac * 2 * step, abs=1e-7)
+    far = h3.latlng_to_cell(bad["lat"], bad["lon"], fz.H3_RESOLUTION)
+    cells = [r[0] for r in db.execute("SELECT h3 FROM segment_observations").fetchall()]
+    assert cells and far not in cells
+
+
+@requires_db
+def test_a_phone_moved_tap_restarts_the_forward_axis_live_and_in_finalize(db, batch, session_meta):
+    """Both paths hand the operator's tap to the pipeline, on the same clock as the fixes."""
+    from roadride.dsp import FWD_SETTLE_S
+
+    sid = "trip-tap"
+    batches, metas = _trip(batch, session_meta, sid, n=10)
+    _label(batches[4], 1.0, "phone_moved")
+    facts = [parse_batch(b) for b in batches]
+    tap_up = facts[4].motion_t[0] + 1.0  # deviceMotion t starts at the batch's t0Up
+    assert facts[4].phone_moved_up == [pytest.approx(tap_up, abs=1e-6)]
+    _stream(db, batches, metas)
+    live = _one(db, "SELECT state FROM signal_state WHERE session_id = %s", sid)[0]
+    final = fz.run_pipeline(facts).state
+    assert live["fwd_settle_until"] == pytest.approx(tap_up + FWD_SETTLE_S, abs=1e-6)
+    assert final["fwd_settle_until"] == pytest.approx(live["fwd_settle_until"], abs=1e-9)
+
+
+@requires_db
 def test_finalize_reproduces_a_clean_live_trip_and_aggregates_it(db, batch, session_meta, tmp_path):
     sid = "trip-clean"
     batches, metas = _trip(batch, session_meta, sid)
@@ -246,6 +312,9 @@ def test_finalize_reproduces_a_clean_live_trip_and_aggregates_it(db, batch, sess
     assert msdv == pytest.approx(live_msdv, rel=1e-9) and valid > 0.9 and finalized
 
     assert _one(db, "SELECT count(*) FROM segment_observations")[0] > 10
+    # D45: every pass stores its moving, valid time (the trip moves throughout, so all of it).
+    assert _one(db, "SELECT bool_and(sickness_s IS NOT NULL AND sickness_aw_rms IS NOT NULL "
+                    "AND sickness_s <= duration_s) FROM segment_observations")[0]
     method, n_sessions = _one(db, "SELECT method, n_sessions FROM aggregation_fit")
     assert (method, n_sessions) == ("percentile", 1)  # one trip can't fit the model
     assert _one(db, "SELECT count(*) FROM segment_agg WHERE vehicle_type = 'all'")[0] == \
@@ -355,6 +424,8 @@ def test_stop_copy_after_the_idle_close_reopens_the_trip(db, batch, session_meta
 
 @requires_db
 def test_ready_sweep_sends_once_and_closes_silent_trips(db, batch, session_meta):
+    import datetime as dt
+
     import psycopg
 
     from roadride import ready
@@ -366,9 +437,10 @@ def test_ready_sweep_sends_once_and_closes_silent_trips(db, batch, session_meta)
     db.commit()
 
     sent = []
+    now = dt.datetime.now(dt.timezone.utc)
     with psycopg.connect(dbname=db.info.dbname, autocommit=True) as conn:
-        assert sorted(ready.sweep(conn, sent.append)) == ["ended", "silent"]
-        assert ready.sweep(conn, sent.append) == []  # already sent
+        assert sorted(ready.sweep(conn, sent.append, now)) == ["ended", "silent"]
+        assert ready.sweep(conn, sent.append, now) == []  # already sent
     assert sorted(json.loads(b)["sessionId"] for b in sent) == ["ended", "silent"]
     assert _one(db, "SELECT status, incomplete FROM sessions WHERE session_id = 'silent'") == ("processing", True)
     assert _one(db, "SELECT status, incomplete FROM sessions WHERE session_id = 'ended'") == ("processing", False)
@@ -416,3 +488,122 @@ def test_finalize_scores_detections_and_marks_handled_and_drifting_windows(db, b
     rough_windows = _one(db, "SELECT sum(n_windows) FILTER (WHERE roughness_rms IS NOT NULL) FROM segment_observations")[0]
     all_windows = _one(db, "SELECT sum(n_windows) FROM segment_observations")[0]
     assert all_windows - rough_windows >= 50
+
+
+@requires_db
+def test_a_trip_still_in_the_backlog_is_not_closed_as_silent(db, batch, session_meta):
+    """After a processor outage, the last applied batch was received 20 minutes ago, but the
+    processor has only read up to just after it: the phone wasn't silent, its batches are queued."""
+    import datetime as dt
+
+    import psycopg
+
+    from roadride import ready
+
+    batches, (start, _) = _trip(batch, session_meta, "backlog", n=3)
+    _stream(db, batches, [start])
+    received = dt.datetime.now(dt.timezone.utc) - dt.timedelta(minutes=20)
+    db.execute("UPDATE sessions SET last_received_at = %s", (received,))
+    db.commit()
+    with psycopg.connect(dbname=db.info.dbname, autocommit=True) as conn:
+        assert ready.sweep(conn, lambda body: None, received + dt.timedelta(seconds=5)) == []
+        assert ready.sweep(conn, lambda body: None, None) == []  # not every partition heard from yet
+        assert _one(db, "SELECT status FROM sessions")[0] == "live"
+        # Read to the end and still nothing from the phone for 20 minutes: silent.
+        assert ready.sweep(conn, lambda body: None, dt.datetime.now(dt.timezone.utc)) == ["backlog"]
+
+
+@requires_db
+def test_backlog_batches_already_finalized_are_not_counted_twice(db, batch, session_meta, tmp_path):
+    """The trip was closed while batches 10..19 were still in the processor's backlog, and the
+    finalize job built it from the archive (0..19). Applying the backlog afterwards must not feed
+    those batches on top of the finalized state."""
+    sid = "trip-backlog"
+    batches, (start, _) = _trip(batch, session_meta, sid, n=20)
+    _stream(db, batches[:10], [start])
+    db.execute("UPDATE sessions SET status = 'processing'")
+    _write_archive(tmp_path, sid, batches, [start])
+    fz.finalize_session(db, fz.DirArchive(tmp_path), sid)
+    msdv, series = _one(db, "SELECT msdv_z, (SELECT count(*) FROM session_series) FROM sessions")
+    events = _one(db, "SELECT count(*) FROM events")[0]
+
+    _stream(db, batches[10:], [start])
+
+    assert _one(db, "SELECT msdv_z, (SELECT count(*) FROM session_series) FROM sessions") == (msdv, series)
+    assert _one(db, "SELECT count(*) FROM events")[0] == events
+    assert _one(db, "SELECT last_batch_seq FROM signal_state")[0] == 19
+    assert _one(db, "SELECT status, ready_sent_at FROM sessions") == ("processing", None)  # finalized again
+
+
+# --- Trip distance and GPS quality -------------------------------------------------------------
+
+def _fix(t, lat, lon, h_acc=5.0, speed=10.0):
+    import datetime as dt
+
+    from roadride.live import Fix
+    return Fix(t=dt.datetime.fromtimestamp(t, dt.timezone.utc), lat=lat, lon=lon, speed_ms=speed,
+               course_deg=None, h_acc_m=h_acc)
+
+
+def test_parked_gps_jitter_adds_no_distance():
+    rng = np.random.default_rng(0)
+    lat = 45 + rng.normal(0, 3.5 / 111_000, 600)
+    lon = 21 + rng.normal(0, 3.5 / 78_600, 600)
+    parked = [_fix(1000 + i, lat[i], lon[i], speed=rng.uniform(0, 0.3)) for i in range(600)]
+    assert fz.trip_distance_m(parked) < 5  # was ≈ 3 km
+
+
+def test_straight_drive_keeps_its_length_and_skips_inaccurate_fixes():
+    drive = [_fix(1000 + i, 45 + i * 10 / 111_195, 21.0) for i in range(601)]  # 10 m/s north for 10 min
+    assert fz.trip_distance_m(drive) == pytest.approx(6000, rel=0.01)
+    drive[300] = _fix(1300, 45.003, 21.0, h_acc=300.0)  # a 300 m outlier with its accuracy says so
+    assert fz.trip_distance_m(drive) == pytest.approx(6000, rel=0.01)
+    no_acc = [_fix(1000 + i, 45 + i * 10 / 111_195, 21.0, h_acc=None) for i in range(10)]
+    assert fz.trip_distance_m(no_acc) == 0.0  # the read API's track never shows such fixes either
+    no_speed = [_fix(1000 + i, 45 + i * 10 / 111_195, 21.0, speed=None) for i in range(11)]
+    assert fz.trip_distance_m(no_speed) == pytest.approx(100, rel=0.01)
+
+
+def _assess_trip(fixes, seconds=600):
+    from types import SimpleNamespace
+
+    batch = SimpleNamespace(motion_t=list(np.arange(0, seconds, 0.01)), batch_seq=0)
+    series = [SeriesPoint(t=1000 + 0.2 * (i + 1), a_vert=0, a_lat=0, a_lon=0, speed=10, msdv=0)
+              for i in range(int(seconds / 0.2))]
+    return fz.assess(fz.Trip("s", [batch], []), fz.TripSignal(series=series), 1, fixes)
+
+
+def test_a_fix_without_accuracy_has_no_position():
+    """iOS reports -1 when "the latitude and longitude are invalid" (Apple's CLLocation docs): such fixes
+    are no GPS at all, not GPS of unknown quality. The motion itself stays valid."""
+    status, valid, q = _assess_trip([(1000 + i, 45.0, 21.0, None) for i in range(601)])
+    assert (status, valid, q["invalidSeconds"]["gps_poor"]) == ("bad", 1.0, 600.0)
+    mixed = [(1000 + i, 45.0, 21.0, None if i % 2 else 5.0) for i in range(601)]
+    status, valid, q = _assess_trip(mixed)  # a good fix within 2 s of every window
+    assert (status, q["invalidSeconds"]["gps_poor"]) == ("ok", 0.0)
+
+
+def test_a_step_is_measured_on_the_wgs84_ellipsoid():
+    """The read API's ST_Distance(geography) uses WGS84, so the finalize job does too; references from
+    the geodesic (GeographicLib through pyproj): a sphere read east-west steps at 47°N 0.3 % short."""
+    lat1, lon1, lat2, lon2 = (np.array(v) for v in zip((46.77, 23.6, 46.77, 23.6013),
+                                                       (46.77, 23.6, 46.7709, 23.6),
+                                                       (0.0, 179.9999, 0.0, -179.9999)))
+    assert fz._step_m(lat1, lon1, lat2, lon2) == pytest.approx([99.296288, 100.049727, 22.263898], abs=1e-5)
+
+
+def test_poor_gps_is_reported_but_does_not_invalidate_the_motion():
+    status, valid, q = _assess_trip([(1000 + i, 45.0, 21.0, 35.0) for i in range(601)])
+    assert valid == 1.0 and q["invalidSeconds"]["gps_poor"] == 600.0
+    assert status == "degraded"  # mostly poor GPS still degrades the trip
+
+
+def test_a_window_is_placed_at_its_middle():
+    """A series point's t is its window's end; placing the window there shifted every pass by half a
+    window. Lat grows 1° per second here, and the cell boundary is at t = 1.15 s."""
+    series = [SeriesPoint(t=0.2 * (k + 1), a_vert=0.0, a_lat=0.0, a_lon=0.0, speed=10.0, msdv=0.0)
+              for k in range(10)]
+    fixes = [(float(s), float(s), 0.0) for s in range(4)]
+    passes = fz.build_passes(series, fixes, [], cell_of=lambda lat, lon: "A" if lat < 1.15 else "B")
+    # Windows ending at 0.2 … 1.2 s have their middles at 0.1 … 1.1 s, all before the boundary.
+    assert [(p.h3, p.n_windows) for p in passes] == [("A", 6), ("B", 4)]

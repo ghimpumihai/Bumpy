@@ -10,7 +10,6 @@ import { DetectionCard } from "./components/detection-card";
 import { SessionCharts } from "./components/session-charts";
 import { SessionHeader } from "./components/session-header";
 import { SessionStats } from "./components/session-stats";
-import { SicknessCard } from "./components/sickness-card";
 import { TrackMap } from "./components/track-map";
 
 export function SessionView() {
@@ -36,7 +35,6 @@ export function SessionView() {
           <>
             <SessionHeader session={session} />
             <SessionStats session={session} />
-            <SicknessCard sickness={session.sickness} msiPct={session.msiPct} />
             <TrackMap session={session} />
             <SessionCharts session={session} />
             <DetectionCard detection={session.detection} />

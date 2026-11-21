@@ -4,7 +4,7 @@ export interface ChartSeries {
   /** CSS custom property of the line colour, e.g. `--chart-1`. */
   colorVar: string;
   values: (number | null)[];
-  /** Draw points only (e.g. sparse MISC ratings). */
+  /** Draw points only (sparse markers such as events). */
   pointsOnly?: boolean;
   /** Secondary y axis on the right. */
   axis?: "left" | "right";
@@ -21,5 +21,4 @@ export interface SessionChartData {
   aLon: number[];
   speedKmh: (number | null)[];
   msdv: number[];
-  ratings: (number | null)[];
 }

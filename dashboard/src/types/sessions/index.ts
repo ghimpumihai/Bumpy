@@ -70,7 +70,6 @@ export interface SessionSummary {
   vehicle: Vehicle;
   mount: Mount;
   people: People;
-  audioEnabled: boolean;
   startedAt: IsoDateTime;
   endedAt: IsoDateTime | null;
   durationS: number;
@@ -87,12 +86,15 @@ export interface SessionSummary {
   roughnessEligible: boolean;
   /** Non-rigid or handheld: sickness numbers are experimental. */
   sicknessExperimental: boolean;
-  /** ISO 2631-1 motion sickness dose value (vertical), m/s^1.5. */
+  /** Motion sickness dose value, vertical and lateral combined: √(msdvZ² + msdvY²), m/s^1.5 (D49). */
+  msdv: number | null;
+  /** The vertical part (ISO 2631-1 Wf), m/s^1.5. */
   msdvZ: number | null;
-  /** Predicted motion sickness incidence, % ≈ MSDV / 3. */
+  /** The lateral (side-to-side sway) part (Donohew & Griffin weighting), m/s^1.5; null for trips processed before D49. */
+  msdvY: number | null;
+  /** Predicted motion sickness incidence, % ≈ msdv / 3. */
   msiPct: number | null;
   eventCounts: RoadEventCounts;
-  ratingsCount: number;
 }
 
 export interface SessionListResponse {
@@ -134,7 +136,8 @@ export interface SessionQuality {
   duplicateBatches: number;
 }
 
-/** Detections scored against manual taps within ±1.5 s (plan 02 §9 step 5). */
+/** Detections scored against manual taps within ±1.5 s (plan 02 §9 step 5). True/false positives
+ * count detections, false negatives count taps: precision is over detections, recall over taps. */
 export interface DetectionScore {
   truePositives: number;
   falsePositives: number;
@@ -148,19 +151,15 @@ export interface DetectionMetrics {
   speed_bump: DetectionScore;
 }
 
-export interface SicknessRating {
-  tUtc: IsoDateTime;
-  /** MISC 0–10. */
-  value: number;
-  msdvSoFar: number | null;
-}
-
+/**
+ * The calculated motion-sickness dose of the whole trip: vertical (ISO 2631-1 Wf) and sideways (Donohew &
+ * Griffin, D49) combined; no passenger ratings (D47). `msiPct = msdv / 3`, ISO's rule for 20 min to 6 h.
+ */
 export interface SicknessSummary {
+  msdv: number | null;
   msdvZ: number | null;
+  msdvY: number | null;
   msiPct: number | null;
-  ratings: SicknessRating[];
-  /** Spearman rank correlation between MISC ratings and MSDV so far. */
-  spearman: number | null;
 }
 
 /** `GET /api/sessions/{id}`. */
@@ -175,11 +174,11 @@ export interface SessionDetail extends SessionSummary {
 /** `GET /api/sessions/{id}/series`: columnar, about 5 Hz. */
 export interface SessionSeries {
   t: EpochMs[];
-  /** Vertical acceleration, m/s², gravity removed. */
+  /** Vertical acceleration, m/s², + up: the 1–30 Hz band-passed value with the largest |value| in each 0.2 s window. */
   aVert: number[];
-  /** Lateral (sideways) acceleration, low-passed, m/s². */
+  /** Lateral (sideways) acceleration, 2 Hz low-passed, m/s², + to the vehicle's left; 0 until the forward axis is learned. */
   aLat: number[];
-  /** Longitudinal acceleration, low-passed, m/s². */
+  /** Longitudinal acceleration, 2 Hz low-passed, m/s², + forward; 0 until the forward axis is learned. */
   aLon: number[];
   /** m/s; `null` where GPS had no valid speed. */
   speed: (number | null)[];
@@ -206,7 +205,7 @@ export interface RoadEventProperties {
   type: RoadEventType;
   tUtc: IsoDateTime;
   speedKmh: number | null;
-  /** Peak high-passed vertical acceleration (pothole) or pitch rate (speed bump). */
+  /** m/s²: peak |band-passed (1–30 Hz) vertical acceleration|, at the jolt (pothole) or at either axle (speed bump). */
   magnitude: number;
   /** 0–1. */
   confidence: number;

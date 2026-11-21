@@ -11,7 +11,6 @@ const device = (deviceId: string, track: [number, number][]): LiveDevice => ({
   vehicleType: "car",
   updatedAt: "2026-11-20T10:00:00.000Z",
   receivedAt: "2026-11-20T10:00:02.500Z",
-  latestRating: null,
   lat: 46.77,
   lon: 23.59,
   speedMs: 10,

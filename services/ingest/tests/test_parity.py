@@ -112,6 +112,19 @@ def test_non_object_rejected_like_mock(mock_server):
     assert _outcome(contract.validate_batch, [1])[1] == _outcome(mock_server.validate, [1])[1]
 
 
+def test_audio_is_not_required_unlike_mock(batch, session_meta, mock_server):
+    """D48: the function stops requiring audioLevel before the app stops sending it; the mock
+    still requires it until the app's own PR. Batches from current builds (with audio) still pass."""
+    contract.validate_batch(batch)
+    assert "audioLevel" in batch
+    del batch["audioLevel"]
+    contract.validate_batch(batch)
+    assert _outcome(mock_server.validate, batch)[0] == "invalid"
+    session_meta["audioEnabled"] = "yes"  # ignored, not checked
+    assert contract.validate_session_meta(session_meta, session_meta["sessionId"]) == "start"
+    assert _outcome(mock_server.validate_session_meta, session_meta, session_meta["sessionId"])[0] == "invalid"
+
+
 @pytest.mark.parametrize("sid", ["a/b", "../x", "x" * 129, "has space"])
 def test_session_id_is_stricter_than_mock(sid, batch, mock_server):
     batch["sessionId"] = sid
@@ -128,7 +141,6 @@ SESSION_MUTATIONS = {
     "no endedAtUtc key": lambda m: m.pop("endedAtUtc"),
     "recovered string": lambda m: m.update(recovered="no"),
     "vehicle missing": lambda m: m.pop("vehicle"),
-    "audioEnabled string": lambda m: m.update(audioEnabled="yes"),
     "batchCount negative": lambda m: m.update(batchCount=-1, recovered=True),
     "startUptime string": lambda m: m.update(startUptimeSec="1"),
     "deviceId missing": lambda m: m.pop("deviceId"),

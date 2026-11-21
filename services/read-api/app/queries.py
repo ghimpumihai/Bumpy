@@ -664,7 +664,7 @@ def overview(conn: Connection) -> dict:
     ).fetchone()
     speed_bumps = conn.execute(
         "SELECT count(*) FROM events e JOIN sessions s USING (session_id) "
-        "WHERE s.include_in_agg AND e.type = 'speed_bump'").fetchone()[0]
+        "WHERE s.include_in_agg AND e.type = 'speed_bump' AND e.geom IS NOT NULL").fetchone()[0]  # as /api/events
     return {
         "sessions": {"total": total, "upload": upload, "live": live_n, "replay": replay,
                      "includedInAgg": included, "mock": mock},

@@ -66,6 +66,14 @@ DECIMATE = 5  # → 20 Hz for Wf: low enough for well-conditioned poles at 0.06 
 FS_WF = FS / DECIMATE
 SERIES_EVERY = 20  # → 5 Hz session_series
 MAX_GAP_S = 0.25  # a hole longer than this in the motion samples resets the filters
+# Resampling onto the grid: Lagrange through INTERP_HALF samples on each side. Linear interpolation
+# (INTERP_HALF = 1) low-passes by an amount that depends on where the samples fall between grid points:
+# a 20 Hz sine kept 0.78–1.0 of its amplitude, 28 Hz 0.60–1.0. Eight points keep ≥ 0.99 at 20 Hz and
+# ≥ 0.93 at 28 Hz, so a grid point waits for 4 samples after it (40 ms).
+INTERP_HALF = 4
+# Lagrange weights blow up when samples bunch together or spread out (a stall below MAX_GAP_S), so a
+# stencil spaced outside this range (in grid steps) falls back to linear interpolation.
+INTERP_SPACING = (0.5, 1.5)
 
 ROUGH_BAND_HZ = (1.0, 30.0)  # plan §9 step 4
 ROUGHNESS_TAU_S = 5.0  # roughnessNow: RMS over roughly the last 5 s (exponential average)
@@ -224,6 +232,9 @@ class Pipeline:
         self.fwd_settle_until = s.get("fwd_settle_until")  # evidence starting before this is ignored
         self.g_ema = s.get("g_ema")  # smoothed gravity direction, phone frame
         self.g_ref = s.get("g_ref")  # g_ema when the current forward estimate started
+        # ∫ a_w² dt of a 5 Hz window cut short by a reset, added to the next window's dose_inc so that
+        # Σ dose_inc over the series stays the trip's dose.
+        self.carry_aw2 = float(s.get("carry_aw2", 0.0))
         if self.grid is not None:
             self._upgrade_grid(self.grid)
 
@@ -235,7 +246,7 @@ class Pipeline:
             "last_event_t": self.last_event_t, "open_event": self.open_event,
             "rough_ema": self.rough_ema, "grid": self.grid,
             "pending_fixes": [list(f) for f in self.pending_fixes],
-            "held": self.held, "last_bump_t": self.last_bump_t,
+            "held": self.held, "last_bump_t": self.last_bump_t, "carry_aw2": self.carry_aw2,
             "still_yaw": self.still_yaw, "fwd_settle_until": self.fwd_settle_until,
             "g_ema": self.g_ema, "g_ref": self.g_ref,
         }
@@ -247,6 +258,10 @@ class Pipeline:
         only delays the first speed bump by a sample."""
         if len(gr["prev"]) == 7:
             gr["prev"] = gr["prev"] + [0.0, 0.0, 0.0]
+        # Saved by the linear resampler: only the last sample is known, so the stencil starts linear
+        # and widens over the next samples, as at the start of a segment.
+        gr.setdefault("hist", [gr["prev"]])
+        gr.setdefault("n_seen", len(gr["hist"]))
         gr.setdefault("zi_pitch", _zeros(SOS_PITCH)[0])
         gr.setdefault("bump", {"peak": None, "p1": None})
         gr["bump"].setdefault("recent", [])
@@ -269,12 +284,15 @@ class Pipeline:
         return self.forward_n >= FWD_MIN_EVIDENCE and np.linalg.norm(self.forward_sum) > 0
 
     def _new_grid(self, t: float, sample: list[float]) -> dict:
-        ua_g = np.array(sample[:6])
-        x0 = self._vert(ua_g[None, :])[0]
         return {
             "origin": t, "k": 0, "prev": [t] + list(sample),
+            # The segment's latest samples (at most 2·INTERP_HALF) for the stencils of the grid points
+            # still waiting for samples after them, and how many samples the segment has had.
+            "hist": [[t] + list(sample)], "n_seen": 1,
             "zi_band": _zeros(SOS_BAND)[0],
-            "zi_low": (signal.sosfilt_zi(SOS_LOW) * x0).tolist(),
+            # Zero, not the steady state of the first sample: user acceleration has zero mean, so a
+            # start "as if x0 forever" releases a step of x0 into Wf (x0 = 2 m/s²: 0.096 m²/s³ of false dose).
+            "zi_low": _zeros(SOS_LOW)[0],
             "zi_h": _zeros(SOS_LOW, 3),
             "zi_wf": _zeros(SOS_WF)[0],
             "zi_pitch": _zeros(SOS_PITCH)[0],
@@ -382,11 +400,11 @@ class Pipeline:
                              np.asarray(grav, float).reshape(-1, 3),
                              rr])[order]
         if reset:
-            self.grid = None
+            self._drop_grid()
             out.reset = True
         if len(t) and self.grid is not None and abs(t[0] - self.grid["prev"][0]) > MAX_GAP_S:
             # A hole, or the clock jumped backwards: either way the filters can't continue.
-            self.grid = None
+            self._drop_grid()
             out.reset = True
         if len(t) == 0:
             self.pending_fixes = fixes  # no samples to place them against yet
@@ -399,7 +417,7 @@ class Pipeline:
         cuts = (np.flatnonzero(np.diff(t) > MAX_GAP_S) + 1).tolist()
         for i, (a, b) in enumerate(zip([0] + cuts, cuts + [len(t)])):
             if i > 0:
-                self.grid = None
+                self._drop_grid()
                 out.reset = True
             self._feed_segment(t[a:b], samples[a:b], fixes, out)
             fixes, self.pending_fixes = self.pending_fixes, []
@@ -416,25 +434,71 @@ class Pipeline:
             self.grid = self._new_grid(float(t[0]), samples[0].tolist())
 
         gr = self.grid
-        # Resample onto the uniform grid, interpolating from the last sample of the previous feed.
-        src_t = np.concatenate([[gr["prev"][0]], t])
-        src = np.vstack([np.array(gr["prev"][1:])[None, :], samples])
-        # np.interp needs strictly increasing x and doesn't check it. Keep only samples later than
-        # everything before them (an overlap with the previous batch is dropped, not interleaved).
+        # Resample onto the uniform grid, continuing from the samples kept from the previous feed.
+        hist = gr["hist"]
+        src_t = np.concatenate([[h[0] for h in hist], t])
+        src = np.vstack([np.array([h[1:] for h in hist]), samples])
+        # Keep only samples later than everything before them (an overlap with the previous batch is
+        # dropped, not interleaved): the interpolation needs strictly increasing times.
         running_max = np.maximum.accumulate(src_t)
         keep = np.concatenate([[True], src_t[1:] > running_max[:-1]])
         src_t, src = src_t[keep], src[keep]
+        n_seen = int(gr["n_seen"]) + len(src_t) - len(hist)
+        first = n_seen - len(src_t)  # segment index of src_t[0]
         k0 = gr["k"]
         k1 = int(math.floor((src_t[-1] - gr["origin"]) / DT + 1e-9))
-        if k1 >= k0:
-            ks = np.arange(k0, k1 + 1)
-            gt = gr["origin"] + ks * DT
-            grid = np.column_stack([np.interp(gt, src_t, src[:, c]) for c in range(src.shape[1])])
-            self._process(ks, gt, grid, fixes, out)
-            gr["k"] = int(k1 + 1)
+        ks = np.arange(k0, k1 + 1)
+        gt = gr["origin"] + ks * DT
+        j = np.searchsorted(src_t, gt, side="right") - 1  # last sample at or before each grid point
+        half = np.minimum(INTERP_HALF, first + j + 1)  # narrower near the segment's first samples
+        ready = j + half <= len(src_t) - 1  # a prefix: both j and half only grow
+        n = int(np.count_nonzero(ready))
+        if n:
+            grid = self._interpolate(gt[:n], j[:n], half[:n], src_t, src)
+            self._process(ks[:n], gt[:n], grid, fixes, out)
+            gr["k"] = int(k0 + n)
         else:
             self.pending_fixes = fixes
         gr["prev"] = [float(src_t[-1])] + src[-1].tolist()
+        keep_n = 2 * INTERP_HALF
+        gr["hist"] = [[float(x)] + row.tolist() for x, row in zip(src_t[-keep_n:], src[-keep_n:])]
+        gr["n_seen"] = n_seen
+
+    @staticmethod
+    def _interpolate(gt: np.ndarray, j: np.ndarray, half: np.ndarray, src_t: np.ndarray,
+                     src: np.ndarray) -> np.ndarray:
+        """Lagrange through samples j-half+1 … j+half for each grid time (they all exist). Every
+        point's arithmetic depends only on its own stencil, so the result is the same whatever the
+        batch boundaries are."""
+        out = np.empty((len(gt), src.shape[1]))
+        for h in np.unique(half):
+            rows = np.flatnonzero(half == h)
+            idx = j[rows, None] + np.arange(-h + 1, h + 1)[None, :]
+            x, g = src_t[idx], gt[rows]
+            w = np.ones(idx.shape)
+            for a in range(2 * h):
+                for b in range(2 * h):
+                    if a != b:
+                        w[:, a] *= (g - x[:, b]) / (x[:, a] - x[:, b])
+            spacing = np.diff(x, axis=1) / DT
+            irregular = (spacing.min(axis=1) < INTERP_SPACING[0]) | (spacing.max(axis=1) > INTERP_SPACING[1])
+            if h > 1 and irregular.any():
+                lo, hi = x[irregular, h - 1], x[irregular, h]
+                frac = (g[irregular] - lo) / (hi - lo)
+                w[irregular] = 0.0
+                w[irregular, h - 1] = 1.0 - frac
+                w[irregular, h] = frac
+            y = src[idx]
+            vals = w[:, 0, None] * y[:, 0, :]
+            for a in range(1, 2 * h):
+                vals = vals + w[:, a, None] * y[:, a, :]
+            out[rows] = vals
+        return out
+
+    def _drop_grid(self) -> None:
+        if self.grid is not None:
+            self.carry_aw2 += self.grid["win"].get("aw2", 0.0)
+        self.grid = None
 
     def _rough(self) -> float | None:
         return None if self.rough_ema is None else math.sqrt(self.rough_ema)
@@ -510,8 +574,10 @@ class Pipeline:
                         t=tt, a_vert=round(win["peak"], 4), a_lat=round(win["lat"] / win["n"], 4),
                         a_lon=round(win["lon"] / win["n"], 4), speed=self._speed_at(tt),
                         msdv=round(math.sqrt(self.dose), 5),
-                        rough_rms=math.sqrt(win.get("b2", 0.0) / win["n"]), dose_inc=win.get("aw2", 0.0)))
+                        rough_rms=math.sqrt(win.get("b2", 0.0) / win["n"]),
+                        dose_inc=win.get("aw2", 0.0) + self.carry_aw2))
                     win.update(n=0, peak=0.0, lat=0.0, lon=0.0, b2=0.0, aw2=0.0)
+                    self.carry_aw2 = 0.0
             i = j
         gr["zi_pitch"] = zp.tolist()
         self.pending_fixes = list(fixes[fix_i:])  # later than the last sample: taken next time
@@ -634,7 +700,7 @@ class Pipeline:
         if self.last_event_t is not None and t - self.last_event_t < POTHOLE_REFRACTORY_S:
             return
         speed = self._speed_at(t)
-        if speed is None or speed < POTHOLE_MIN_SPEED_MS:
+        if speed is None or speed <= POTHOLE_MIN_SPEED_MS:  # "above 15 km/h", like the pass ratio
             return
         self.open_event = [t, abs(b), speed]
         self.last_event_t = t

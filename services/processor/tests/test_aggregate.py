@@ -139,3 +139,12 @@ def test_hexagon_is_a_closed_ring_around_the_center():
     coords = polygon.removeprefix("POLYGON((").removesuffix("))").split(", ")
     assert coords[0] == coords[-1] and len(coords) == 7
     assert point.startswith("POINT(23.6") and " 46.7" in point
+
+
+def test_percentile_ranks_average_ties_and_skip_idle_passes():
+    """Equal roughness got arbitrary ranks (0, 0.5, 1), and idle passes that never count were ranked
+    and shifted the moving ones."""
+    rows = [_obs("s", "a", "car", 10, 0.5), _obs("s", "b", "car", 10, 0.5), _obs("s", "c", "car", 10, 0.5),
+            _obs("s", "d", "car", 10, 0.9), _obs("s", "e", "car", 0.5, 0.1)]  # the last one is idle
+    agg._percent_ranks(rows)
+    assert [r.percentile for r in rows] == [pytest.approx(1 / 3)] * 3 + [1.0, None]

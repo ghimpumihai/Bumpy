@@ -90,7 +90,7 @@ says so and shows each card's last data time, instead of reporting the phones as
 | `SessionSeries` | `session_series` (≈ 5 Hz vertical/lateral/longitudinal acceleration, speed, MSDV so far) |
 | `SegmentAggregate` | `segment_agg` table, rebuilt by the aggregation step (segment × vehicle type, plus an `all` row) |
 | `roughness` | `exp(mean(log r − vehicle effect − β·log(v / 10 m/s)))`: what a car would feel at 36 km/h. Only vehicles linked to the car through shared segments are fitted (D45); a segment driven only by others has `roughness: null` and `roughnessMethod: "percentile"` |
-| `roughnessPctl` | mean per-session percentile of raw roughness (fallback when the model can't be fitted) |
+| `roughnessPctl` | mean per-session percentile of raw roughness (fallback when the model can't be fitted); ranked over the passes that count for roughness (≥ 2 m/s), ties share their average rank |
 | `potholeHits / potholePasses / potholeConfirmed` | passes > 15 km/h with a detection; confirmed at ≥ k of n passes (per vehicle type) |
 | `sicknessAwRms`, `msi1hPct` | `sqrt(Σ a_w²·dt / Σ dt)` over the moving, valid time (speed ≥ 1 m/s, phone not handled; D45) of rigid-mount sessions; `msi1hPct = a_w·√3600 / 3`; `sicknessSessions` counts sessions with such time. `SegmentObservation.awRms` stays the whole pass, as measured |
 | `LiveDevice` | `live_state` + the last positions of the live session; `receivedAt` from `ingest_batches` (arrival time); `latestRating` from `labels` |

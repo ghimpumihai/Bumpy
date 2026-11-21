@@ -69,7 +69,10 @@ def test_duplicate_batch_is_counted_not_reapplied(db, batch):
     s = _store(db)
     with db.transaction():
         s.apply_batch(parse_batch(batch), RECEIVED)
-        assert s.apply_batch(parse_batch(batch), RECEIVED) == "duplicate"
+        # The phone sent it again: a new request, so a new ingest receipt time.
+        assert s.apply_batch(parse_batch(batch), RECEIVED + dt.timedelta(seconds=5)) == "duplicate"
+        # The processor read the same event again (same receipt time): not the phone's duplicate.
+        assert s.apply_batch(parse_batch(batch), RECEIVED) == "replayed"
     assert _one(db, "SELECT received_batches, duplicate_batches FROM sessions")[0:2] == (1, 1)
     assert _one(db, "SELECT count(*) FROM ingest_batches")[0] == 1
 
@@ -181,3 +184,22 @@ def test_checkpoints_roundtrip(db):
         s.save_checkpoint("ingest", "$Default", "0", 42, RECEIVED)
         s.save_checkpoint("ingest", "$Default", "1", 7, None)
     assert s.load_checkpoints("ingest", "$Default") == {"0": 42, "1": 7}
+
+
+
+def test_a_failing_signal_step_keeps_the_batch(db, batch, monkeypatch):
+    import psycopg
+
+    from roadride.store import Store
+
+    def broken(self, f):
+        raise psycopg.DataError("bad sample")
+
+    monkeypatch.setattr(Store, "_process_signal", broken)
+    s = _store(db)
+    with db.transaction():
+        assert s.apply_batch(_batch(batch, 0), RECEIVED) == "new"
+    assert s.dropped == {"signal": 1}
+    assert _one(db, "SELECT received_batches FROM sessions")[0] == 1
+    assert _one(db, "SELECT count(*) FROM live_state")[0] == 1
+    assert _one(db, "SELECT count(*) FROM signal_state")[0] == 0

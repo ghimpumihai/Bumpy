@@ -9,7 +9,8 @@ and tests feed the same signal whole and in random chunks.
 
 Inputs are the app's deviceMotion samples: user acceleration and gravity in g, in the phone's frame,
 at a nominal 100 Hz with jitter. They are resampled onto a uniform 100 Hz grid (IIR filters assume a
-fixed rate); a time gap or a missing batch resets the filters and starts a new grid.
+fixed rate); a time gap (between two batches or inside one) or a missing batch resets the
+filters and starts a new grid, so nothing is interpolated across a hole.
 
 ISO 2631-1 Wf (motion sickness): H = Hh·Hl·Ht·Hs with f1=0.08, f2=0.63, f3=∞, f4=0.25, Q4=0.86,
 f5=0.0625, Q5=0.80, f6=0.1, Q6=0.80 Hz (parameters and transfer functions as reproduced in the Chalmers
@@ -237,6 +238,25 @@ class Pipeline:
             out.msdv = math.sqrt(self.dose)
             out.roughness_now = self._rough()
             return out
+        # A stall inside the batch (CoreMotion pausing for a moment) is treated exactly like a hole
+        # between two batches: the batch is split there and each piece starts a new grid, so the
+        # filters restart and nothing is interpolated across the hole.
+        cuts = (np.flatnonzero(np.diff(t) > MAX_GAP_S) + 1).tolist()
+        for i, (a, b) in enumerate(zip([0] + cuts, cuts + [len(t)])):
+            if i > 0:
+                self.grid = None
+                out.reset = True
+            self._feed_segment(t[a:b], samples[a:b], fixes, out)
+            fixes, self.pending_fixes = self.pending_fixes, []
+        self.pending_fixes = fixes
+        out.msdv = math.sqrt(self.dose)
+        out.roughness_now = self._rough()
+        return out
+
+    def _feed_segment(self, t: np.ndarray, samples: np.ndarray,
+                      fixes: list[tuple[float, float | None]], out: FeedResult) -> None:
+        """Samples without a hole longer than MAX_GAP_S. Leaves the fixes not taken yet in
+        self.pending_fixes."""
         if self.grid is None:
             self.grid = self._new_grid(float(t[0]), samples[0].tolist())
 
@@ -260,9 +280,6 @@ class Pipeline:
         else:
             self.pending_fixes = fixes
         gr["prev"] = [float(src_t[-1])] + src[-1].tolist()
-        out.msdv = math.sqrt(self.dose)
-        out.roughness_now = self._rough()
-        return out
 
     def _rough(self) -> float | None:
         return None if self.rough_ema is None else math.sqrt(self.rough_ema)

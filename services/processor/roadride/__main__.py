@@ -13,6 +13,10 @@ def main() -> int:
     for noisy in ("azure", "uamqp", "urllib3"):
         logging.getLogger(noisy).setLevel(logging.WARNING)
 
+    from . import telemetry
+
+    telemetry.setup()  # only when APPLICATIONINSIGHTS_CONNECTION_STRING is set
+
     mode = os.environ.get("RUN_MODE", "stream")
     if mode == "migrate":
         from .migrate import run

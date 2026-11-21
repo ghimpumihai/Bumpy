@@ -5,6 +5,9 @@ on:
     paths:
       - "services/processor/**"
       - "db/**"
+      # tests/test_upload.py runs both tools on the same session folder as the finalize job.
+      - "tools/upload/**"
+      - "tools/replay/**"
       - ".github/workflows/processor-ci.yml"
   push:
     branches: [main]

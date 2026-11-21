@@ -6,7 +6,7 @@ One Python package and one Docker image for everything that needs the private da
 |---|---|---|
 | `stream` | container app `ca-roadride-processor`, DB user `writer` | Reads Event Hubs and writes the live tables |
 | `migrate` | job `caj-roadride-migrate`, DB user `migrator` (Entra admin) | Applies `db/migrations/*.sql`, creates the Entra roles `writer` / `reader`, grants rights |
-| `finalize` | job `caj-roadride-finalize`, started by the `session-ready` queue, DB user `writer` | Rebuilds a finished trip from the raw archive, replaces its live results, writes segment passes and quality, then runs the aggregation |
+| `finalize` | job `caj-roadride-finalize`, started by the `session-ready` queue, DB user `writer` | Rebuilds a finished trip from the raw archive or a laptop upload, writes Parquet, replaces its live results, writes segment passes and quality, then runs the aggregation |
 | `aggregate` | job `caj-roadride-aggregate`, started by hand, DB user `writer` | Re-runs the aggregation alone (e.g. after the method changes) |
 
 ## Stream processor
@@ -63,13 +63,25 @@ Each series window also carries the RMS of the band-passed vertical and its shar
 
 KEDA starts one execution per message on `session-ready`; each execution handles up to 20 messages or 20 minutes, renewing the message lock while it works. For a trip it:
 
-1. Reads `lake/raw/session=<id>/` (every accepted batch and both copies of `session.json`), 16 downloads at a time.
+1. Reads `lake/raw/session=<id>/` (every accepted batch and both copies of `session.json`), 16 downloads at a time. If the trip has a complete laptop upload (`sessions/<id>/_complete.json`, see below), it reads that instead, for both kinds of message.
 2. Runs the same pipeline over the whole trip, batch by batch in sequence order: late batches count, and the filters restart only at a missing batch. A cleanly streamed trip gives exactly the live series, events and MSDV (a test checks this).
-3. Releases the potholes the pipeline still held back at the end of the trip, runs the quality checks below, drops events inside "phone handled" windows and scores the rest against the manual taps.
-4. In one transaction: re-applies the session metadata, fills in any missing track points and labels, replaces `session_series`, `events` (with `matched_label`) and `segment_observations`, and sets `status = complete`, `incomplete`, `msdv_z`, `quality_status`, `valid_fraction`, `quality`, `distance_m` and `finalized_at`. `include_in_agg` follows from the existing rules.
-5. Rebuilds the aggregates, then completes the message.
+3. Writes the trip as Parquet (below).
+4. Releases the potholes the pipeline still held back at the end of the trip, runs the quality checks below, drops events inside "phone handled" windows and scores the rest against the manual taps.
+5. In one transaction: re-applies the session metadata, fills in any missing track points and labels, replaces `session_series`, `events` (with `matched_label`) and `segment_observations`, and sets `status = complete`, `incomplete`, `msdv_z`, `quality_status`, `valid_fraction`, `quality`, `distance_m` and `finalized_at`. `include_in_agg` follows from the existing rules.
+6. Rebuilds the aggregates, then completes the message.
 
-Everything it writes is replaced per trip, so a repeated message is harmless. A failure abandons the message (Service Bus retries it, then dead-letters it after 5 tries). Messages it can't handle are dead-lettered with the reason: an unreadable body, a trip with no archive, or a laptop upload (Event Grid's `_complete.json`): **finalizing uploaded CSV folders isn't built yet.** Parquet output is also not built; nothing reads it yet.
+Everything it writes is replaced per trip, so a repeated message is harmless. A failure abandons the message (Service Bus retries it, then dead-letters it after 5 tries). Messages it can't handle are dead-lettered with the reason: an unreadable body, a trip with no archive, or an upload that doesn't match its manifest.
+
+**Laptop uploads (`roadride/upload.py`, plan §7 fallback).** [`tools/upload`](../../tools/upload/README.md) copies a session folder to `sessions/<sessionId>/` and writes `_complete.json` (every file's size and SHA-256) last; Event Grid's message for that file starts the job. The job uses the folder only if every listed file matches, then rebuilds the 2-second batches from the CSVs: windows of `t_up` from `startUptimeSec`, each with the UTC offset of its first row, as the phone and `tools/replay` build them. The same pipeline then runs over them (a test checks that the folder and the same trip replayed give the same series and events). An uploaded trip:
+- **always wins** over the live archive, also when a backlog from the phone reopens the trip later, because it has every sample;
+- replaces the trip's track points and labels (a live label's time can differ from the CSV's by a millisecond);
+- keeps `source = live` if part of it streamed, else gets `source = upload`;
+- has no batch count, so `incomplete` means the app crashed or never wrote `endedAtUtc`;
+- gets per-stream quality for the extra CSVs too (accelerometer, gyro, magnetometer, barometer, audio level).
+
+Its CSVs are read with pyarrow, streamed in blocks, with a forgiving fallback for unparseable values; torn last lines are dropped. A 3-hour trip needs about 0.6 GB.
+
+**Parquet.** `lake/processed/session=<id>/motion.parquet` (100 Hz deviceMotion: `t_utc`, `t_up`, user acceleration, gravity and rotation rate in the phone's frame and units), `location.parquet` (every fix) and `series.parquet` (the 5 Hz results, with each window's roughness RMS and dose). zstd-compressed, overwritten on every finalize, written before the database commit, and listed in `quality.parquet`. Every trip at once: `duckdb -c "SELECT * FROM read_parquet('processed/*/series.parquet', hive_partitioning = 1)"`.
 
 **Segment passes.** The 5 Hz series is split where the interpolated GPS position changes H3 cell (resolution 11, as the dashboard). A pass's roughness is the RMS over its moving windows (≥ 1 m/s, at least 3 of them), its speed is measured over the same windows, its a_w RMS is √(Σ dose / duration), and it counts the potholes inside it. Windows more than 10 s from a fix have no position and end the pass. Passes in the first or last 200 m are stored but flagged `in_privacy_zone` and never aggregated.
 

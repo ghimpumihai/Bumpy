@@ -7,7 +7,7 @@ flowchart TB
   subgraph CAPTURE["Capture"]
     phone["iPhone recorder app<br/>100 Hz motion + GPS, disk queue"]
     replay["Replay tool<br/>re-sends a recorded trip"]
-    laptop["Laptop upload<br/>(tools/upload not written yet)"]
+    laptop["Laptop upload<br/>tools/upload, fallback"]
   end
 
   subgraph AZURE["Azure North Europe"]
@@ -49,20 +49,19 @@ flowchart TB
   pg --> read -->|"JSON / GeoJSON"| web
 
   proc -->|"trip ended"| sb
-  laptop -.-> sessions --> eg --> sb
+  laptop -->|"folder, _complete.json last"| sessions --> eg --> sb
   sb --> finalize
   lake --> finalize
   finalize --> pg
+  finalize -->|"Parquet"| lake
 
   gh -->|"push images"| acr
   acr --> CAE
   gh -.->|"deploys"| AZURE
 
-  classDef planned stroke-dasharray: 5 5
-  class laptop planned
 ```
 
-Solid boxes and arrows are built. Dashed ones are not: the laptop upload script doesn't exist, and the finalize job dead-letters upload messages until it can read an uploaded folder. The Event Grid → Service Bus wiring for fallback uploads is deployed.
+Everything in the diagram is built. The laptop upload is the fallback for a trip that never streamed; the Event Grid → Service Bus wiring for it is deployed.
 
 - Plans and decision log: [decisions/](decisions/README.md)
 - iPhone recorder spec: [decisions/01-initial-plan.md](decisions/01-initial-plan.md)
@@ -79,9 +78,10 @@ Solid boxes and arrows are built. Dashed ones are not: the laptop upload script 
 | **Database** | [`db/migrations/`](db/migrations) | Sessions, devices, batches, GPS track, labels, live state, stream checkpoints, chart series, events, pipeline state, segment passes and the aggregated map. A migrate job applies them on every deploy and creates the read/write database roles for the services. |
 | **Stream processor** | [`services/processor/`](services/processor/README.md) | Reads Event Hubs and writes the tables above. Drops duplicates, keeps late batches off the live map, and marks a trip as ended once its Stop message and all batches are in. Each write commits together with the stream checkpoint, so a restart loses and repeats nothing. |
 | **Signal processing** | [`services/processor/roadride/dsp.py`](services/processor/README.md#signal-processing-roadridedsppy) | Per batch: vertical acceleration, road roughness (1–30 Hz), the ISO 2631-1 Wf motion-sickness dose (MSDV), pothole detection above 15 km/h, speed bumps from the double peak in pitch rate (front axle, then rear axle), and a 5 Hz chart series. It gives the same results fed batch by batch or as one whole trip. |
-| **Finalize + aggregate jobs** | [`services/processor/`](services/processor/README.md#finalize-job-roadridefinalizepy) | When a trip ends (Stop + all batches, or 15 minutes of silence) the processor queues it; the finalize job reruns the whole trip from the raw archive, replaces the live results, scores its data quality (phone handled, gravity drift, gyro vs. GPS, GPS accuracy) and its detections against the manual taps, splits it into H3 road-segment passes and rebuilds the shared map: vehicle-normalized roughness, crowd-confirmed potholes, sickness by seat. |
+| **Finalize + aggregate jobs** | [`services/processor/`](services/processor/README.md#finalize-job-roadridefinalizepy) | When a trip ends (Stop + all batches, or 15 minutes of silence) the processor queues it; the finalize job reruns the whole trip from the raw archive (or a laptop upload, which wins), writes it as Parquet to `lake`, replaces the live results, scores its data quality (phone handled, gravity drift, gyro vs. GPS, GPS accuracy) and its detections against the manual taps, splits it into H3 road-segment passes and rebuilds the shared map: vehicle-normalized roughness, crowd-confirmed potholes, sickness by seat. |
 | **Read API** | [`services/read-api/`](services/read-api/README.md) | All 12 routes of [`dashboard/API.md`](dashboard/API.md), read-only. Hides the first and last 200 m of every trip for privacy. |
 | **Replay tool** | [`tools/replay/`](tools/replay/README.md) | Re-sends a recorded trip through the live path as a new trip (`source=replay`, never aggregated), at real speed or faster. Used for the end-to-end test without driving, for the demo, and for tuning the pothole threshold on real data. |
+| **Upload tool** | [`tools/upload/`](tools/upload/README.md) | The fallback for a trip that never streamed: copies a session folder from a laptop to Blob Storage (no raw audio, no rater name) and writes a manifest last. The finalize job checks it, rebuilds the trip's batches from the CSVs and processes it like a streamed trip; an upload replaces whatever part of the trip did stream. |
 | **CI/CD** | [`.github/workflows/`](.github/workflows) | Tests on every PR, including integration tests against a real PostGIS. Merges to `main` deploy the ingest function and the processor + read API (migrations first, then a check that every API route answers). |
 
 ### Done, waiting on one step
@@ -96,8 +96,7 @@ Solid boxes and arrows are built. Dashed ones are not: the laptop upload script 
 
 In the plan's build order:
 
-1. **Finalize for uploaded folders, Parquet output.**
-2. From the plan's cut list: laptop upload fallback, monitoring workbook, Terraform plan on PRs.
+1. From the plan's cut list: monitoring workbook, Terraform plan on PRs.
 
 ## Repository
 
@@ -111,6 +110,7 @@ db/migrations/        SQL migrations
 dashboard/            React + MapLibre + uPlot web app (mock backend built in)
 src/mobile-ios/       the iPhone recorder (Swift)
 tools/replay/         re-sends a recorded trip through the live path (Python, stdlib only)
+tools/upload/         laptop fallback: uploads a session folder for the finalize job (Python, stdlib only)
 .github/workflows/    CI and deploys
 docker-compose.yml    local PostGIS for development
 ```
@@ -124,4 +124,5 @@ docker-compose.yml    local PostGIS for development
 | Processor, migrations, read API | automatic on merge to `main` (`deploy-services`) |
 | Dashboard | manual: Actions → **deploy-dashboard** → Run workflow |
 | A phone's device key | `.\infra\scripts\add-device-key.ps1 -DeviceId <name>` (prints the key once) |
+| A trip that never streamed | `az login`, then `python tools/upload/upload.py <session folder or .zip> --account <storage_account_name>` ([tools/upload](tools/upload/README.md)) |
 | A replay of a recorded trip | `python tools/replay/replay.py <session folder or .zip>` with `$env:REPLAY_API_URL` and `$env:REPLAY_DEVICE_KEY` set ([tools/replay](tools/replay/README.md)) |

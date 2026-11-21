@@ -6,4 +6,5 @@ azure-storage-blob>=12.23,<13
 h3>=4.1,<5
 numpy>=1.26,<3
 scipy>=1.13,<2
+pyarrow>=20,<27  # Parquet output of the finalize job, and its fast CSV reader for uploads
 azure-monitor-opentelemetry==1.8.12  # logs + the processor-lag metric to Application Insights

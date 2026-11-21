@@ -1,0 +1,32 @@
+name: upload-ci
+
+on:
+  pull_request:
+    paths:
+      - "tools/upload/**"
+      - ".github/workflows/upload-ci.yml"
+  push:
+    branches: [main]
+    paths:
+      - "tools/upload/**"
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      # The tool itself is standard library only; the finalize side of the same folders is tested in
+      # processor-ci (services/processor/tests/test_upload.py).
+      - name: Install
+        run: pip install pytest
+
+      - name: Tests (fake Blob Storage over HTTP)
+        run: pytest -q tools/upload

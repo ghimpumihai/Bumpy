@@ -67,8 +67,8 @@ it from roughness only).
 
 For each live device the dashboard derives, on the server's clock:
 - data age = now − `updatedAt` (sample time): the end-to-end delay to the screen (target < 10 s);
-- silence = now − `receivedAt`: amber after 10 s, red after 30 s (a dead zone). A trip that ends leaves
-  the view at once (above), so silence on a listed device always means the phone stopped sending;
+- silence = now − `receivedAt`: amber after 10 s, red after 30 s (a dead zone). A trip that ended stays
+  listed for up to 60 s (above) and is shown as **trip ended** instead, since its silence is expected;
 - transport delay = `receivedAt` − `updatedAt`: above 10 s while batches are arriving, the phone is
   sending a backlog after a dead zone, shown as **catching up** rather than live.
 

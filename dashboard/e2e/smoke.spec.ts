@@ -64,7 +64,6 @@ test("live view lists the streaming phone and the replay", async ({ page }) => {
   await expect(panel.locator('[data-slot="badge"]', { hasText: /^Streamed$/ })).toBeVisible();
   // The real end-to-end delay is shown, not just "live" (plan 02 §5).
   await expect(panel.getByText(/behind the phone|catching up|no data for/).first()).toBeVisible();
-  await expect(panel.getByText("Latest MISC").first()).toBeVisible();
   expect(errors).toEqual([]);
 });
 
@@ -84,7 +83,7 @@ test("session page draws the synchronized charts", async ({ page }) => {
   await page.goto(`/sessions/${RECORDED_SESSION}`);
   await expect(page.getByRole("img", { name: /Vertical acceleration/ })).toBeVisible();
   await expect(page.locator(".uplot")).toHaveCount(4);
-  await expect(page.getByText("Prediction vs. passenger ratings")).toBeVisible();
+  await expect(page.getByText("Motion sickness dose so far")).toBeVisible();
   expect(errors).toEqual([]);
 });
 

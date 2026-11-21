@@ -31,7 +31,7 @@ General rules:
 |---|---|---|
 | `GET /api/overview` | `Overview` (overview) | Headline counts + the aggregation fit (`method`, `beta`, `vehicleEffects`) |
 | `GET /api/sessions?source=&vehicle=` | `SessionListResponse` (sessions) | Newest first. Optional filters `source` = `upload\|live\|replay`, `vehicle` = vehicle type |
-| `GET /api/sessions/{id}` | `SessionDetail` (sessions) | Summary + data-quality panel + detection scores + sickness ratings |
+| `GET /api/sessions/{id}` | `SessionDetail` (sessions) | Summary + data-quality panel + detection scores + the calculated sickness dose (`sickness`: `msdvZ`, `msiPct`; no passenger ratings, D47) |
 | `GET /api/sessions/{id}/series` | `SessionSeries` (sessions) | Columnar `session_series`, about 5 Hz, `t` in epoch ms |
 | `GET /api/sessions/{id}/track` | `SessionTrack` (sessions) | GeoJSON `Feature<LineString>`, 1 Hz, `properties.times` (epoch ms) and `speeds` (m/s) parallel to the coordinates |
 | `GET /api/sessions/{id}/events` | `RoadEventCollection` (sessions) | GeoJSON points: potholes, speed bumps, rail joints |
@@ -39,7 +39,7 @@ General rules:
 | `GET /api/segments?vehicle=all\|car\|bus\|tram` | `SegmentCollection` (segments) | One H3 hexagon polygon per segment with its `segment_agg` row for that vehicle filter |
 | `GET /api/segments/{h3}` | `SegmentDetail` (segments) | Per-vehicle aggregates, sickness split by seat/posture, every pass |
 | `GET /api/events?vehicle=all\|car\|bus\|tram&type=` | `RoadEventCollection` (sessions) | Detected events of aggregated sessions only; `vehicle` takes the same values as `/api/segments` (the dashboard always sends it), `type` is optional (`pothole\|speed_bump\|rail_joint`) |
-| `GET /api/live` | `LiveResponse` (live) | `live_state` of devices the ingest function heard from in the last 60 s, with the last ~2 min of track, `receivedAt` (arrival of the newest processed batch), `sessionStatus` (`live`, or `processing`/`complete` for a trip that ended within the last 60 s) and the latest MISC rating. Since D40 a device is listed from its first position, and stays listed for up to 60 s after its trip ends. Polled every 2 s; `serverTime` lets the dashboard measure ages on the server's clock |
+| `GET /api/live` | `LiveResponse` (live) | `live_state` of devices the ingest function heard from in the last 60 s, with the last ~2 min of track, `receivedAt` (arrival of the newest processed batch), and `sessionStatus` (`live`, or `processing`/`complete` for a trip that ended within the last 60 s). Since D40 a device is listed from its first position, and stays listed for up to 60 s after its trip ends. Polled every 2 s; `serverTime` lets the dashboard measure ages on the server's clock |
 | `GET /api/quality` | `QualityListResponse` (sessions) | The data-quality panel for every session |
 
 The ingest routes (`POST /api/ingest`, and `PUT /api/ingest/sessions/{id}` from spec §6.1) belong to the ingest
@@ -82,7 +82,6 @@ says so and shows each card's last data time, instead of reporting the phones as
 | `isMock` | `session.json` → `syntheticSensors` (mock sessions generated for the pipeline) |
 | `includeInAgg`, `exclusionReasons` | `sessions.include_in_agg` and the rule that set it |
 | `msdvZ`, `msiPct` | MSDV of the whole session (ISO 2631-1 Wf, vertical); `msiPct = msdvZ / 3` |
-| `sickness.ratings[].msdvSoFar`, `sickness.spearman` | MSDV of the last `session_series` point at or before each MISC rating (null before the first one); Spearman rank correlation of those with the ratings (average ranks for ties; null below 3 ratings) |
 | `quality.*` | per-stream rows/rates/gaps, GPS accuracy, invalid windows, `rejected/late/duplicate` live batches. Per stream, the finalize job's whole-trip numbers where it has them, else the live batches' |
 | `distanceM` | sum of the steps between fixes with a known accuracy ≤ 50 m, counting a step only when either end moves ≥ 1 m/s (or neither has a speed), so GPS jitter while parked adds nothing |
 | `detection` | detections vs. manual taps within ±1.5 s. `truePositives`/`falsePositives` count detections (one with a tap of its type that close, or none), `falseNegatives` counts taps with no detection that close; `precision = TP / (TP + FP)` over detections, `recall` = found taps / all taps |
@@ -93,7 +92,7 @@ says so and shows each card's last data time, instead of reporting the phones as
 | `roughnessPctl` | mean per-session percentile of raw roughness (fallback when the model can't be fitted); ranked over the passes that count for roughness (≥ 2 m/s), ties share their average rank |
 | `potholeHits / potholePasses / potholeConfirmed` | passes > 15 km/h with a detection; confirmed at ≥ k of n passes (per vehicle type) |
 | `sicknessAwRms`, `msi1hPct` | `sqrt(Σ a_w²·dt / Σ dt)` over the moving, valid time (speed ≥ 1 m/s, phone not handled; D45) of rigid-mount sessions; `msi1hPct = a_w·√3600 / 3`; `sicknessSessions` counts sessions with such time. `SegmentObservation.awRms` stays the whole pass, as measured |
-| `LiveDevice` | `live_state` + the last positions of the live session; `receivedAt` from `ingest_batches` (arrival time); `latestRating` from `labels` |
+| `LiveDevice` | `live_state` + the last positions of the live session; `receivedAt` from `ingest_batches` (arrival time) |
 
 Implementation note learned while building the mock: measure a segment pass's **speed over the same
 samples as its roughness RMS** (i.e. moving samples only). Mixing stationary samples into the speed

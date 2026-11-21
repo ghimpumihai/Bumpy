@@ -223,7 +223,6 @@ function live(): LiveResponse {
       // Devices the ingest function heard from in the last minute (a dead zone keeps them listed, stale).
       const receivedAt = receivedAtMs(sim, now);
       if (now - receivedAt > LIVE_WINDOW_S * MS_PER_SECOND) return [];
-      const latest = sim.ratings.filter((rating) => rating.sampleIndex <= last).at(-1);
       const window = ROUGHNESS_NOW_WINDOW_S * SERIES_HZ;
       let sumSquares = 0;
       for (let k = Math.max(0, last - window); k <= last; k++) sumSquares += sim.aVert[k] ** 2;
@@ -250,7 +249,6 @@ function live(): LiveResponse {
           roughnessNow: round(Math.sqrt(sumSquares / (window + 1)), 3),
           msdvSoFar: round(sim.msdv[last], 3),
           battery: round(Math.max(0.05, LIVE_BATTERY_START - hoursRunning * LIVE_BATTERY_DRAIN_PER_HOUR), 2),
-          latestRating: latest ? { value: latest.value, tUtc: latest.tUtc } : null,
           thermal: "nominal",
           track: trackPoints,
         },

@@ -50,7 +50,7 @@ export const METHOD_SECTIONS = [
     title: "Motion sickness",
     points: [
       "Vertical acceleration is weighted with the ISO 2631-1 Wf filter; the motion sickness dose value is MSDV = √(∫ a_w² dt).",
-      "Roughly MSDV / 3 percent of unadapted people may vomit. The prediction is compared with the passengers' MISC ratings (0–10).",
+      "Roughly MSDV / 3 percent of unadapted people may vomit. The number comes from the measured motion only; passengers aren't asked how they feel (D47).",
       "Sickness is not normalized across vehicles: “the bus is worse than the car on this route” is a finding. Results are split by seat and by seated or standing.",
       "Known limit: the ISO metric only covers up-and-down motion, while sideways sway in cars is a strong cause of sickness.",
     ],

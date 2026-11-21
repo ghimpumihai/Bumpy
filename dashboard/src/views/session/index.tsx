@@ -10,7 +10,6 @@ import { DetectionCard } from "./components/detection-card";
 import { SessionCharts } from "./components/session-charts";
 import { SessionHeader } from "./components/session-header";
 import { SessionStats } from "./components/session-stats";
-import { SicknessCard } from "./components/sickness-card";
 import { TrackMap } from "./components/track-map";
 
 export function SessionView() {
@@ -38,10 +37,7 @@ export function SessionView() {
             <SessionStats session={session} />
             <TrackMap session={session} />
             <SessionCharts session={session} />
-            <div className="grid gap-6 lg:grid-cols-2">
-              <DetectionCard detection={session.detection} />
-              <SicknessCard sickness={session.sickness} />
-            </div>
+            <DetectionCard detection={session.detection} />
             <ContextCard session={session} />
             <QualityPanel quality={session.quality} />
           </>

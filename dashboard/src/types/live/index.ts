@@ -1,12 +1,6 @@
 import type { IsoDateTime, ProcessingStatus, SessionSource, VehicleType } from "@/types/common";
 import type { StreamStatus } from "@/types/sessions";
 
-/** The passenger's most recent motion-sickness rating (MISC 0–10). */
-export interface LatestRating {
-  value: number;
-  tUtc: IsoDateTime;
-}
-
 /** One phone (or replay) currently sending data, from the `live_state` table. */
 export interface LiveDevice {
   deviceId: string;
@@ -28,7 +22,6 @@ export interface LiveDevice {
   /** Roughness of the last few seconds, m/s² (raw, not normalized). */
   roughnessNow: number | null;
   msdvSoFar: number | null;
-  latestRating: LatestRating | null;
   battery: number | null;
   thermal: string | null;
   /** Recent positions `[lon, lat]`, oldest first. */

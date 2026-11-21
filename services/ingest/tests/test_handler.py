@@ -165,10 +165,62 @@ def test_another_devices_key_is_403_and_nothing_is_stored(batch, keys, sinks):
     assert not sinks.events and not sinks.blobs
 
 
-def test_probe_with_any_valid_key_is_still_400(keys, sinks):
+def test_probe_without_a_device_id_is_still_400_for_any_valid_key(keys, sinks):
+    # Older app builds send {"probe": true} only: unchanged "reachable, key accepted".
     resp = handle_batch(headers(**{"x-device-key": OTHER_KEY, "x-probe": "1"}), gz({"probe": True}),
                         keys, sinks)
     assert resp.status == 400 and resp.body["error"].startswith("probe request")
+
+
+def test_probe_naming_its_device_reports_a_key_stored_under_another_name(keys, sinks):
+    probe = {"probe": True, "deviceId": "FIXTURE-DEVICE"}
+    ok = handle_batch(headers(**{"x-probe": "1"}), gz(probe), keys, sinks)
+    assert ok.status == 400 and ok.body["error"].startswith("probe request")
+    wrong = handle_batch(headers(**{"x-device-key": OTHER_KEY, "x-probe": "1"}), gz(probe), keys, sinks)
+    assert wrong.status == 403 and "OTHER-PHONE" in wrong.body["error"]
+    assert not sinks.events and not sinks.blobs
+
+
+def test_batch_from_a_renamed_key_goes_through_once_the_keys_reload(batch, sinks):
+    from ingest_core.keys import hash_key
+
+    class Clock:
+        t = 0.0
+
+        def __call__(self):
+            return self.t
+
+    stored = {hash_key(DEVICE_KEY): {"iphone-mihai"}}
+    clock = Clock()
+    keys = KeyStore(lambda: dict(stored), min_reload_s=60, clock=clock)
+    assert handle_batch(headers(), gz(batch), keys, sinks).status == 403
+    stored[hash_key(DEVICE_KEY)] = {batch["deviceId"]}  # add-device-key.ps1 -RenameFrom iphone-mihai
+    clock.t = 61  # the app retries 403 with backoff
+    assert handle_batch(headers(), gz(batch), keys, sinks).status == 200
+
+
+def test_key_vault_failure_on_a_binding_reload_is_503(batch, sinks):
+    from ingest_core.keys import hash_key
+
+    class Clock:
+        t = 0.0
+
+        def __call__(self):
+            return self.t
+
+    state = {"fail": False}
+
+    def loader():
+        if state["fail"]:
+            raise RuntimeError("vault down")
+        return {hash_key(DEVICE_KEY): {"iphone-mihai"}}
+
+    clock = Clock()
+    keys = KeyStore(loader, min_reload_s=60, clock=clock)
+    assert handle_batch(headers(), gz(batch), keys, sinks).status == 403
+    state["fail"] = True
+    clock.t = 61
+    assert handle_batch(headers(), gz(batch), keys, sinks).status == 503
 
 
 @pytest.mark.parametrize("key, device_id, status", [

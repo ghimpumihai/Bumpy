@@ -238,6 +238,76 @@ def test_chunked_feed_equals_one_pass():
     assert last.roughness_now == pytest.approx(whole.roughness_now, rel=1e-6)
 
 
+def _vertical_only(rel, vert):
+    r = _phone_frame()
+    ua = (np.column_stack([0 * rel, 0 * rel, vert]) @ r.T) / dsp.G
+    return T0 + rel, ua, np.tile(np.array([0, 0, -1.0]) @ r.T, (len(rel), 1))
+
+
+@pytest.mark.parametrize("rate", [99.5, 100.5])
+def test_resampling_keeps_high_frequencies_wherever_the_samples_fall(rate):
+    """A phone a little off 100 Hz drifts through every sub-sample phase against the grid. Linear
+    interpolation left a 20 Hz sine 0.81–0.97 of its RMS and 28 Hz 0.55–0.84, window by window."""
+    for f0, low in ((20.0, 0.98), (28.0, 0.80)):
+        rel = np.arange(int(20 * rate)) / rate
+        out, _ = run_whole(*_vertical_only(rel, math.sqrt(2) * np.sin(2 * np.pi * f0 * rel)), [])
+        rms = [p.rough_rms for p in out.series[10:]]
+        assert min(rms) > low, f0
+        assert max(rms) < 1.01, f0
+
+
+def test_a_jolt_between_samples_keeps_its_peak():
+    """A 10 ms jolt just above the pothole threshold: with the samples off the grid by up to 9 ms,
+    linear interpolation cut its band-passed peak by 12 % and 9 of 10 were missed."""
+    peaks = []
+    for off in np.linspace(0, 0.009, 10):
+        rel = np.arange(1000) / 100.0 + off
+        rel[0] = 0.0  # keeps the grid's origin, so only the samples move
+        t, ua, grav = _vertical_only(rel, _pulse(5.0, 8.0, 0.01)(rel))
+        p = dsp.Pipeline()
+        out = p.feed(t, ua, grav, [(T0 + s + 0.3, 10.0) for s in range(10)])
+        peaks.append(max(abs(s.a_vert) for s in out.series))
+        assert [e.type for e in out.events + p.flush()] == ["pothole"], off
+    assert min(peaks) > 0.98 * peaks[0]
+
+
+def test_bunched_samples_fall_back_to_linear_interpolation():
+    """Two samples 0.5 ms apart would make the Lagrange weights huge; the stencil falls back to
+    linear and the output stays as small as the input."""
+    rel = np.arange(600) / 100.0
+    vert = 0.5 * np.sin(2 * np.pi * 3 * rel)
+    rel = np.insert(rel, 300, rel[300] + 0.0005)
+    vert = np.insert(vert, 300, vert[300] + 0.3)  # a little noise on the bunched sample
+    out, _ = run_whole(*_vertical_only(rel, vert), [])
+    assert max(abs(s.a_vert) for s in out.series) < 1.5
+
+
+def test_a_trip_saved_by_the_linear_resampler_continues(monkeypatch):
+    """A trip in progress during the deploy has a grid without `hist`/`n_seen`, saved after every grid
+    point up to its last sample: it continues from that sample, starting linear, without a reset."""
+    t, ua, grav, fixes = synth(40, vert=lambda t: 0.5 * np.sin(2 * np.pi * 0.3 * t)
+                               + np.sin(2 * np.pi * 4 * t))
+    cut = len(t) // 2
+    first = [f for f in fixes if f[0] < t[cut]]
+    rest = [f for f in fixes if f[0] >= t[cut]]
+    whole, _ = run_whole(t, ua, grav, fixes)
+
+    with monkeypatch.context() as m:
+        m.setattr(dsp, "INTERP_HALF", 1)  # linear, and nothing waits for later samples: the old resampler
+        p = dsp.Pipeline()
+        p.feed(t[:cut], ua[:cut], grav[:cut], first)
+    old = json.loads(json.dumps(p.to_state()))
+    del old["grid"]["hist"], old["grid"]["n_seen"]
+
+    out = dsp.Pipeline(old).feed(t[cut:], ua[cut:], grav[cut:], rest)
+    assert not out.reset
+    tail = [s for s in whole.series if s.t > t[cut] + 1.0]
+    got = {round(s.t, 6): s for s in out.series}
+    assert all(round(s.t, 6) in got for s in tail)
+    assert max(abs(got[round(s.t, 6)].a_vert - s.a_vert) for s in tail) < 0.02
+    assert out.msdv == pytest.approx(whole.msdv, rel=0.01)
+
+
 def test_overlapping_batches_are_not_interleaved():
     """A batch that starts 25 ms before the previous one ended (clock re-anchoring) must not feed
     out-of-order times to the interpolation: no false events, same roughness as aligned batches."""

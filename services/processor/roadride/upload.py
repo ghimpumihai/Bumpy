@@ -54,6 +54,10 @@ EXTRA_STREAMS = {
     "altimeter": ("altimeter.csv", 1.0),  # CMAltimeter: about once a second, as in the read API and the mock
     "abs_altitude": ("abs_altitude.csv", None),
 }
+# The streams a window's clock offset may come from: the ones tools/replay reads (BatchBuilder), so
+# both give the same batch times. A row of another stream can be the window's first and carry an
+# offset a millisecond or more off after a clock step.
+CLOCK_STREAMS = ("accelRaw", "gyroRaw", "altimeter")
 
 
 class UploadInvalid(Exception):
@@ -274,13 +278,14 @@ def load(uploads: Uploads, session_id: str) -> UploadedTrip:
          "value": np.zeros(0, dtype=object), "note": np.zeros(0, dtype=object)}
 
     streams = {}
-    clocks = []  # every stream's (t_up, t_utc_ms), for the windows' UTC offsets as tools/replay takes them
+    clocks = []  # (t_up, t_utc_ms) of the other streams tools/replay reads, for the windows' UTC offsets
     for name, (fname, hz) in EXTRA_STREAMS.items():
         data = _read_checked(uploads, session_id, files, fname)
         if data is not None:
             cols = _sorted(read_columns(data, ()))
             streams[name] = _stream_quality(cols["t_up"], hz)
-            clocks.append(cols)
+            if name in CLOCK_STREAMS:
+                clocks.append(cols)
     data = _read_checked(uploads, session_id, files, "device.csv")
     if data is not None:
         clocks.append(_sorted(read_columns(data, ())))
@@ -299,8 +304,8 @@ def build_batches(session_id: str, meta: dict, dm: dict, loc: dict, lab: dict,
                   clocks: list[dict] = ()) -> list[BatchFacts]:
     """2-second windows of `t_up`, as the app builds them (and tools/replay rebuilds them): from
     `startUptimeSec` (or the first motion sample, if that is earlier), up to the last motion, fix or
-    label; each window's UTC offset from its first row with a UTC time in any stream (`clocks` are
-    the other CSV files), else the window before's."""
+    label; each window's UTC offset from its first row with a UTC time in any of these streams (`clocks`:
+    the other CSV files tools/replay reads, CLOCK_STREAMS and device.csv), else the window before's."""
     first_up = float(dm["t_up"][0])
     start_up = meta.get("startUptimeSec")
     if not isinstance(start_up, (int, float)) or isinstance(start_up, bool) or not math.isfinite(start_up) \

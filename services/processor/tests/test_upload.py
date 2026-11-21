@@ -40,10 +40,10 @@ def _tool(name: str):
 uploader, replay = _tool("upload"), _tool("replay")
 
 
-def _row(name, t_up, values):
+def _row(name, t_up, values, step_ms=0.0):
     cols = HEADERS[name].split(",")
     # Every stream's UTC comes from the same clock anchors (spec §5), which drift a little.
-    skew_ms = 0.4 * math.sin((t_up - START_UP) / 5)
+    skew_ms = 0.4 * math.sin((t_up - START_UP) / 5) + step_ms
     vals = {"t_up": f"{t_up:.6f}", "t_utc_ms": str(round(UTC0 + (t_up - START_UP) * 1000 + skew_ms)), **values}
     return ",".join(str(vals.get(c, "")) for c in cols)
 
@@ -75,6 +75,13 @@ def make_folder(root, *, sid=SID, seconds=SECONDS, ended=True):
             "h_acc": "4.7", "v_acc": "3", "speed": "12.000000", "speed_acc": "0.5", "course": "0.0",
             "course_acc": "5", "is_simulated": "0"}))
         rows["altimeter"].append(_row("altimeter", tu, {"rel_alt_m": "0.1", "pressure_kpa": "97.1"}))
+    # Streams no batch carries, with rows first in every window whose UTC is a few ms off (as after a
+    # clock step): the batch times must come from the streams tools/replay reads.
+    rows["mag_raw"] = [_row("mag_raw", START_UP - 0.4 + j / 50, {"x": "1", "y": "2", "z": "3"}, step_ms=3.0)
+                       for j in range(int((seconds + 0.4) * 50))]
+    rows["abs_altitude"] = [_row("abs_altitude", START_UP - 0.4 + s, {"altitude_m": "350", "accuracy_m": "5",
+                                                                       "precision_m": "1"}, step_ms=-4.0)
+                            for s in range(seconds)]
     # Folders from builds before D48 still hold audio files: the processor must ignore them.
     rows["audio_level"] = [_row("audio_level", START_UP + i / 10, {"avg_dbfs": "-40", "peak_dbfs": "-30"})
                            for i in range(seconds * 10)]
@@ -157,6 +164,7 @@ def test_the_folder_gives_the_same_signal_as_the_streamed_trip(folder, uploaded)
         [("pothole", None, None), ("sickness", "3", "a, b"), ("phone_moved", None, None)]
     assert "raterName" not in trip.meta["people"] and not trip.incomplete
     assert trip.streams["accelRaw"]["rows"] == SECONDS * 100 and "audioLevel" not in trip.streams
+    assert trip.streams["mag_raw"]["rows"] == round((SECONDS + 0.4) * 50) and trip.streams["abs_altitude"]["rows"] == SECONDS
 
 
 def _with_speeds(batches):

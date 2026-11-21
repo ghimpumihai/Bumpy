@@ -447,8 +447,13 @@ def test_live_distance_ignores_parked_jitter_and_inaccurate_fixes(client, seed, 
     assert 1000 < _ok(client, f"/api/sessions/{other}")["distanceM"] < 1100  # the outlier is skipped: still ≈ 19 × 55.6 m
 
 
-def test_lists_keep_each_session_apart(client, seed, fixture_batch):
-    """The list routes compute every session in one pass; each still gets its own numbers."""
+@pytest.mark.parametrize("chunk", [None, 1])
+def test_lists_keep_each_session_apart(client, seed, fixture_batch, monkeypatch, chunk):
+    """The list routes compute many sessions per statement (or one, chunk=1); each gets its own numbers."""
+    import app.queries as q
+
+    if chunk:
+        monkeypatch.setattr(q, "STATS_CHUNK", chunk)
     other = "99999999-2222-4333-8444-555555555555"
     seed(meta=[session_meta(SID)], batches=_trip(fixture_batch, 20))
     seed(meta=[session_meta(other, device_id="PHONE-2", vehicle="tram")],

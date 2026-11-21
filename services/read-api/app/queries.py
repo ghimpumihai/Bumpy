@@ -5,10 +5,10 @@ aggregate jobs; until a trip is finalized those routes answer with valid, empty 
 defaults and rules follow the dashboard's types (src/types/) and its mock backend (src/mock/), which is
 the working spec.
 
-Every list route runs a fixed number of queries, whatever the number of sessions: the per-session
-numbers (distance, GPS accuracy, public event counts, stream rates) are computed for all
-sessions at once with GROUP BY / LATERAL joins. Positions are returned untrimmed (D40); only fixes
-less accurate than MAX_HACC_M are left out.
+The per-session numbers (distance, GPS accuracy, public event counts, stream rates) are computed for
+many sessions at once with GROUP BY / LATERAL joins, never one query per session; the ones that read
+whole tracks are cached per trip and computed STATS_CHUNK trips per statement. Positions are returned
+untrimmed (D40); only fixes less accurate than MAX_HACC_M are left out.
 """
 
 from __future__ import annotations
@@ -253,14 +253,23 @@ class TripStatsCache:
                 out[r["session_id"]] = hit[1]
             else:
                 missing.append(r)
-        if missing:
-            fresh = compute([r["session_id"] for r in missing])
-            if len(self._entries) + len(missing) > self._max_entries:
+        # Each chunk is cached as soon as it is computed: if a later one fails (statement timeout), the
+        # next request continues from there instead of starting over and failing at the same point.
+        for i in range(0, len(missing), STATS_CHUNK):
+            chunk = missing[i:i + STATS_CHUNK]
+            fresh = compute([r["session_id"] for r in chunk])
+            if len(self._entries) + len(chunk) > self._max_entries:
                 self._entries.clear()
-            for r in missing:
+            for r in chunk:
                 self._entries[(kind, r["session_id"])] = (_version(r), fresh[r["session_id"]])
                 out[r["session_id"]] = fresh[r["session_id"]]
         return out
+
+
+# Trips per statement on a cold cache. Each statement reads every fix (or batch) of its trips, so a cold
+# /api/quality over all trips in one statement would grow with the data until it hit the statement
+# timeout, and then never succeed (nothing would be cached). 25 one-hour trips take well under a second.
+STATS_CHUNK = 25
 
 
 def _version(r: dict) -> tuple:
@@ -279,7 +288,7 @@ def _stats(conn: Connection, cache: TripStatsCache | None, kind: str, rows: list
 
 def _summaries(conn: Connection, cache: TripStatsCache | None, scope: str, with_gps: bool,
                **args) -> list[dict]:
-    """Session rows with their track numbers merged in: 1 query, plus 1 for trips that need them.
+    """Session rows with their track numbers merged in: 1 query, plus 1 per STATS_CHUNK trips that need them.
 
     A finalized trip has its track length in sessions.distance_m; only the others (and the GPS
     accuracy of the quality panel) are computed from track_points, and cached.

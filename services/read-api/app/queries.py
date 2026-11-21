@@ -135,14 +135,32 @@ def _rows(conn: Connection, sql: str, args: dict) -> list[dict]:
     return [dict(zip(cols, row)) for row in cur.fetchall()]
 
 
+# The trip-distance rule of the finalize job (roadride/finalize.py trip_distance_m): fixes with a known
+# accuracy of at most MAX_HACC_M, and a step counts only when either end moves at least this fast (or
+# neither has a speed), so GPS jitter while parked adds nothing.
+DISTANCE_MIN_SPEED_MS = 1.0
+
 # Whole-track numbers: the only part of a session summary that reads every fix of a trip.
 TRACK_STATS_SQL = """
+WITH steps AS (
+  SELECT tp.session_id,
+         ST_Distance(lag(tp.geom) OVER w, tp.geom) AS step_m,
+         GREATEST(lag(tp.speed_ms) OVER w, tp.speed_ms) AS fastest,
+         lag(tp.speed_ms) OVER w IS NULL AND tp.speed_ms IS NULL AS no_speed
+  FROM track_points tp
+  WHERE tp.session_id = ANY(%(ids)s) AND tp.h_acc_m IS NOT NULL AND tp.h_acc_m <= %(max_hacc)s
+  WINDOW w AS (PARTITION BY tp.session_id ORDER BY tp.t)
+), dist AS (
+  SELECT session_id, sum(step_m) FILTER (WHERE no_speed OR fastest >= %(min_speed)s) AS distance_m
+  FROM steps GROUP BY session_id
+)
 SELECT tp.session_id,
-       ST_Length(ST_MakeLine(tp.geom::geometry ORDER BY tp.t)::geography),
+       COALESCE(max(d.distance_m), 0),
        count(*),
        percentile_cont(0.5) WITHIN GROUP (ORDER BY tp.h_acc_m),
        percentile_cont(0.95) WITHIN GROUP (ORDER BY tp.h_acc_m)
-FROM track_points tp WHERE tp.session_id = ANY(%(ids)s)
+FROM track_points tp LEFT JOIN dist d USING (session_id)
+WHERE tp.session_id = ANY(%(ids)s)
 GROUP BY tp.session_id
 """
 
@@ -181,7 +199,8 @@ STREAMS_SQL = _streams_sql()
 
 def _track_stats(conn: Connection, ids: list[str]) -> dict[str, dict]:
     out = {sid: {"distance_m": 0.0, "fixes": 0, "hacc_median": None, "hacc_p95": None} for sid in ids}
-    for sid, distance, fixes, median, p95 in conn.execute(TRACK_STATS_SQL, {"ids": ids}).fetchall():
+    args = {"ids": ids, "max_hacc": MAX_HACC_M, "min_speed": DISTANCE_MIN_SPEED_MS}
+    for sid, distance, fixes, median, p95 in conn.execute(TRACK_STATS_SQL, args).fetchall():
         out[sid] = {"distance_m": float(distance or 0), "fixes": int(fixes), "hacc_median": median,
                     "hacc_p95": p95}
     return out
@@ -286,16 +305,21 @@ def _stored_quality(r: dict) -> dict:
 
 
 def _session_streams(conn: Connection, cache: TripStatsCache | None, rows: list[dict]) -> dict[str, dict]:
-    """The finalize job's per-stream quality (from the whole trip) when there is one, else the live
-    batches'. The finalize job names streams by their batch block (deviceMotion); the dashboard by
+    """Per stream, the finalize job's quality (from the whole trip) where it has one, else the live
+    batches'. A trip finalized from the live archive only stores deviceMotion and location (the batches
+    carry no sample times for the other streams), so those keep their live numbers instead of
+    disappearing. The finalize job names streams by their batch block (deviceMotion); the dashboard by
     its file (device_motion), so stored names are mapped."""
+    live = _stats(conn, cache, "streams", rows)
     out = {}
     for r in rows:
+        sid = r["session_id"]
         stored = _stored_quality(r).get("streams")
-        if isinstance(stored, dict) and stored:
-            out[r["session_id"]] = {STREAMS.get(k, (k,))[0]: v for k, v in stored.items()}
-    live = _stats(conn, cache, "streams", [r for r in rows if r["session_id"] not in out])
-    return {**live, **out}
+        merged = dict(live.get(sid, {}))
+        if isinstance(stored, dict):
+            merged.update({STREAMS.get(k, (k,))[0]: v for k, v in stored.items()})
+        out[sid] = merged
+    return out
 
 
 def _merge(defaults: dict, stored) -> dict:
@@ -385,14 +409,54 @@ def rating_value(value) -> int | None:
 
 
 def _ratings(conn: Connection, session_id: str) -> list[dict]:
+    """Each MISC rating with the dose the passenger had had by then (plan §9 step 6): the last
+    session_series point at or before it, None before the first one."""
     out = []
-    for t, value in conn.execute(
-            "SELECT t, value FROM labels WHERE session_id = %s AND type = %s ORDER BY t",
+    for t, value, msdv in conn.execute(
+            """SELECT l.t, l.value, s.msdv FROM labels l
+               LEFT JOIN LATERAL (SELECT msdv FROM session_series
+                                  WHERE session_id = l.session_id AND t <= l.t
+                                  ORDER BY t DESC LIMIT 1) s ON true
+               WHERE l.session_id = %s AND l.type = %s ORDER BY l.t""",
             (session_id, SICKNESS_LABEL)).fetchall():
         number = rating_value(value)
         if number is not None:
-            out.append({"tUtc": iso(t), "value": number, "msdvSoFar": None})
+            out.append({"tUtc": iso(t), "value": number, "msdvSoFar": rnd(msdv, 5)})
     return out
+
+
+def spearman(xs: list[float], ys: list[float]) -> float | None:
+    """Rank correlation with average ranks for ties, the mock's rule (src/mock/dataset.ts)."""
+    if len(xs) < 3:
+        return None
+
+    def ranks(values: list[float]) -> list[float]:
+        order = sorted(range(len(values)), key=lambda k: values[k])
+        out = [0.0] * len(values)
+        i = 0
+        while i < len(order):
+            j = i
+            while j + 1 < len(order) and values[order[j + 1]] == values[order[i]]:
+                j += 1
+            for k in range(i, j + 1):
+                out[order[k]] = (i + j) / 2
+            i = j + 1
+        return out
+
+    rx, ry = ranks(xs), ranks(ys)
+    mx, my = sum(rx) / len(rx), sum(ry) / len(ry)
+    num = sum((a - mx) * (b - my) for a, b in zip(rx, ry))
+    dx = sum((a - mx) ** 2 for a in rx)
+    dy = sum((b - my) ** 2 for b in ry)
+    return num / (dx * dy) ** 0.5 if dx > 0 and dy > 0 else None
+
+
+def _sickness(r: dict, ratings: list[dict]) -> dict:
+    paired = [x for x in ratings if x["msdvSoFar"] is not None]
+    rho = spearman([x["msdvSoFar"] for x in paired], [x["value"] for x in paired])
+    return {"msdvZ": rnd(r["msdv_z"], 4),
+            "msiPct": None if r["msdv_z"] is None else round(r["msdv_z"] / 3, 4),
+            "ratings": ratings, "spearman": rnd(rho, 4)}
 
 
 def _require_session(conn: Connection, session_id: str) -> None:
@@ -416,9 +480,7 @@ def session_detail(conn: Connection, session_id: str, cache: TripStatsCache | No
         **_summary(r),
         "quality": _quality(r, streams),
         "detection": _detection(r),
-        "sickness": {"msdvZ": rnd(r["msdv_z"], 4),
-                     "msiPct": None if r["msdv_z"] is None else round(r["msdv_z"] / 3, 4),
-                     "ratings": _ratings(conn, session_id), "spearman": None},
+        "sickness": _sickness(r, _ratings(conn, session_id)),
         "processedAt": iso(r["finalized_at"]),
         "processorVersion": None,
     }

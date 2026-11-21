@@ -82,14 +82,16 @@ says so and shows each card's last data time, instead of reporting the phones as
 | `isMock` | `session.json` → `syntheticSensors` (mock sessions generated for the pipeline) |
 | `includeInAgg`, `exclusionReasons` | `sessions.include_in_agg` and the rule that set it |
 | `msdvZ`, `msiPct` | MSDV of the whole session (ISO 2631-1 Wf, vertical); `msiPct = msdvZ / 3` |
-| `quality.*` | per-stream rows/rates/gaps, GPS accuracy, invalid windows, `rejected/late/duplicate` live batches |
-| `detection` | detections vs. manual taps within ±1.5 s (precision, recall) |
+| `sickness.ratings[].msdvSoFar`, `sickness.spearman` | MSDV of the last `session_series` point at or before each MISC rating (null before the first one); Spearman rank correlation of those with the ratings (average ranks for ties; null below 3 ratings) |
+| `quality.*` | per-stream rows/rates/gaps, GPS accuracy, invalid windows, `rejected/late/duplicate` live batches. Per stream, the finalize job's whole-trip numbers where it has them, else the live batches' |
+| `distanceM` | sum of the steps between fixes with a known accuracy ≤ 50 m, counting a step only when either end moves ≥ 1 m/s (or neither has a speed), so GPS jitter while parked adds nothing |
+| `detection` | detections vs. manual taps within ±1.5 s. `truePositives`/`falsePositives` count detections (one with a tap of its type that close, or none), `falseNegatives` counts taps with no detection that close; `precision = TP / (TP + FP)` over detections, `recall` = found taps / all taps |
 | `SessionSeries` | `session_series` (≈ 5 Hz vertical/lateral/longitudinal acceleration, speed, MSDV so far) |
 | `SegmentAggregate` | `segment_agg` table, rebuilt by the aggregation step (segment × vehicle type, plus an `all` row) |
-| `roughness` | `exp(mean(log r − vehicle effect − β·log(v / 10 m/s)))`: what a car would feel at 36 km/h |
+| `roughness` | `exp(mean(log r − vehicle effect − β·log(v / 10 m/s)))`: what a car would feel at 36 km/h. Only vehicles linked to the car through shared segments are fitted (D45); a segment driven only by others has `roughness: null` and `roughnessMethod: "percentile"` |
 | `roughnessPctl` | mean per-session percentile of raw roughness (fallback when the model can't be fitted) |
 | `potholeHits / potholePasses / potholeConfirmed` | passes > 15 km/h with a detection; confirmed at ≥ k of n passes (per vehicle type) |
-| `sicknessAwRms`, `msi1hPct` | `sqrt(Σ a_w²·dt / Σ dt)` over rigid-mount sessions; `msi1hPct = a_w·√3600 / 3` |
+| `sicknessAwRms`, `msi1hPct` | `sqrt(Σ a_w²·dt / Σ dt)` over the moving, valid time (speed ≥ 1 m/s, phone not handled; D45) of rigid-mount sessions; `msi1hPct = a_w·√3600 / 3`; `sicknessSessions` counts sessions with such time. `SegmentObservation.awRms` stays the whole pass, as measured |
 | `LiveDevice` | `live_state` + the last positions of the live session; `receivedAt` from `ingest_batches` (arrival time); `latestRating` from `labels` |
 
 Implementation note learned while building the mock: measure a segment pass's **speed over the same

@@ -121,6 +121,25 @@ def test_invalid_windows_do_not_count_for_roughness():
     assert p.roughness_rms is None and p.mean_speed_ms == 10.0
 
 
+def test_pass_sickness_counts_moving_valid_windows_only():
+    """Plan §10: idling is separated out of sickness, and so is the phone being handled (the windows
+    roughness drops too). aw_rms stays the whole pass, as measured."""
+    series = _series(10)
+    for k in range(3):  # stopped: 0.3 m/s, with a big dose
+        series[k].speed, series[k].dose_inc = 0.3, 1.0 * 0.2
+    series[3].dose_inc = 2.0 * 0.2  # handled
+    for k in range(4, 10):
+        series[k].dose_inc = 0.16 * 0.2  # a_w 0.4 while moving
+    invalid = np.zeros(10, dtype=bool)
+    invalid[3] = True
+    (p,) = fz.build_passes(series, [(T0, 46, 23), (T0 + 3, 46, 23)], [], cell_of=_band_cell, invalid=invalid)
+    assert p.sickness_s == pytest.approx(6 * 0.2)
+    assert p.sickness_aw_rms == pytest.approx(0.4)
+    assert p.aw_rms == pytest.approx(math.sqrt((3 * 1.0 + 2.0 + 6 * 0.16) / 10))
+    (p,) = fz.build_passes(_series(10, speed=0.3), [(T0, 46, 23), (T0 + 3, 46, 23)], [], cell_of=_band_cell)
+    assert p.sickness_s == 0.0 and p.sickness_aw_rms is None
+
+
 def test_real_h3_cells_at_resolution_11():
     import h3
 
@@ -246,6 +265,9 @@ def test_finalize_reproduces_a_clean_live_trip_and_aggregates_it(db, batch, sess
     assert msdv == pytest.approx(live_msdv, rel=1e-9) and valid > 0.9 and finalized
 
     assert _one(db, "SELECT count(*) FROM segment_observations")[0] > 10
+    # D45: every pass stores its moving, valid time (the trip moves throughout, so all of it).
+    assert _one(db, "SELECT bool_and(sickness_s IS NOT NULL AND sickness_aw_rms IS NOT NULL "
+                    "AND sickness_s <= duration_s) FROM segment_observations")[0]
     method, n_sessions = _one(db, "SELECT method, n_sessions FROM aggregation_fit")
     assert (method, n_sessions) == ("percentile", 1)  # one trip can't fit the model
     assert _one(db, "SELECT count(*) FROM segment_agg WHERE vehicle_type = 'all'")[0] == \
@@ -345,6 +367,8 @@ def test_stop_copy_after_the_idle_close_reopens_the_trip(db, batch, session_meta
 
 @requires_db
 def test_ready_sweep_sends_once_and_closes_silent_trips(db, batch, session_meta):
+    import datetime as dt
+
     import psycopg
 
     from roadride import ready
@@ -356,9 +380,10 @@ def test_ready_sweep_sends_once_and_closes_silent_trips(db, batch, session_meta)
     db.commit()
 
     sent = []
+    now = dt.datetime.now(dt.timezone.utc)
     with psycopg.connect(dbname=db.info.dbname, autocommit=True) as conn:
-        assert sorted(ready.sweep(conn, sent.append)) == ["ended", "silent"]
-        assert ready.sweep(conn, sent.append) == []  # already sent
+        assert sorted(ready.sweep(conn, sent.append, now)) == ["ended", "silent"]
+        assert ready.sweep(conn, sent.append, now) == []  # already sent
     assert sorted(json.loads(b)["sessionId"] for b in sent) == ["ended", "silent"]
     assert _one(db, "SELECT status, incomplete FROM sessions WHERE session_id = 'silent'") == ("processing", True)
     assert _one(db, "SELECT status, incomplete FROM sessions WHERE session_id = 'ended'") == ("processing", False)
@@ -406,3 +431,97 @@ def test_finalize_scores_detections_and_marks_handled_and_drifting_windows(db, b
     rough_windows = _one(db, "SELECT sum(n_windows) FILTER (WHERE roughness_rms IS NOT NULL) FROM segment_observations")[0]
     all_windows = _one(db, "SELECT sum(n_windows) FROM segment_observations")[0]
     assert all_windows - rough_windows >= 50
+
+
+@requires_db
+def test_a_trip_still_in_the_backlog_is_not_closed_as_silent(db, batch, session_meta):
+    """After a processor outage, the last applied batch was received 20 minutes ago, but the
+    processor has only read up to just after it: the phone wasn't silent, its batches are queued."""
+    import datetime as dt
+
+    import psycopg
+
+    from roadride import ready
+
+    batches, (start, _) = _trip(batch, session_meta, "backlog", n=3)
+    _stream(db, batches, [start])
+    received = dt.datetime.now(dt.timezone.utc) - dt.timedelta(minutes=20)
+    db.execute("UPDATE sessions SET last_received_at = %s", (received,))
+    db.commit()
+    with psycopg.connect(dbname=db.info.dbname, autocommit=True) as conn:
+        assert ready.sweep(conn, lambda body: None, received + dt.timedelta(seconds=5)) == []
+        assert ready.sweep(conn, lambda body: None, None) == []  # not every partition heard from yet
+        assert _one(db, "SELECT status FROM sessions")[0] == "live"
+        # Read to the end and still nothing from the phone for 20 minutes: silent.
+        assert ready.sweep(conn, lambda body: None, dt.datetime.now(dt.timezone.utc)) == ["backlog"]
+
+
+@requires_db
+def test_backlog_batches_already_finalized_are_not_counted_twice(db, batch, session_meta, tmp_path):
+    """The trip was closed while batches 10..19 were still in the processor's backlog, and the
+    finalize job built it from the archive (0..19). Applying the backlog afterwards must not feed
+    those batches on top of the finalized state."""
+    sid = "trip-backlog"
+    batches, (start, _) = _trip(batch, session_meta, sid, n=20)
+    _stream(db, batches[:10], [start])
+    db.execute("UPDATE sessions SET status = 'processing'")
+    _write_archive(tmp_path, sid, batches, [start])
+    fz.finalize_session(db, fz.DirArchive(tmp_path), sid)
+    msdv, series = _one(db, "SELECT msdv_z, (SELECT count(*) FROM session_series) FROM sessions")
+    events = _one(db, "SELECT count(*) FROM events")[0]
+
+    _stream(db, batches[10:], [start])
+
+    assert _one(db, "SELECT msdv_z, (SELECT count(*) FROM session_series) FROM sessions") == (msdv, series)
+    assert _one(db, "SELECT count(*) FROM events")[0] == events
+    assert _one(db, "SELECT last_batch_seq FROM signal_state")[0] == 19
+    assert _one(db, "SELECT status, ready_sent_at FROM sessions") == ("processing", None)  # finalized again
+
+
+# --- Trip distance and GPS quality -------------------------------------------------------------
+
+def _fix(t, lat, lon, h_acc=5.0, speed=10.0):
+    import datetime as dt
+
+    from roadride.live import Fix
+    return Fix(t=dt.datetime.fromtimestamp(t, dt.timezone.utc), lat=lat, lon=lon, speed_ms=speed,
+               course_deg=None, h_acc_m=h_acc)
+
+
+def test_parked_gps_jitter_adds_no_distance():
+    rng = np.random.default_rng(0)
+    lat = 45 + rng.normal(0, 3.5 / 111_000, 600)
+    lon = 21 + rng.normal(0, 3.5 / 78_600, 600)
+    parked = [_fix(1000 + i, lat[i], lon[i], speed=rng.uniform(0, 0.3)) for i in range(600)]
+    assert fz.trip_distance_m(parked) < 5  # was ≈ 3 km
+
+
+def test_straight_drive_keeps_its_length_and_skips_inaccurate_fixes():
+    drive = [_fix(1000 + i, 45 + i * 10 / 111_195, 21.0) for i in range(601)]  # 10 m/s north for 10 min
+    assert fz.trip_distance_m(drive) == pytest.approx(6000, rel=0.01)
+    drive[300] = _fix(1300, 45.003, 21.0, h_acc=300.0)  # a 300 m outlier with its accuracy says so
+    assert fz.trip_distance_m(drive) == pytest.approx(6000, rel=0.01)
+    no_acc = [_fix(1000 + i, 45 + i * 10 / 111_195, 21.0, h_acc=None) for i in range(10)]
+    assert fz.trip_distance_m(no_acc) == 0.0  # the read API's track never shows such fixes either
+    no_speed = [_fix(1000 + i, 45 + i * 10 / 111_195, 21.0, speed=None) for i in range(11)]
+    assert fz.trip_distance_m(no_speed) == pytest.approx(100, rel=0.01)
+
+
+def _assess_trip(fixes, seconds=600):
+    from types import SimpleNamespace
+
+    batch = SimpleNamespace(motion_t=list(np.arange(0, seconds, 0.01)), batch_seq=0)
+    series = [SeriesPoint(t=1000 + 0.2 * (i + 1), a_vert=0, a_lat=0, a_lon=0, speed=10, msdv=0)
+              for i in range(int(seconds / 0.2))]
+    return fz.assess(fz.Trip("s", [batch], []), fz.TripSignal(series=series), 1, fixes)
+
+
+def test_fix_without_accuracy_is_unknown_not_poor():
+    status, valid, q = _assess_trip([(1000 + i, 45.0, 21.0, None) for i in range(601)])
+    assert (status, valid, q["invalidSeconds"]["gps_poor"]) == ("ok", 1.0, 0.0)  # was valid 0.0, 600 s poor
+
+
+def test_poor_gps_is_reported_but_does_not_invalidate_the_motion():
+    status, valid, q = _assess_trip([(1000 + i, 45.0, 21.0, 35.0) for i in range(601)])
+    assert valid == 1.0 and q["invalidSeconds"]["gps_poor"] == 600.0
+    assert status == "degraded"  # mostly poor GPS still degrades the trip

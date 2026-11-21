@@ -69,6 +69,9 @@ export interface SimulatedObservation {
   meanSpeedMs: number;
   roughnessRms: number | null;
   awRms: number;
+  /** Moving time of the pass and its a_w over it (D45): what the sickness aggregate counts. */
+  sicknessS: number;
+  sicknessAwRms: number | null;
   potholeCount: number;
 }
 
@@ -164,12 +167,14 @@ function scoreDetections(events: SimulatedEvent[], taps: Tap[], type: RoadEventT
   const falsePositives = detections.length - truePositives;
   const falseNegatives = typedTaps.filter((tap) => !detections.some((e) => near(tap.sampleIndex, e.sampleIndex))).length;
   const ratio = (num: number, den: number) => (den > 0 ? num / den : null);
+  // Precision is over the detections, recall over the taps: a pothole detected twice (front and rear
+  // axle) is one found tap, not two.
   return {
     truePositives,
     falsePositives,
     falseNegatives,
     precision: ratio(truePositives, truePositives + falsePositives),
-    recall: ratio(truePositives, truePositives + falseNegatives),
+    recall: ratio(typedTaps.length - falseNegatives, typedTaps.length),
   };
 }
 
@@ -404,6 +409,7 @@ function buildObservations(
     let movingSpeedSum = 0;
     let moving = 0;
     let awSum = 0;
+    let movingAwSum = 0;
     let potholes = 0;
     for (let k = start; k < end; k++) {
       speedSum += sim.speed[k];
@@ -412,10 +418,14 @@ function buildObservations(
       if (sim.speed[k] >= MOVING_SPEED_MS) {
         roughSum += roughRms[k] ** 2;
         movingSpeedSum += sim.speed[k];
+        movingAwSum += awInstant[k] ** 2;
         moving++;
       }
     }
     const count = end - start;
+    // Same draws in the same order as before: one noise factor serves both a_w values.
+    const roughNoise = moving >= 3 ? Math.exp(random.gaussian() * noise) : 1;
+    const awNoise = Math.exp(random.gaussian() * noise);
     observations.push({
       cell,
       passIndex: observations.length,
@@ -424,8 +434,10 @@ function buildObservations(
       durationS: count / SERIES_HZ,
       // Speed over the same (moving) samples as the roughness RMS; mixing in stops biases β low.
       meanSpeedMs: moving >= 3 ? movingSpeedSum / moving : speedSum / count,
-      roughnessRms: moving >= 3 ? Math.sqrt(roughSum / moving) * Math.exp(random.gaussian() * noise) : null,
-      awRms: Math.sqrt(awSum / count) * Math.exp(random.gaussian() * noise),
+      roughnessRms: moving >= 3 ? Math.sqrt(roughSum / moving) * roughNoise : null,
+      awRms: Math.sqrt(awSum / count) * awNoise,
+      sicknessS: moving / SERIES_HZ,
+      sicknessAwRms: moving > 0 ? Math.sqrt(movingAwSum / moving) * awNoise : null,
       potholeCount: potholes,
     });
     start = end;

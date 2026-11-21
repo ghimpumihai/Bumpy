@@ -127,7 +127,9 @@ def score_detections(events: list[tuple[float, str]],
                      taps: list[tuple[float, str]]) -> tuple[dict, list[bool]]:
     """API.md DetectionMetrics, and for each event whether a tap of its type is within ±1.5 s.
     Not one-to-one, like the mock: a detection is right if any tap is near it, a tap is found if any
-    detection is near it."""
+    detection is near it. truePositives/falsePositives count detections and falseNegatives counts taps,
+    so precision is over the detections and recall over the taps: a pothole detected twice (front and
+    rear axle) mustn't count twice against the other taps."""
     matched = [False] * len(events)
     metrics = {}
     for typ in DETECTION_TYPES:
@@ -148,9 +150,10 @@ def score_detections(events: list[tuple[float, str]],
                 tp += 1
         fn = sum(1 for t in tap_t if not near(float(t), det_t))
         fp = len(det) - tp
+        found = len(tap_t) - fn
         metrics[typ] = {
             "truePositives": tp, "falsePositives": fp, "falseNegatives": fn,
             "precision": round(tp / (tp + fp), 4) if tp + fp else None,
-            "recall": round(tp / (tp + fn), 4) if tp + fn else None,
+            "recall": round(found / len(tap_t), 4) if len(tap_t) else None,
         }
     return metrics, matched

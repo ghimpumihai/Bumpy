@@ -41,7 +41,7 @@ from psycopg.types.json import Jsonb
 
 from . import aggregate, quality, upload
 from .dsp import Event, Pipeline, SeriesPoint
-from .live import BatchFacts, parse_batch, parse_session
+from .live import BatchFacts, Fix, parse_batch, parse_session
 from .store import Store, from_epoch
 
 log = logging.getLogger(__name__)
@@ -54,6 +54,12 @@ MAX_FIX_GAP_S = 10.0  # no position between two fixes further apart than this
 FIX_EDGE_S = 2.0  # a window this close before the first / after the last fix still gets a position
 MOTION_HZ = 100.0
 GPS_GOOD_HACC_M = 20.0  # PROVISIONAL: a fix worse than this counts as poor GPS
+# Trip distance, the same rule as the read API's TRACK_STATS_SQL: only fixes with a known accuracy of at
+# most DISTANCE_MAX_HACC_M (the read API's MAX_HACC_M), and a step only counts when either end moves
+# at least DISTANCE_MIN_SPEED_MS (or neither has a speed). Parked, the position jitters by metres
+# while the Doppler speed stays near 0: 10 minutes of 3 m jitter added 3 km before.
+DISTANCE_MAX_HACC_M = 50.0
+DISTANCE_MIN_SPEED_MS = 1.0
 
 MAX_MESSAGES_PER_RUN = 20  # KEDA starts one execution per message; draining a few more is cheaper
 TIME_BUDGET_S = 20 * 60  # stop taking new messages well before the job's 30-minute limit
@@ -233,6 +239,9 @@ class Pass:
     aw_rms: float
     pothole_count: int
     n_windows: int
+    # D45: sickness counts the moving, valid windows only (the ones roughness uses, whatever their number).
+    sickness_s: float = 0.0
+    sickness_aw_rms: float | None = None
 
 
 def _haversine_m(lat1, lon1, lat2, lon2) -> np.ndarray:
@@ -243,20 +252,26 @@ def _haversine_m(lat1, lon1, lat2, lon2) -> np.ndarray:
     return 2 * r * np.arcsin(np.sqrt(a))
 
 
-def track_distance(fixes: list[tuple[float, float, float]]) -> np.ndarray:
-    """Cumulative distance (m) at each fix; fixes are (epoch s, lat, lon), ascending."""
-    if not fixes:
-        return np.zeros(0)
-    a = np.asarray(fixes, dtype=float)
-    steps = _haversine_m(a[:-1, 1], a[:-1, 2], a[1:, 1], a[1:, 2]) if len(a) > 1 else np.zeros(0)
-    return np.concatenate([[0.0], np.cumsum(steps)])
+def trip_distance_m(fixes: list[Fix]) -> float:
+    """Length of the trip (m) from its fixes in time order (rule above DISTANCE_MAX_HACC_M)."""
+    pts = [x for x in fixes if x.h_acc_m is not None and x.h_acc_m <= DISTANCE_MAX_HACC_M]
+    if len(pts) < 2:
+        return 0.0
+    a = np.asarray([(x.lat, x.lon) for x in pts], dtype=float)
+    steps = _haversine_m(a[:-1, 0], a[:-1, 1], a[1:, 0], a[1:, 1])
+    total = 0.0
+    for step, p, q in zip(steps, pts[:-1], pts[1:]):
+        speeds = [v for v in (p.speed_ms, q.speed_ms) if v is not None]
+        if not speeds or max(speeds) >= DISTANCE_MIN_SPEED_MS:
+            total += float(step)
+    return total
 
 
 def build_passes(series: list[SeriesPoint], fixes: list[tuple[float, float, float]],
                  pothole_times: list[float], cell_of=None, invalid: np.ndarray | None = None) -> list[Pass]:
     """Splits the 5 Hz series into passes through H3 cells. A window's position is interpolated
     between the GPS fixes around it; a window without one ends the current pass. `invalid` windows
-    (the phone was handled or had moved in its mount) don't count for roughness."""
+    (the phone was handled or had moved in its mount) don't count for roughness or sickness."""
     if cell_of is None:
         import h3
 
@@ -296,12 +311,14 @@ def build_passes(series: list[SeriesPoint], fixes: list[tuple[float, float, floa
             rough = None
             speed = sum(known) / len(known) if known else None
         duration = len(pts) * WINDOW_S
+        sick_s = len(moving) * WINDOW_S
         t0, t1 = pts[0].t - WINDOW_S, pts[-1].t
         passes.append(Pass(
             h3=run_cell, t_start=t0, duration_s=duration, mean_speed_ms=speed, roughness_rms=rough,
             aw_rms=math.sqrt(sum(p.dose_inc for p in pts) / duration),
             pothole_count=int(np.count_nonzero((potholes > t0) & (potholes <= t1))),
-            n_windows=len(pts)))
+            n_windows=len(pts), sickness_s=sick_s,
+            sickness_aw_rms=math.sqrt(sum(p.dose_inc for p in moving) / sick_s) if moving else None))
 
     for k in range(len(series)):
         if not has_pos[k]:
@@ -355,19 +372,23 @@ def assess(trip: Trip, sig: TripSignal, expected_batches: int | None,
     missing = max(0, expected_batches - len({s for s in seqs if s < expected_batches})) \
         if expected_batches is not None else None
 
-    # Windows of the trip without a usable fix (no fix within the window, or a poor one).
+    # Windows of the trip without a usable fix (no fix within 2 s, or only poor ones). A fix without an
+    # accuracy (iOS reports -1) is unknown, not poor, as for good_gps.
     poor = np.zeros(len(sig.series), dtype=bool)
     if sig.series:
         ft = np.asarray([f[0] for f in fixes]) if fixes else np.zeros(0)
-        acc = np.asarray([f[3] if f[3] is not None else np.inf for f in fixes]) if fixes else np.zeros(0)
+        acc = [f[3] for f in fixes]
         for i, p in enumerate(sig.series):
             j = int(np.searchsorted(ft, p.t)) if len(ft) else 0
             near = [k for k in (j - 1, j) if 0 <= k < len(ft) and abs(ft[k] - p.t) <= 2.0]
-            poor[i] = not near or min(acc[k] for k in near) > GPS_GOOD_HACC_M
+            known = [acc[k] for k in near if acc[k] is not None]
+            poor[i] = not near or (bool(known) and min(known) > GPS_GOOD_HACC_M)
     masks = {k: np.zeros(len(sig.series), dtype=bool) for k in ("phone_moved", "gravity_drift", "gyro_gps_mismatch")}
     masks.update(invalid or {})
     trip_s = len(sig.series) * WINDOW_S
-    invalid_any = poor.copy()
+    # Plan §9 step 3: windows are invalid for phone_moved, gravity drift or a gyro/GPS mismatch. Poor GPS
+    # is reported (gps_poor, and "mostly poor GPS" degrades the trip) but doesn't make the motion invalid.
+    invalid_any = np.zeros(len(sig.series), dtype=bool)
     for m in masks.values():
         invalid_any |= m
     valid = None
@@ -587,11 +608,11 @@ def finalize_session(conn: Connection, archive: Archive, session_id: str,
             cur.executemany(
                 """
                 INSERT INTO segment_observations (session_id, pass_idx, h3, t_start, duration_s,
-                  mean_speed_ms, roughness_rms, aw_rms, pothole_count, n_windows)
-                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                  mean_speed_ms, roughness_rms, aw_rms, pothole_count, n_windows, sickness_s, sickness_aw_rms)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                 """,
                 [(session_id, i, p.h3, from_epoch(p.t_start), p.duration_s, p.mean_speed_ms,
-                  p.roughness_rms, p.aw_rms, p.pothole_count, p.n_windows)
+                  p.roughness_rms, p.aw_rms, p.pothole_count, p.n_windows, p.sickness_s, p.sickness_aw_rms)
                  for i, p in enumerate(passes)],
             )
 
@@ -614,7 +635,7 @@ def finalize_session(conn: Connection, archive: Archive, session_id: str,
             WHERE session_id = %s
             """,
             (incomplete, sig.msdv, status, valid, Jsonb(q),
-             float(track_distance([f[:3] for f in fixes])[-1]) if fixes else 0.0, from_epoch(last_t),
+             trip_distance_m(fix_objs), from_epoch(last_t),
              session_id),
         )
         store._refresh_exclusions(session_id)

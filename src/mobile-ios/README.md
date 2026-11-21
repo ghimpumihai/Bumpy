@@ -211,8 +211,8 @@ xcodebuild -project SensorRecorder.xcodeproj -scheme SensorRecorder \
 
 - **Unit tests** cover CSV formatting, schemas, the clock math, concurrent writers, periodic flush,
   gap/rate stats, every warning rule, session.json, crash recovery, gzip/CRC, the batch payload
-  shape, every upload-queue rule, the Wf filter response vs ISO values, zip
-  export, and a full 3-second recording that checks every file on disk.
+  shape, every upload-queue rule, the Wf filter response vs ISO values, and a full 3-second
+  recording that checks every file on disk.
 - **UI tests** drive the real app: Start (override on the Simulator) → Recording → short tap
   doesn't stop → hold-to-stop → Recap → Done, kill-while-recording → relaunch → recovered, and
   Settings (upload off; no recording switch, Back returns to Start).

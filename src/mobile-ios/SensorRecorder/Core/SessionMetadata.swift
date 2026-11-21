@@ -275,7 +275,6 @@ struct SessionSetup: Equatable {
     var mount = SessionMetadata.Mount()
     var people = SessionMetadata.People()
     var conditions = SessionMetadata.Conditions()
-    var mountPhotoJPEG: Data?
 
     /// The line number only applies to bus/tram (spec §3.8). Called when the vehicle type changes.
     mutating func applyVehicleTypeDefaults() {

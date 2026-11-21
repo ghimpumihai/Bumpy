@@ -166,7 +166,6 @@ final class AppModel {
     /// `uploadLogSession` is kept: this session's last uploads may still be in flight.
     func closeRecording() {
         recording = nil
-        setup.mountPhotoJPEG = nil
         path = NavigationPath()
         refreshSessions()
     }
@@ -183,7 +182,7 @@ final class AppModel {
     }
 }
 
-/// Remembers the last setup form (minus the photo) so a new session takes seconds.
+/// Remembers the last setup values so a new session takes seconds.
 enum SetupDefaults {
     static let key = "setup.last"
 

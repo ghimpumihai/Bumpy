@@ -61,7 +61,7 @@ The processing will be developed **after** the drive, from the recorded files. E
 |---|---|
 | `NSMotionUsageDescription` | "Records vehicle motion to measure road quality and ride comfort." |
 | `NSLocationWhenInUseUsageDescription` | "Maps road quality along the route." |
-| `NSLocationAlwaysAndWhenInUseUsageDescription` | Same, so recording continues if the app goes to the background |
+| ~~`NSLocationAlwaysAndWhenInUseUsageDescription`~~ | *Removed: the app only asks for When In Use; background mode `location` keeps a started recording alive.* |
 | ~~`NSMicrophoneUsageDescription`~~ | *Removed (D48): the app records no audio.* |
 | ~~`NSCameraUsageDescription`~~ | *Removed (D51): no setup form, so no mount photo.* |
 | `UIBackgroundModes` | `location` (`audio` removed by D48). Continuous location updates keep the app and sensors alive if it gets backgrounded |

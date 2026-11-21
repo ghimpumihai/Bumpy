@@ -279,17 +279,6 @@ final class UploadQueue: @unchecked Sendable {
         statusBox.withLock { $0.queueCount = q; $0.failedCount = f }
     }
 
-    /// Deletes queued batches (operator action; session files are NOT affected). Optionally only
-    /// one session's batches. Safe while the loop runs: a batch being sent is simply gone afterwards.
-    func clearPending(sessionId: String? = nil) {
-        for f in pendingFiles() where sessionId == nil || Self.parseItem(fileName: f.lastPathComponent)?.sessionId == sessionId {
-            do { try FileManager.default.removeItem(at: f) } catch {
-                onEvent?(.warn, "upload: could not delete \(f.lastPathComponent): \(error.localizedDescription)")
-            }
-        }
-        refreshCounts()
-    }
-
     /// Moves everything in `upload_failed/` back into the queue (operator action).
     func requeueFailed() {
         for f in failedFiles() {

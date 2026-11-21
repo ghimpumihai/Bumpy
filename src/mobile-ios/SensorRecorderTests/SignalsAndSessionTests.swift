@@ -152,7 +152,7 @@ final class RecordingSessionIntegrationTests: XCTestCase {
             deviceId: "DEV-1", appVersion: "1.0.0 (1) test",
             deviceInfo: .init(model: "iPhone15,2", name: "iPhone 14 Pro", iosVersion: "18.1"))
         var setup = SessionSetup()
-        setup.mountPhotoJPEG = Data([0xff, 0xd8, 0xff, 0xd9])
+        setup.mount.photoFile = "mount.jpg" // a stale value must not be carried into a new trip
         // Timing assertions are bounded by measured wall time, never by fixed tolerances: CI
         // simulators can be several times slower than a dev Mac (a ±0.6 s check failed there).
         let wallStart = ProcessInfo.processInfo.systemUptime
@@ -163,16 +163,11 @@ final class RecordingSessionIntegrationTests: XCTestCase {
         let initial = try SessionMetadata.load(from: metaURL)
         XCTAssertNil(initial.endedAtUtc)
         XCTAssertTrue(initial.syntheticSensors)
-        XCTAssertEqual(initial.mount.photoFile, "mount.jpg")
+        XCTAssertNil(initial.mount.photoFile, "no mount photo since D51")
 
         let started = expectation(description: "ran")
         DispatchQueue.main.async {
             session.start()
-            session.addLabel(.syncTap)
-            session.toggleSurface(.cobblestones)
-            session.toggleSurface(.gravel)      // ends cobblestones, starts gravel
-            session.toggleSegment(.winding)
-            session.addLabel(.note, value: nil, note: "bump, then \"silence\"")
             started.fulfill()
         }
         wait(for: [started], timeout: ciTimeout)
@@ -249,18 +244,12 @@ final class RecordingSessionIntegrationTests: XCTestCase {
         let names = try FileManager.default.contentsOfDirectory(atPath: folder.path)
         XCTAssertFalse(names.contains { $0.hasPrefix("audio") }, "no audio files (D48): \(names)")
         XCTAssertGreaterThanOrEqual(try readCSV(folder.appendingPathComponent("device.csv")).rows.count, 1)
-        XCTAssertTrue(FileManager.default.fileExists(atPath: folder.appendingPathComponent("mount.jpg").path))
+        XCTAssertFalse(FileManager.default.fileExists(atPath: folder.appendingPathComponent("mount.jpg").path))
 
-        // Labels in order, toggles auto-closed at stop, free text escaped
+        // No labels since D51: labels.csv keeps its header, session.json keeps labelsCount.
         let labelsText = try String(contentsOf: folder.appendingPathComponent("labels.csv"), encoding: .utf8)
-        let types = labelsText.split(separator: "\n").dropFirst().map { line -> String in
-            String(line.split(separator: ",", omittingEmptySubsequences: false)[2])
-        }
-        XCTAssertEqual(types, ["sync_tap", "surface_start", "surface_end", "surface_start", "segment_start", "note",
-                               "surface_end", "segment_end"])
-        XCTAssertTrue(labelsText.contains(",note,,\"bump, then \"\"silence\"\"\"\n"))
-        XCTAssertTrue(labelsText.contains(",surface_end,gravel,auto at stop\n"))
-        XCTAssertEqual(stats.labelsCount, 8)
+        XCTAssertEqual(labelsText, StreamFile.labels.header + "\n")
+        XCTAssertEqual(stats.labelsCount, 0)
 
         // Upload queue, in send order: Start metadata, batches 0..n-1, Stop metadata with batchCount = n (§6.1)
         let all = uploadQueue.pendingFiles()
@@ -282,6 +271,7 @@ final class RecordingSessionIntegrationTests: XCTestCase {
             let json = try JSONSerialization.jsonObject(with: Gzip.decompress(Data(contentsOf: f))) as! [String: Any]
             XCTAssertEqual(json["sessionId"] as? String, session.id.uuidString)
             seqs.append(json["batchSeq"] as! Int)
+            XCTAssertEqual((json["labels"] as? [Any])?.count, 0, "the contract requires labels: always empty since D51")
             totalDM += ((json["deviceMotion"] as! [String: [Double]])["t"]!).count
         }
         XCTAssertEqual(seqs, Array(0..<files.count))

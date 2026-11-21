@@ -22,21 +22,7 @@ final class MotionTestAnalysisTests: XCTestCase {
     }
 }
 
-final class ExportTests: XCTestCase {
-    func testFolderZipProducesZipArchive() throws {
-        let dir = try makeTempDir().appendingPathComponent("2026-11-21T09-12-03Z_abcd")
-        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
-        try Data("t_up,t_utc_ms,x,y,z\n".utf8).write(to: dir.appendingPathComponent("accel_raw.csv"))
-        try Data("{}".utf8).write(to: dir.appendingPathComponent("session.json"))
-        let zip = try FolderZipper.zip(dir)
-        XCTAssertEqual(zip.lastPathComponent, "2026-11-21T09-12-03Z_abcd.zip")
-        let data = try Data(contentsOf: zip)
-        XCTAssertEqual(Array(data.prefix(4)), [0x50, 0x4b, 0x03, 0x04], "PK zip signature")
-        XCTAssertNotNil(data.range(of: Data("accel_raw.csv".utf8)))
-    }
-}
-
-// MARK: - Recording lifecycle, late log lines, export state
+// MARK: - Recording lifecycle, late log lines, export cleanup
 
 /// A started session with fakes only (no upload); stop it with `stopOnMain`.
 private func makeRunningSession(root: URL, clock: ClockSource = SystemClock()) throws -> RecordingSession {
@@ -132,54 +118,21 @@ final class LateLogTests: XCTestCase {
     }
 }
 
-final class ExportStateTests: XCTestCase {
-    private let sharing = ExportState.sharing(name: "s.zip", bytes: 10)
-
-    func testOnlyACompletedShareCountsAsExported() {
-        let done = sharing.shareFinished(completed: true, activity: "com.apple.UIKit.activity.AirDrop", error: nil)
-        XCTAssertEqual(done.state, .exported(name: "s.zip", bytes: 10))
-        XCTAssertTrue(done.sheetClosed)
-        let dismissed = sharing.shareFinished(completed: false, activity: nil, error: nil)
-        XCTAssertEqual(dismissed.state, .cancelled(name: "s.zip", bytes: 10), "closing the sheet is not an export")
-        XCTAssertTrue(dismissed.sheetClosed, "zip can be deleted")
-    }
-
-    func testBackingOutOfAnActivityKeepsTheSheetAndTheZip() {
-        let backed = sharing.shareFinished(completed: false, activity: "com.apple.UIKit.activity.Mail", error: nil)
-        XCTAssertEqual(backed.state, sharing)
-        XCTAssertFalse(backed.sheetClosed, "the sheet is still up: keep the zip for the next activity")
-        let failed = sharing.shareFinished(completed: false, activity: "x", error: "boom")
-        XCTAssertEqual(failed.state, .sharing(name: "s.zip", bytes: 10, error: "boom"))
-        XCTAssertFalse(failed.sheetClosed)
-        // ... then another activity succeeds: still an export.
-        XCTAssertEqual(failed.state.shareFinished(completed: true, activity: "y", error: nil).state,
-                       .exported(name: "s.zip", bytes: 10))
-        // ... or the sheet is closed: the failure is shown.
-        XCTAssertEqual(failed.state.shareFinished(completed: false, activity: nil, error: nil).state, .failed("Export failed: boom"))
-    }
-
-    func testBusyOnlyWhileZipping() {
-        XCTAssertTrue(ExportState.zipping.isBusy)
-        XCTAssertFalse(sharing.isBusy, "a share sheet that never reports back must not lock Export")
-        XCTAssertFalse(ExportState.cancelled(name: "s.zip", bytes: 1).isBusy)
-        XCTAssertFalse(ExportState.exported(name: "s.zip", bytes: 1).isBusy)
-    }
-
-    func testZipGoesToTheExportFolderAndStaleZipsAreRemoved() throws {
+final class StaleExportCleanupTests: XCTestCase {
+    func testStaleExportZipsAreRemovedAndNothingElse() throws {
         let base = try makeTempDir()
         let session = base.appendingPathComponent("2026-11-21T09-12-03Z_abcd")
         try FileManager.default.createDirectory(at: session, withIntermediateDirectories: true)
         try Data("{}".utf8).write(to: session.appendingPathComponent("session.json"))
         let exports = base.appendingPathComponent("exports"), legacy = base.appendingPathComponent("tmp")
-        try FileManager.default.createDirectory(at: legacy, withIntermediateDirectories: true)
-        let zip = try FolderZipper.zip(session, into: exports)
-        XCTAssertEqual(zip.deletingLastPathComponent().standardizedFileURL, exports.standardizedFileURL)
+        for dir in [exports, legacy] { try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true) }
+        let zip = exports.appendingPathComponent("2026-11-21T09-12-03Z_abcd.zip")
+        try Data().write(to: zip)
         try Data().write(to: legacy.appendingPathComponent("old.zip"))
         try Data().write(to: legacy.appendingPathComponent("keep.txt"))
         XCTAssertEqual(FolderZipper.removeStaleExports(exportDirectory: exports, legacyDirectory: legacy), 2)
         XCTAssertFalse(FileManager.default.fileExists(atPath: zip.path))
         XCTAssertTrue(FileManager.default.fileExists(atPath: legacy.appendingPathComponent("keep.txt").path))
         XCTAssertTrue(FileManager.default.fileExists(atPath: session.path), "never touches session data")
-        FolderZipper.removeExport(zip) // already gone: no throw, no crash
     }
 }

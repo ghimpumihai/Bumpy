@@ -431,3 +431,21 @@ def test_cached_numbers_follow_new_batches(client, seed, fixture_batch):
     q2 = _ok(client, "/api/quality")["sessions"][0]["quality"]
     assert (q1["gps"]["fixes"], q2["gps"]["fixes"]) == (10, 20)
     assert q2["streams"]["device_motion"]["rows"] == 2 * q1["streams"]["device_motion"]["rows"]
+
+
+def test_detection_scores_come_from_the_finalize_job(client, seed, dbname, fixture_batch):
+    import psycopg
+    from psycopg.types.json import Jsonb
+
+    seed(meta=[session_meta(SID)], batches=_trip(fixture_batch, 3))
+    assert _ok(client, f"/api/sessions/{SID}")["detection"] is None  # not finalized yet
+
+    score = {"truePositives": 3, "falsePositives": 1, "falseNegatives": 2, "precision": 0.75, "recall": 0.6}
+    none = {"truePositives": 0, "falsePositives": 0, "falseNegatives": 0, "precision": None, "recall": None}
+    with psycopg.connect(dbname=dbname) as conn:
+        conn.execute("UPDATE sessions SET quality = %s", (Jsonb({"detection": {"pothole": score, "speed_bump": none}}),))
+    assert _ok(client, f"/api/sessions/{SID}")["detection"] == {"pothole": score, "speed_bump": none}
+
+    with psycopg.connect(dbname=dbname) as conn:  # an older or broken shape is not passed on
+        conn.execute("UPDATE sessions SET quality = %s", (Jsonb({"detection": {"pothole": score}}),))
+    assert _ok(client, f"/api/sessions/{SID}")["detection"] is None

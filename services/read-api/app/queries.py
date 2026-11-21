@@ -422,6 +422,27 @@ def _quality(r: dict, streams: dict) -> dict:
     }
 
 
+DETECTION_TYPES = ("pothole", "speed_bump")
+DETECTION_COUNTS = ("truePositives", "falsePositives", "falseNegatives")
+
+
+def _detection(r: dict) -> dict | None:
+    """API.md DetectionMetrics, scored by the finalize job against the manual taps
+    (`quality.detection`). None until a trip is finalized, or if what's stored isn't that shape."""
+    stored = _stored_quality(r).get("detection")
+    if not isinstance(stored, dict):
+        return None
+    out = {}
+    for typ in DETECTION_TYPES:
+        d = stored.get(typ)
+        if not isinstance(d, dict) or not all(type(d.get(k)) is int for k in DETECTION_COUNTS):
+            return None
+        out[typ] = {**{k: d[k] for k in DETECTION_COUNTS},
+                    **{k: rnd(v, 4) if isinstance(v := d.get(k), (int, float)) and not isinstance(v, bool) else None
+                       for k in ("precision", "recall")}}
+    return out
+
+
 def rating_value(value) -> int | None:
     """A MISC rating's number, or None for a label without one (a skipped prompt)."""
     try:
@@ -461,7 +482,7 @@ def session_detail(conn: Connection, session_id: str, cache: TripStatsCache | No
     return {
         **_summary(r),
         "quality": _quality(r, streams),
-        "detection": None,
+        "detection": _detection(r),
         "sickness": {"msdvZ": rnd(r["msdv_z"], 4),
                      "msiPct": None if r["msdv_z"] is None else round(r["msdv_z"] / 3, 4),
                      "ratings": _ratings(conn, session_id), "spearman": None},

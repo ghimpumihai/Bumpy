@@ -152,8 +152,14 @@ def test_device_shown_from_the_start(client, seed, fixture_batch):
     assert len(dev["track"]) == 3
 
 
+def test_silent_device_stays_listed_for_five_minutes(client, seed, fixture_batch):
+    quiet = dt.datetime.now(UTC) - dt.timedelta(minutes=2)
+    seed(batches=_trip(fixture_batch, 20, start=quiet), received_at=quiet)
+    assert len(_ok(client, "/api/live")["devices"]) == 1  # a tunnel shows as "no data", not gone
+
+
 def test_silent_device_drops_off_live_view(client, seed, fixture_batch):
-    old = dt.datetime.now(UTC) - dt.timedelta(minutes=5)
+    old = dt.datetime.now(UTC) - dt.timedelta(minutes=10)
     seed(batches=_trip(fixture_batch, 20, start=old), received_at=old)
     assert _ok(client, "/api/live")["devices"] == []
 

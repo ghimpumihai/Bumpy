@@ -23,7 +23,7 @@ General rules:
 - **Aggregation rules** (plan §10): only finalized trips count: replays never, and a live trip only once it is finalized
   (until then its exclusion reason is `live_only`); sessions with
   `quality_status = 'bad'` are excluded; hand-held / non-rigid mounts are excluded from roughness and
-  potholes, and their sickness numbers are flagged experimental.
+  potholes; their sickness numbers count on the map (D41) and are flagged experimental on the trip page.
 
 ## Routes
 
@@ -39,7 +39,7 @@ General rules:
 | `GET /api/segments?vehicle=all\|car\|bus\|tram` | `SegmentCollection` (segments) | One H3 hexagon polygon per segment with its `segment_agg` row for that vehicle filter |
 | `GET /api/segments/{h3}` | `SegmentDetail` (segments) | Per-vehicle aggregates, sickness split by seat/posture, every pass |
 | `GET /api/events?vehicle=all\|car\|bus\|tram&type=` | `RoadEventCollection` (sessions) | Detected events of aggregated sessions only; `vehicle` takes the same values as `/api/segments` (the dashboard always sends it), `type` is optional (`pothole\|speed_bump\|rail_joint`) |
-| `GET /api/live` | `LiveResponse` (live) | `live_state` of devices the ingest function heard from in the last 60 s, with the last ~2 min of track, `receivedAt` (arrival of the newest processed batch), `sessionStatus` (`live`, or `processing`/`complete` for a trip that ended within the last 60 s) and the latest MISC rating. Since D40 a device is listed from its first position, and stays listed for up to 60 s after its trip ends. Polled every 2 s; `serverTime` lets the dashboard measure ages on the server's clock |
+| `GET /api/live` | `LiveResponse` (live) | `live_state` of recording devices heard from in the last 5 min (a gap shows as "no data"), with the last ~2 min of track, `receivedAt` (arrival of the newest processed batch), `sessionStatus` (`live`, or `processing`/`complete` for a trip that ended within the last 60 s) and the latest MISC rating. Since D40 a device is listed from its first position, and stays listed for up to 60 s after its trip ends. Polled every 2 s; `serverTime` lets the dashboard measure ages on the server's clock |
 | `GET /api/quality` | `QualityListResponse` (sessions) | The data-quality panel for every session |
 
 The ingest routes (`POST /api/ingest`, and `PUT /api/ingest/sessions/{id}` from spec §6.1) belong to the ingest

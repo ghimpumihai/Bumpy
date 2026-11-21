@@ -405,7 +405,7 @@ Raw values are always stored as measured; normalization happens only in the aggr
 
 ## 10. Data quality and session rules
 
-- **A rigid mount is required for roughness.** Tape or clamp the phone; run the stillness preflight. Sessions with `mount.rigid = false` or `handheld = true` are excluded from roughness and marked "experimental" for sickness.
+- **A rigid mount is required for roughness.** Tape or clamp the phone; run the stillness preflight. Sessions with `mount.rigid = false` or `handheld = true` are excluded from roughness; they count for sickness (D41) and are marked "experimental" on the trip page.
 - **Buses.** Frequent stops, door cycles, kneeling and idling engines are separated using speed near zero and the activity data.
 - **Trams.** Rail joints cause regular, repeating impacts. They are labelled as rail joints so they don't count as potholes.
 - **Audio is off on public transport** (other passengers, GDPR).

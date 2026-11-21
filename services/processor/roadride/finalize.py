@@ -474,6 +474,13 @@ def pick_trip(archive: Archive, uploads: upload.Uploads | None, session_id: str,
     return load_trip(archive, session_id)
 
 
+def _vehicle_type(conn: Connection, trip: Trip, session_id: str) -> str | None:
+    if trip.meta:
+        return parse_session(trip.meta[-1]).vehicle_type
+    row = conn.execute("SELECT vehicle_type FROM sessions WHERE session_id = %s", (session_id,)).fetchone()
+    return row[0] if row else None
+
+
 def finalize_session(conn: Connection, archive: Archive, session_id: str,
                      uploads: upload.Uploads | None = None, *, require_upload: bool = False) -> dict | None:
     """Finalizes one trip; returns a short summary, or None if there's nothing to finalize it from."""
@@ -486,6 +493,11 @@ def finalize_session(conn: Connection, archive: Archive, session_id: str,
     fixes = [(x.t.timestamp(), x.lat, x.lon, x.h_acc_m) for x in fix_objs]
     checks = trip_checks(trip, sig, fix_objs)
     events = [e for e in sig.events if not checks.handled_at(e.t)]  # the phone being handled, not the road
+    if _vehicle_type(conn, trip, session_id) == "tram":
+        # Rail joints jolt a tram like potholes; label them so they never count as potholes (plan §10).
+        for e in events:
+            if e.type == "pothole":
+                e.type = "rail_joint"
     detection, matched = quality.score_detections([(e.t, e.type) for e in events], checks.taps)
     # A secondary output: a failed write must not keep the trip from being finalized (5 failures would
     # dead-letter it). It's logged and recorded in quality.parquetError; the next finalize writes it.

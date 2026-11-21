@@ -36,6 +36,7 @@ BATCH_MUTATIONS = {
     "impossible date": lambda b: b.update(t0Utc="2026-13-40T09:15:32.120Z"),
     "t0Up string": lambda b: b.update(t0Up="1"),
     "wrong units": lambda b: b["units"].update(accel="m/s2"),
+    "extra units key": lambda b: b["units"].update(magnetic="uT"),
     "empty source": lambda b: b.update(source=""),
     "t0UtcMs float": lambda b: b.update(t0UtcMs=1.5),
     "fieldUnits bad": lambda b: b.update(fieldUnits={"a": 1}),
@@ -97,7 +98,7 @@ def test_batch_matches_mock(name, batch, mock_server):
     theirs = _outcome(mock_server.validate, batch)
     assert mine == theirs
     valid = name in ("valid", "empty batch", "no optional blocks", "heading valid", "activity valid",
-                     "deviceId 128", "label type 64", "note 2000")
+                     "deviceId 128", "label type 64", "note 2000", "extra units key")
     assert mine[0] == ("ok" if valid else "invalid"), mine
 
 

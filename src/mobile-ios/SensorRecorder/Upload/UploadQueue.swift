@@ -251,6 +251,10 @@ final class UploadQueue: @unchecked Sendable {
         pendingFiles().filter { Self.parseItem(fileName: $0.lastPathComponent)?.sessionId == sessionId }.count
     }
 
+    func failedCount(sessionId: String) -> Int {
+        failedFiles().filter { Self.parseItem(fileName: $0.lastPathComponent)?.sessionId == sessionId }.count
+    }
+
     func failedFiles() -> [URL] {
         Self.queueFileNames(in: failedDirectory).sorted().map { failedDirectory.appendingPathComponent($0) }
     }

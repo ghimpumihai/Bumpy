@@ -149,6 +149,8 @@ final class UploadQueueTests: XCTestCase {
         XCTAssertEqual(o3, .permanentFailure(status: 400))
         XCTAssertEqual(queue.failedFiles().count, 1)
         XCTAssertEqual(queue.status.failedCount, 1)
+        XCTAssertEqual(queue.failedCount(sessionId: "S1"), 1)
+        XCTAssertEqual(queue.failedCount(sessionId: "other"), 0)
         let o4 = await queue.processOnce()
         XCTAssertEqual(o4, .uploaded(status: 200))
         XCTAssertTrue(queue.pendingFiles().isEmpty)

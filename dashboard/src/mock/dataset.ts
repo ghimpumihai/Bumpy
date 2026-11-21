@@ -164,7 +164,7 @@ export function getAggregation(nowMs: number = Date.now()): AggregationResult {
     included.map((sim) => ({
       sim,
       roughnessEligible: isRoughnessEligible(sim.spec),
-      sicknessEligible: !isSicknessExperimental(sim.spec),
+      sicknessEligible: sim.spec.contextKnown, // D41: hand-held trips count for sickness
     })),
     fittedAt,
   );

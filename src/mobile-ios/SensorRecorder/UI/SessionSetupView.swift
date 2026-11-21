@@ -57,7 +57,7 @@ struct SessionSetupView: View {
             } header: {
                 Text("Mount")
             } footer: {
-                Text("Best: taped or clamped flat on the center console, screen up, top of phone toward the vehicle front. Never move it during the drive.")
+                Text("Best: taped or clamped flat on the center console, screen up, top of phone toward the vehicle front. Never move it during the drive. A hand-held or non-rigid trip still counts for motion sickness, but not for road roughness or potholes.")
             }
 
             Section("People") {

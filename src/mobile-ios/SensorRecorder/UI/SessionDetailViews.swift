@@ -87,7 +87,7 @@ struct SessionDetailView: View {
                     .accessibilityIdentifier("deleteSession")
                 if let deleteError { Text(deleteError).font(.footnote).foregroundStyle(Theme.problem) }
             } footer: {
-                Text("Deletes all files of this session from the phone (CSV, audio, photo). Refused while batches are still waiting to upload. Export first.")
+                Text("Deletes all files of this session from the phone (CSV, audio, photo). Refused while batches are still waiting to upload or were rejected. Export first.")
             }
         }
         .confirmationDialog("Delete this session permanently? This cannot be undone. Make sure it is exported.",

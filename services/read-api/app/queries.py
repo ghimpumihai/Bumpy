@@ -24,7 +24,8 @@ if TYPE_CHECKING:  # only for type hints; keeps the pure helpers importable with
 
 MAX_HACC_M = 50.0  # fixes less accurate than this (or without an accuracy) are never returned
 TRIP_SILENCE_CLOSE_S = 15 * 60  # API.md: a trip has ended after 15 min without batches
-LIVE_WINDOW_S = 60  # devices heard from in the last minute
+LIVE_WINDOW_S = 300  # a recording trip stays listed through 5 min of silence (shown as "no data")
+LIVE_ENDED_WINDOW_S = 60  # an ended trip stays listed for 1 min (D40)
 LIVE_TRACK_S = 120  # last ~2 minutes of track on the live view
 REF_SPEED_KMH = 36.0
 
@@ -537,15 +538,18 @@ LEFT JOIN LATERAL (
   SELECT array_agg(l.t ORDER BY l.t DESC) AS ts, array_agg(l.value ORDER BY l.t DESC) AS vals
   FROM (SELECT t, value FROM labels WHERE session_id = ls.session_id AND type = %(sickness)s
         ORDER BY t DESC LIMIT 5) l) rt ON true
-WHERE ls.received_at > %(since)s AND ls.lat IS NOT NULL AND ls.lon IS NOT NULL
+WHERE ls.received_at > CASE WHEN {ENDED_SQL} THEN %(ended_since)s ELSE %(since)s END
+  AND ls.lat IS NOT NULL AND ls.lon IS NOT NULL
 ORDER BY ls.device_id
 """
 
 
 def live(conn: Connection, now: dt.datetime) -> dict:
-    """Devices heard from in the last minute, with the last ~2 min of their track, including a trip
-    that has just ended (D40: no start/end privacy rule)."""
-    rows = _rows(conn, LIVE_SQL, _params(since=now - dt.timedelta(seconds=LIVE_WINDOW_S), track_s=LIVE_TRACK_S))
+    """Recording devices heard from in the last 5 min and trips that ended within the last minute,
+    with the last ~2 min of their track (D40: no start/end privacy rule)."""
+    rows = _rows(conn, LIVE_SQL, _params(since=now - dt.timedelta(seconds=LIVE_WINDOW_S),
+                                         ended_since=now - dt.timedelta(seconds=LIVE_ENDED_WINDOW_S),
+                                         track_s=LIVE_TRACK_S))
     devices = []
     for r in rows:
         latest = None

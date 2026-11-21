@@ -383,6 +383,10 @@ class Store:
         # Ingest requires a deviceId; only an uploaded or archived copy can lack one.
         if owner is not None and s.device_id is not None and owner != s.device_id:
             return self._foreign("session copy", s.session_id, s.device_id, owner)
+        # An uploaded session.json has no batchCount either, so it lands here as a Start copy. That
+        # loses nothing: the app writes it from the same metadata as the Stop copy
+        # (RecordingSession.stop) and rewrites it later only to mark a crashed trip recovered
+        # (SessionStore.recoverUnfinishedSessions), and a crashed trip never sent a Stop copy.
         if s.phase == "start" and has_stop:
             return "stale_start"
 

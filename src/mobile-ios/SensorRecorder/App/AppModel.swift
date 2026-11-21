@@ -87,6 +87,8 @@ final class AppModel {
         let store = self.store
         let active = recording?.session.folder
         Task.detached(priority: .userInitiated) {
+            // Zips left in tmp/ by an export that never finished (app killed with the share sheet open).
+            FolderZipper.removeStaleExports()
             let recovered = store.recoverUnfinishedSessions(excluding: active)
             let list = store.list()
             await MainActor.run {

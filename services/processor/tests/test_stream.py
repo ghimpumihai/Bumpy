@@ -113,6 +113,18 @@ def test_resume_after_expired_events_warns_and_reads_the_earliest():
     assert position == "-1" and "expired" in warning
 
 
+def test_read_up_to_waits_for_every_partition_and_takes_the_oldest():
+    w = stream.PartitionWriter("ingest", connect_fn=lambda pid: None, partitions=["0", "1"])
+    old = dt.datetime.now(UTC) - dt.timedelta(minutes=20)
+    assert w.read_up_to() is None  # nothing heard yet (just restarted)
+    w._progress["0"] = (old, False)
+    assert w.read_up_to() is None  # partition 1 hasn't reported
+    w.idle("1")
+    assert w.read_up_to() == old  # partition 0 is still 20 minutes behind
+    w.idle("0")
+    assert dt.datetime.now(UTC) - w.read_up_to() < dt.timedelta(seconds=5)  # read to the end
+
+
 def test_lag_is_zero_once_caught_up():
     w = stream.PartitionWriter("ingest", connect_fn=lambda pid: None)
     w._progress["0"] = (dt.datetime.now(UTC) - dt.timedelta(seconds=30), False)

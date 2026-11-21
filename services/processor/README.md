@@ -89,13 +89,13 @@ Its CSVs are read with pyarrow, streamed in blocks, with a forgiving fallback fo
 - `phone_moved`: 5 s either side of a `phone_moved` tap, and 1 s before to 10 s after a `sync_tap` (the operator knocks on the phone, spec §5). Events there are dropped.
 - `gravity_drift`: the 1 s mean gravity direction is more than 15° from the trip's typical one (the phone sagged or moved in its mount).
 - `gyro_gps_mismatch`: between two fixes 0.5–3 s apart, both above 18 km/h, the gyro's yaw rate and the GPS course change differ by more than 0.2 rad/s.
-- `gps_poor`: no fix within 2 s, or hAcc > 20 m.
+- `gps_poor`: no fix within 2 s, or only fixes with hAcc > 20 m (a fix without an accuracy is unknown, not poor). Reported, but not counted in `valid_fraction`: plan §9 step 3 only invalidates the three reasons above.
 
 `phone_moved` and `gravity_drift` windows don't count for a pass's roughness.
 
 **Detection scores.** Potholes and speed bumps are scored against the `pothole` and `speed_bump` taps within ±1.5 s (`quality.detection`, API.md `DetectionMetrics`): a detection is a true positive if a tap of its type is that close, a tap is found if a detection is. `events.matched_label` says which detections matched.
 
-**Quality (provisional rules).** `bad`: no motion, no GPS, or under half the expected 100 Hz motion samples. `degraded`: missing batches, filter restarts, under 90 % of the samples, mostly poor GPS (hAcc > 20 m), or more than 10 % of the trip invalid for one of `phone_moved`, `gravity_drift`, `gyro_gps_mismatch`. `ok` otherwise. `valid_fraction` = motion coverage × the share of windows that are valid for every reason.
+**Quality (provisional rules).** `bad`: no motion, no GPS, or under half the expected 100 Hz motion samples. `degraded`: missing batches, filter restarts, under 90 % of the samples, mostly poor GPS (hAcc > 20 m), or more than 10 % of the trip invalid for one of `phone_moved`, `gravity_drift`, `gyro_gps_mismatch`. `ok` otherwise. `valid_fraction` = motion coverage × the share of windows that are valid for `phone_moved`, `gravity_drift` and `gyro_gps_mismatch`.
 
 ## Aggregation (`roadride/aggregate.py`)
 

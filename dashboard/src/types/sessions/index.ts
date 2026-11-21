@@ -134,7 +134,8 @@ export interface SessionQuality {
   duplicateBatches: number;
 }
 
-/** Detections scored against manual taps within ±1.5 s (plan 02 §9 step 5). */
+/** Detections scored against manual taps within ±1.5 s (plan 02 §9 step 5). True/false positives
+ * count detections, false negatives count taps: precision is over detections, recall over taps. */
 export interface DetectionScore {
   truePositives: number;
   falsePositives: number;
@@ -206,7 +207,7 @@ export interface RoadEventProperties {
   type: RoadEventType;
   tUtc: IsoDateTime;
   speedKmh: number | null;
-  /** Peak high-passed vertical acceleration (pothole) or pitch rate (speed bump). */
+  /** m/s²: peak |band-passed (1–30 Hz) vertical acceleration|, at the jolt (pothole) or at either axle (speed bump). */
   magnitude: number;
   /** 0–1. */
   confidence: number;

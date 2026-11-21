@@ -385,7 +385,7 @@ Raw values are always stored as measured; normalization happens only in the aggr
 3. **Quality checks.** Measure sample rates and gaps. Mark windows invalid when `phone_moved` was tapped, when gravity drifts in the phone's frame, or when the gyro's turn rate disagrees with GPS. Report what fraction of the session is valid.
 4. **Road roughness.** Band-pass vertical acceleration (about 1 to 30 Hz), compute RMS per segment pass, and record speed with it.
 5. **Potholes and speed bumps.**
-   - A pothole is a sharp jump in high-passed vertical acceleration, counted only above 15 km/h.
+   - A pothole is a sharp jump in band-passed (1–30 Hz) vertical acceleration, counted only above 15 km/h.
    - A speed bump shows a double peak in pitch rate (front axle, then rear axle).
    - Detections are scored against manual taps within ±1.5 s, since people react late, as precision and recall.
 6. **Motion sickness.**
@@ -395,9 +395,9 @@ Raw values are always stored as measured; normalization happens only in the aggr
    - Known limit, to state openly: the ISO metric only covers up-and-down motion, while in cars sideways sway is likely a strong cause of sickness. A sideways metric was considered and dropped (§19).
 
 **Across sessions** (the aggregation step). It runs at the end of every finalize job, and can be re-run by hand with the **aggregate** job (for example after changing the method). It takes a PostgreSQL advisory lock, so two runs never overlap, and rebuilds `segment_agg` in one transaction.
-- **Roughness is normalized per vehicle.** A bus and a car feel the same road differently. We fit one model across all observations: `log(roughness) = road segment effect + vehicle effect + β·log(speed)`. Segments driven by several vehicles tie the vehicle effects together. If there is too little overlap, the fallback is per-session percentiles.
+- **Roughness is normalized per vehicle.** A bus and a car feel the same road differently. We fit one model across all observations: `log(roughness) = road segment effect + vehicle effect + β·log(speed)`. Segments driven by several vehicles tie the vehicle effects together. A vehicle type that shares no segment with the car (directly or through other vehicles) can't be tied to it: it is left out of the fit and its segments show their percentile (D45). If there is too little overlap, the fallback is per-session percentiles.
 - **Potholes are crowd-confirmed.** A pothole counts as confirmed when it was detected in at least *k* of *n* passes over that segment, with thresholds set per vehicle type.
-- **Sickness is not normalized.** It measures what passengers actually feel, so "the bus is worse than the car on this route" is a finding, not an error. Results are split by seat and by seated or standing.
+- **Sickness is not normalized.** It measures what passengers actually feel, so "the bus is worse than the car on this route" is a finding, not an error. Results are split by seat and by seated or standing. Per segment it counts only moving, valid time (speed ≥ 1 m/s, phone not handled), so a bus standing at a stop doesn't dilute it (D45).
 
 **Plan the trips for overlap.** Crowd confirmation only works if the same streets are driven several times. Pick one fixed loop that shares streets with a bus or tram line, and drive it several times, including at two different speeds.
 

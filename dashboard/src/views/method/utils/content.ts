@@ -41,7 +41,7 @@ export const METHOD_SECTIONS = [
   {
     title: "Potholes and speed bumps",
     points: [
-      "A pothole is a sharp jump in high-passed vertical acceleration, counted only above 15 km/h; a speed bump is a double peak in pitch rate (front axle, then rear axle).",
+      "A pothole is a sharp jump in band-passed (1–30 Hz) vertical acceleration, counted only above 15 km/h; a speed bump is a double peak in pitch rate (front axle, then rear axle).",
       "Detections are scored against the passenger's taps within ±1.5 s (precision and recall).",
       "A pothole is confirmed on the map when it was detected in at least k of n passes, with thresholds per vehicle type. Tram rail joints are labelled separately.",
     ],

@@ -9,7 +9,7 @@ import pytest
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1]))
 
 from app.fmt import epoch_ms, iso  # noqa: E402
-from app.queries import BadRequest, enum_param, is_h3_cell, rating_value  # noqa: E402
+from app.queries import BadRequest, enum_param, is_h3_cell, rating_value, spearman  # noqa: E402
 
 UTC = dt.timezone.utc
 
@@ -51,3 +51,21 @@ def test_telemetry_off_without_connection_string(monkeypatch):
 
     monkeypatch.delenv("APPLICATIONINSIGHTS_CONNECTION_STRING", raising=False)
     assert configure_telemetry() is False
+
+
+def test_spearman_ranks_with_ties_like_the_mock():
+    assert spearman([0.1, 0.5, 0.9], [1, 2, 3]) == pytest.approx(1.0)
+    assert spearman([0.1, 0.5, 0.9], [3, 2, 1]) == pytest.approx(-1.0)
+    # Average ranks for ties: x ranks [0, 1.5, 1.5, 3], y ranks [0, 1, 2, 3].
+    assert spearman([1.0, 2.0, 2.0, 3.0], [0, 1, 2, 3]) == pytest.approx(4.5 / (4.5 * 5.0) ** 0.5)
+    assert spearman([1.0, 2.0], [1, 2]) is None  # fewer than 3 ratings
+    assert spearman([1.0, 2.0, 3.0], [4, 4, 4]) is None  # constant ratings: undefined
+
+
+def test_epoch_ms_and_iso_name_the_same_millisecond():
+    """iso() truncates to the ms; epoch_ms rounded, so an event's id/series ms and its tUtc could
+    differ by 1 ms."""
+    t = dt.datetime(2026, 11, 21, 9, 12, 3, 512999, tzinfo=UTC)
+    assert iso(t) == "2026-11-21T09:12:03.512Z" and epoch_ms(t) == 1795252323512
+    ms = epoch_ms(t)
+    assert dt.datetime.fromtimestamp(ms / 1000, UTC).strftime("%S.%f")[:6] == iso(t)[17:23]

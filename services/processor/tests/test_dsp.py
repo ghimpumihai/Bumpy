@@ -23,7 +23,8 @@ def _phone_frame():
 
 def synth(seconds, *, vert=lambda t: 0 * t, speed=lambda t: 0 * t + 12.0, lon=None, seed=1,
           jitter=True, rate=FS):
-    """deviceMotion-like samples (epoch s, ua g, gravity g) and 1 Hz fixes, for a vehicle signal."""
+    """deviceMotion-like samples (epoch s, ua g, gravity g) and 1 Hz fixes, for a vehicle signal.
+    ua has CoreMotion's sign: minus the phone's acceleration (dsp.UA_SIGN)."""
     rng = np.random.default_rng(seed)
     n = int(seconds * rate)
     t = np.arange(n) / rate
@@ -35,7 +36,7 @@ def synth(seconds, *, vert=lambda t: 0 * t, speed=lambda t: 0 * t + 12.0, lon=No
     a_vehicle[:, 2] = vert(t)
     if lon is not None:
         a_vehicle[:, 0] = lon(t)
-    ua = (a_vehicle @ r.T) / dsp.G
+    ua = dsp.UA_SIGN * (a_vehicle @ r.T) / dsp.G
     grav = np.tile(np.array([0, 0, -1.0]) @ r.T, (n, 1))
     fixes = [(T0 + s + 0.3, float(speed(np.array(s + 0.3)))) for s in range(int(seconds))]
     return T0 + t, ua, grav, fixes
@@ -83,9 +84,18 @@ def test_wf_peaks_near_017_hz_and_rejects_road_frequencies():
 
 def test_vertical_sign_screen_up():
     p = dsp.Pipeline()
-    ua = np.array([[0.0, 0.0, 0.1]])  # 0.1 g towards the screen side
     grav = np.array([[0.0, 0.0, -1.0]])  # screen up: gravity along -z
-    assert p._vert(np.hstack([ua, grav]))[0] == pytest.approx(0.1 * dsp.G)
+    # CoreMotion in free fall: the accelerometer reads 0, so userAcceleration = 0 - gravity = +1 g on z.
+    free_fall = np.array([[0.0, 0.0, 1.0]])
+    assert p._vert(np.hstack([free_fall * p.ua_sign, grav]))[0] == pytest.approx(-dsp.G)  # falling
+
+
+def test_a_trip_saved_before_the_sign_fix_keeps_its_sign():
+    assert dsp.Pipeline().ua_sign == dsp.UA_SIGN
+    old = dsp.Pipeline().to_state()
+    del old["ua_sign"]
+    assert dsp.Pipeline(old).ua_sign == dsp.LEGACY_UA_SIGN
+    assert dsp.Pipeline(dsp.Pipeline().to_state()).ua_sign == dsp.UA_SIGN
 
 
 def test_roughness_of_a_10hz_sine_is_its_rms():
@@ -191,6 +201,10 @@ def test_forward_axis_learned_from_speed_changes():
     fixes = [(T0 + s + 0.3, speed_from_lon(s + 0.3)) for s in range(240)]
     out, p = run_whole(t, ua, grav, fixes)
     assert p.forward_known
+    # The axis itself, not only a_lon: a backwards axis gives the same a_lon (both signs flip) but
+    # inverts the pitch rate, and then no speed bump is found.
+    fwd = np.array(p.forward_sum) / np.linalg.norm(p.forward_sum)
+    assert fwd @ (_phone_frame() @ np.array([1.0, 0.0, 0.0])) > 0.99
     late = [pt for pt in out.series if pt.t > T0 + 120]
     corr = np.corrcoef([pt.a_lon for pt in late], [lon(np.array(pt.t - T0)) for pt in late])[0, 1]
     assert corr > 0.9
@@ -222,6 +236,76 @@ def test_chunked_feed_equals_one_pass():
     assert len(events) == 2
     assert last.msdv == pytest.approx(whole.msdv, rel=1e-6)
     assert last.roughness_now == pytest.approx(whole.roughness_now, rel=1e-6)
+
+
+def _vertical_only(rel, vert):
+    r = _phone_frame()
+    ua = (np.column_stack([0 * rel, 0 * rel, vert]) @ r.T) / dsp.G
+    return T0 + rel, ua, np.tile(np.array([0, 0, -1.0]) @ r.T, (len(rel), 1))
+
+
+@pytest.mark.parametrize("rate", [99.5, 100.5])
+def test_resampling_keeps_high_frequencies_wherever_the_samples_fall(rate):
+    """A phone a little off 100 Hz drifts through every sub-sample phase against the grid. Linear
+    interpolation left a 20 Hz sine 0.81–0.97 of its RMS and 28 Hz 0.55–0.84, window by window."""
+    for f0, low in ((20.0, 0.98), (28.0, 0.80)):
+        rel = np.arange(int(20 * rate)) / rate
+        out, _ = run_whole(*_vertical_only(rel, math.sqrt(2) * np.sin(2 * np.pi * f0 * rel)), [])
+        rms = [p.rough_rms for p in out.series[10:]]
+        assert min(rms) > low, f0
+        assert max(rms) < 1.01, f0
+
+
+def test_a_jolt_between_samples_keeps_its_peak():
+    """A 10 ms jolt just above the pothole threshold: with the samples off the grid by up to 9 ms,
+    linear interpolation cut its band-passed peak by 12 % and 9 of 10 were missed."""
+    peaks = []
+    for off in np.linspace(0, 0.009, 10):
+        rel = np.arange(1000) / 100.0 + off
+        rel[0] = 0.0  # keeps the grid's origin, so only the samples move
+        t, ua, grav = _vertical_only(rel, _pulse(5.0, 8.0, 0.01)(rel))
+        p = dsp.Pipeline()
+        out = p.feed(t, ua, grav, [(T0 + s + 0.3, 10.0) for s in range(10)])
+        peaks.append(max(abs(s.a_vert) for s in out.series))
+        assert [e.type for e in out.events + p.flush()] == ["pothole"], off
+    assert min(peaks) > 0.98 * peaks[0]
+
+
+def test_bunched_samples_fall_back_to_linear_interpolation():
+    """Two samples 0.5 ms apart would make the Lagrange weights huge; the stencil falls back to
+    linear and the output stays as small as the input."""
+    rel = np.arange(600) / 100.0
+    vert = 0.5 * np.sin(2 * np.pi * 3 * rel)
+    rel = np.insert(rel, 300, rel[300] + 0.0005)
+    vert = np.insert(vert, 300, vert[300] + 0.3)  # a little noise on the bunched sample
+    out, _ = run_whole(*_vertical_only(rel, vert), [])
+    assert max(abs(s.a_vert) for s in out.series) < 1.5
+
+
+def test_a_trip_saved_by_the_linear_resampler_continues(monkeypatch):
+    """A trip in progress during the deploy has a grid without `hist`/`n_seen`, saved after every grid
+    point up to its last sample: it continues from that sample, starting linear, without a reset."""
+    t, ua, grav, fixes = synth(40, vert=lambda t: 0.5 * np.sin(2 * np.pi * 0.3 * t)
+                               + np.sin(2 * np.pi * 4 * t))
+    cut = len(t) // 2
+    first = [f for f in fixes if f[0] < t[cut]]
+    rest = [f for f in fixes if f[0] >= t[cut]]
+    whole, _ = run_whole(t, ua, grav, fixes)
+
+    with monkeypatch.context() as m:
+        m.setattr(dsp, "INTERP_HALF", 1)  # linear, and nothing waits for later samples: the old resampler
+        p = dsp.Pipeline()
+        p.feed(t[:cut], ua[:cut], grav[:cut], first)
+    old = json.loads(json.dumps(p.to_state()))
+    del old["grid"]["hist"], old["grid"]["n_seen"]
+
+    out = dsp.Pipeline(old).feed(t[cut:], ua[cut:], grav[cut:], rest)
+    assert not out.reset
+    tail = [s for s in whole.series if s.t > t[cut] + 1.0]
+    got = {round(s.t, 6): s for s in out.series}
+    assert all(round(s.t, 6) in got for s in tail)
+    assert max(abs(got[round(s.t, 6)].a_vert - s.a_vert) for s in tail) < 0.02
+    assert out.msdv == pytest.approx(whole.msdv, rel=0.01)
 
 
 def test_overlapping_batches_are_not_interleaved():
@@ -292,7 +376,7 @@ def synth_bumps(seconds, bumps, *, speed=15 / 3.6 + 0.2, wheelbase=2.7, rate_amp
         pitch_up += _pulse(b, rate_amp)(rel) - _pulse(rear, rate_amp)(rel)
         vert += _pulse(b, vert_amp, 0.01)(rel) + _pulse(rear, vert_amp, 0.01)(rel)
     r = _phone_frame()
-    ua = ua + (np.column_stack([0 * rel, 0 * rel, vert]) @ r.T) / dsp.G
+    ua = ua + dsp.UA_SIGN * (np.column_stack([0 * rel, 0 * rel, vert]) @ r.T) / dsp.G
     # Nose up is a negative rotation about the vehicle's left (+y) axis.
     rr = np.column_stack([0 * rel, -pitch_up, 0 * rel]) @ r.T
     return t, ua, grav, fixes, rr
@@ -327,6 +411,33 @@ def test_speed_bump_detected_and_its_jolts_are_not_potholes():
     assert ev.speed == pytest.approx(15 / 3.6 + 0.2)
 
 
+def test_speed_bumps_found_with_a_learned_forward_axis():
+    """As on a real trip: no preset axis. 3 min of speed changes teach it, then 4 bumps at 15 km/h.
+    With the raw CoreMotion sign the axis came out backwards and all 4 were reported as potholes."""
+    secs, learn_s, v = 230, 180, 15 / 3.6 + 0.2
+    lon = lambda t: np.where(t < learn_s, 4 * 2 * np.pi / 20 * np.cos(2 * np.pi * t / 20), 0.0)  # noqa: E731
+    speed = lambda t: np.where(t < learn_s, 8 + 4 * np.sin(2 * np.pi * t / 20), v)  # noqa: E731
+    t, ua, grav, fixes = synth(secs, lon=lon, speed=speed, seed=5)
+    rel = t - T0
+    bumps = [190.0, 200.0, 210.0, 220.0]
+    pitch_up, vert = np.zeros_like(rel), np.zeros_like(rel)
+    for b in bumps:
+        rear = b + 2.7 / v
+        pitch_up += _pulse(b, 0.4)(rel) - _pulse(rear, 0.4)(rel)
+        vert += _pulse(b, 15.0, 0.01)(rel) + _pulse(rear, 15.0, 0.01)(rel)
+    r = _phone_frame()
+    ua = ua + dsp.UA_SIGN * (np.column_stack([0 * rel, 0 * rel, vert]) @ r.T) / dsp.G
+    rr = np.column_stack([0 * rel, -pitch_up, 0 * rel]) @ r.T
+    p = dsp.Pipeline()
+    out = p.feed(t, ua, grav, fixes, rr=rr)
+    events = out.events + p.flush()
+    assert [round(e.t - T0) for e in events if e.type == "speed_bump"] == bumps
+    assert not [e for e in events if e.type == "pothole"]
+    # a_vert is positive upwards: the jolt of the front axle climbing the bump.
+    jolt = max((s for s in out.series if abs(s.t - T0 - bumps[0]) < 0.3), key=lambda s: abs(s.a_vert))
+    assert jolt.a_vert > dsp.POTHOLE_THRESHOLD_MS2
+
+
 @pytest.mark.parametrize("wheelbase", [2.2, 3.0, 6.0])
 def test_speed_bump_for_car_and_bus_wheelbases(wheelbase):
     t, ua, grav, fixes, rr = synth_bumps(14, [5.0], speed=6.0, wheelbase=wheelbase)
@@ -355,12 +466,76 @@ def test_no_speed_bump_when_fast_or_from_one_pitch_peak():
     assert _feed_bumps(t, ua, grav, fixes, rr)[0].events == []
 
 
+def _pitch_only(t, pitch_up):
+    """Rotation rate for a nose-up pitch rate pitch_up(rel t)."""
+    rel = t - T0
+    return np.column_stack([0 * rel, -pitch_up(rel), 0 * rel]) @ _phone_frame().T
+
+
+@pytest.mark.parametrize("at", np.round(np.arange(5.0, 6.0, 0.05), 2))
+def test_speed_bump_found_whenever_a_fix_lands_in_its_front_peak(at):
+    # Fixes at s + 0.3: for some bump times one is taken between the front peak's extreme and its
+    # end, and the speed was then looked up too late (None), dropping the front axle.
+    t, ua, grav, fixes, rr = synth_bumps(12, [at])
+    out, p = _feed_bumps(t, ua, grav, fixes, rr)
+    assert [e.type for e in out.events + p.flush()] == ["speed_bump"]
+
+
+def test_pothole_just_before_a_slow_speed_bump_is_not_released_early():
+    """A bus (5 m wheelbase) braking into a bump: the jolt 0.45 s before the front axle is taken at
+    the old fix's 4.3 m/s, the bump at 2.5 m/s, so its rear axle comes 2 s later. The bump covers the
+    jolt, but a fixed 2.5 s hold had already reported it as a pothole."""
+    front, wheelbase, v = 6.0, 5.0, 2.5
+    rear = front + wheelbase / v
+    jolts = lambda rel: (_pulse(front - 0.45, 15.0, 0.01)(rel) + _pulse(front, 15.0, 0.01)(rel)  # noqa: E731
+                         + _pulse(rear, 15.0, 0.01)(rel))
+    t, ua, grav, _ = synth(12, vert=jolts)
+    fixes = [(T0 + s + 0.3, 4.3) for s in range(5)] + [(T0 + s + 0.9, v) for s in range(5, 11)]
+    rr = _pitch_only(t, lambda rel: _pulse(front, 0.4)(rel) - _pulse(rear, 0.4)(rel))
+    out, p = _feed_bumps(t, ua, grav, fixes, rr)
+    assert [(e.type, round(e.t - T0, 1)) for e in out.events + p.flush()] == [("speed_bump", front)]
+
+
+@pytest.mark.parametrize("speed", [6.0, 8.0, 10.0])
+@pytest.mark.parametrize("hz,zeta", [(1.0, 0.3), (1.3, 0.3), (1.5, 0.2), (1.5, 0.4)])
+def test_a_single_impact_ringing_in_pitch_is_a_pothole_not_a_speed_bump(speed, hz, zeta):
+    # One jolt that sets the body pitching: its rebound has the sign and timing of a rear axle, but no
+    # rear-axle jolt of its own.
+    wd = 2 * np.pi * hz * np.sqrt(1 - zeta ** 2)
+
+    def ring(rel):
+        tt = np.clip(rel - 5.0, 0, None)
+        return np.where(rel >= 5.0, 0.4 * np.exp(-zeta * 2 * np.pi * hz * tt) * np.sin(wd * tt), 0.0)
+
+    t, ua, grav, fixes = synth(12, vert=_pulse(5.0, 12.0, 0.01), speed=lambda t: 0 * t + speed)
+    out, p = _feed_bumps(t, ua, grav, fixes, _pitch_only(t, ring))
+    assert [e.type for e in out.events + p.flush()] == ["pothole"]
+
+
+def test_a_trip_saved_mid_bump_by_the_previous_version_continues():
+    """Front peaks saved without their speed, front axles without their jolt, no recent-jolt list."""
+    t, ua, grav, fixes, rr = synth_bumps(12, [5.0])
+    whole, p = _feed_bumps(t, ua, grav, fixes, rr)
+    cut = int(np.searchsorted(t, T0 + 5.5))  # between the two axles: the front one is pending
+    first, q = _feed_bumps(t[:cut], ua[:cut], grav[:cut], [f for f in fixes if f[0] < t[cut]], rr[:cut])
+    old = json.loads(json.dumps(q.to_state()))
+    bump = old["grid"]["bump"]
+    assert bump["p1"] is not None
+    bump["p1"] = bump["p1"][:4]
+    bump.pop("recent")
+    if bump["peak"] is not None:
+        bump["peak"] = bump["peak"][:5]
+    q = dsp.Pipeline(old)
+    rest = q.feed(t[cut:], ua[cut:], grav[cut:], [f for f in fixes if f[0] >= t[cut]], rr=rr[cut:])
+    assert [e.type for e in first.events + rest.events + q.flush()] == ["speed_bump"]
+
+
 def test_potholes_are_held_back_and_flushed_at_the_end():
-    t, ua, grav, fixes = synth(10, vert=_spike(8.5), speed=lambda t: 0 * t + 10.0)
+    t, ua, grav, fixes = synth(10, vert=_spike(9.6), speed=lambda t: 0 * t + 10.0)
     out, p = run_whole(t, ua, grav, fixes)
-    assert out.events == []  # still within POTHOLE_HOLD_S of the end
+    assert out.events == []  # a front peak could still start within BUMP_SPAN_PAD_S of it
     (ev,) = p.flush()
-    assert ev.type == "pothole" and abs(ev.t - (T0 + 8.5)) < 0.05
+    assert ev.type == "pothole" and abs(ev.t - (T0 + 9.6)) < 0.05
     assert p.flush() == [] and p.to_state()["held"] == []
 
 
@@ -404,3 +579,43 @@ def test_a_trip_saved_before_rotation_rate_continues():
     q = dsp.Pipeline(old)
     out = q.feed(t[half:], ua[half:], grav[half:], [f for f in fixes if f[0] >= t[half]])
     assert not out.reset and [e.type for e in out.events + q.flush()] == ["pothole"]
+
+
+# --- Resets ---------------------------------------------------------------------------------
+
+def test_a_reset_does_not_inject_dose_from_its_first_sample():
+    """User acceleration is zero-mean: starting the 2 Hz low-pass as if the first sample had lasted
+    forever released a step into Wf (x0 = 2 m/s² gave 0.096 m²/s³ of dose from nothing)."""
+    vert = lambda t: np.where(np.arange(len(t)) == 0, 2.0, 0.0)  # noqa: E731
+    t, ua, grav, fixes = synth(60, vert=vert, jitter=False)
+    out, p = run_whole(t, ua, grav, fixes)
+    assert p.dose < 0.001
+
+
+def test_window_dose_adds_up_to_the_trip_across_resets():
+    """A reset cut the open 5 Hz window and dropped its dose, so Σ dose_inc < dose (and passes' a_w
+    came out low). The cut-short dose now goes into the next window."""
+    vert = lambda t: np.sin(2 * np.pi * 0.2 * t)  # noqa: E731
+    t, ua, grav, fixes = synth(60, vert=vert)
+    m = ~(((t >= T0 + 20.03) & (t < T0 + 20.6)) | ((t >= T0 + 41.11) & (t < T0 + 41.7)))
+    out, p = run_whole(t[m], ua[m], grav[m], fixes)
+    assert out.reset
+
+    def open_dose(pipe):  # the window still open at the end of the data, not emitted yet
+        return pipe.grid["win"]["aw2"] + pipe.carry_aw2
+
+    assert sum(pt.dose_inc for pt in out.series) + open_dose(p) == pytest.approx(p.dose, rel=1e-9)
+    # Also when the reset comes between feeds (a missing batch).
+    q = dsp.Pipeline()
+    half = int(np.searchsorted(t, T0 + 30.07))
+    a = q.feed(t[:half], ua[:half], grav[:half], [f for f in fixes if f[0] < t[half]])
+    b = q.feed(t[half:], ua[half:], grav[half:], [f for f in fixes if f[0] >= t[half]], reset=True)
+    assert sum(pt.dose_inc for pt in a.series + b.series) + open_dose(q) == pytest.approx(q.dose, rel=1e-9)
+
+
+def test_no_pothole_at_exactly_15_kmh():
+    """Plan §9 step 5 and the pass ratio: above 15 km/h, not at it."""
+    out_at, _ = run_whole(*synth(10, vert=_spike(5.0), speed=lambda t: 0 * t + dsp.POTHOLE_MIN_SPEED_MS))
+    assert not [e for e in out_at.events if e.type == "pothole"]
+    out_above, _ = run_whole(*synth(10, vert=_spike(5.0), speed=lambda t: 0 * t + dsp.POTHOLE_MIN_SPEED_MS + 0.1))
+    assert [e.type for e in out_above.events] == ["pothole"]

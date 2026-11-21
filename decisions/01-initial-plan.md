@@ -85,7 +85,7 @@ Priority:
 | # | Stream | API | Rate | Fields (unit) | Why | Prio |
 |---|---|---|---|---|---|---|
 | M1 | **Device motion (fused)** | `CMMotionManager.startDeviceMotionUpdates(using: .xArbitraryZVertical, to:)` | 100 Hz | `userAcceleration.x/y/z` (g), `gravity.x/y/z` (g), `rotationRate.x/y/z` (rad/s), `attitude.quaternion.w/x/y/z`, `attitude.roll/pitch/yaw` (rad) | Gravity vector = "which way is down", used to rotate into the vehicle frame. Attitude gives roll/pitch for sickness. userAcceleration is handy for road spikes | **P0** |
-| M2 | **Raw accelerometer** | `startAccelerometerUpdates` | 100 Hz | `x/y/z` (g, gravity included) | **Unfused** signal. The fused userAcceleration can filter out the very slow 0.1–0.5 Hz motion that MSDV needs, so the backend must have raw data | **P0** |
+| M2 | **Raw accelerometer** | `startAccelerometerUpdates` | 100 Hz | `x/y/z` (g, gravity included) | **Unfused** signal, kept to cross-check the fused one after the real drive. MSDV and roughness use userAcceleration (D46): vertical heave can't leak into the unit-length gravity estimate | **P0** |
 | M3 | **Raw gyroscope** | `startGyroUpdates` | 100 Hz | `x/y/z` (rad/s, includes bias) | Unfused rotation; pitch spikes help confirm potholes (front then rear axle) | **P0** |
 | M4 | Raw magnetometer | `startMagnetometerUpdates` | 50 Hz | `x/y/z` (µT) | Car metal distorts it, but it's cheap and may help heading or detect electrical noise | P2 |
 

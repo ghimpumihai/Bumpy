@@ -4,7 +4,13 @@ Web dashboard of the Codelap 2026 project (plan: [02-infrastructure-plan.md](../
 §5 "Dashboard", §15). React + Vite + MapLibre (OpenFreeMap tiles) + uPlot, hosted as static files on
 Azure Static Web Apps (`public/staticwebapp.config.json`: SPA fallback, caching, security headers), reading the **read API** ([API.md](API.md)).
 
-The backend pipeline is not deployed yet, so the dashboard ships with an in-browser **mock backend**
+**Real backend:** the read API ([`services/read-api/`](../services/read-api/README.md)) is deployed on Azure and
+serves every route below. The site itself goes live with the manual **deploy-dashboard** workflow (Actions tab), which
+writes `config.json` with the read API's address and uploads the build to Static Web Apps. It hasn't been run yet. What
+the real API fills in today: Live, sessions, quality, tracks, labels, chart series, potholes and the motion-sickness dose.
+The Map page (H3 segments, aggregation), speed bumps and detection scores stay empty until the finalize job exists.
+
+For local work the dashboard also ships with an in-browser **mock backend**
 that implements the same API with generated trips on real Cluj-Napoca streets (cars, bus 35, tram 101,
 a winding hill road; potholes, speed bumps, cobblestones). It follows the live-first plan: most trips are
 streamed and finalized, two are laptop uploads, a live car crosses a dead zone (stale, then catching up),

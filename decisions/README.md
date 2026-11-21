@@ -8,6 +8,10 @@ Plans and the decision log for the Codelap 2026 project: road quality and motion
 | [02-infrastructure-plan.md](02-infrastructure-plan.md) | The Azure backend: architecture diagram, every tool explained, why we chose it, data model, processing, IaC, CI/CD, cost, build order. |
 | [03-research-notes.md](03-research-notes.md) | Facts, prices and sources behind the decisions. |
 
+## Implementation status
+
+The plan in 02 is being built in its day-1/day-2 order. What's done, deployed and still open is kept in the [root README](../README.md#status-2026-11-21). Where the code differs from the plan (e.g. the read API on port 8000, the Static Web App in East US 2, Service Bus Data Owner for the KEDA scaler), the differences are listed in each part's README: [infra](../infra/README.md#where-this-differs-from-the-plan), [ingest](../services/ingest/README.md#differences-from-the-mock-and-the-plan), [processor](../services/processor/README.md).
+
 ## Decision log
 
 Decisions D1–D17 were researched and then reviewed by an independent advisor model before being accepted. D18 and D19 are scope cuts made by the team. D20 is a correctness fix found while rechecking the plan. D21–D31 move the backend from AWS to Azure (same day); D30 also fixes gaps found in a review of the AWS version (what starts the backfill, where aggregation runs, concurrent migrations). D32–D33 make the live path (phone → cloud → dashboard) the main path. D34–D36 come from the final research pass (02 §20).

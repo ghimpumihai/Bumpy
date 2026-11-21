@@ -36,7 +36,7 @@ The dashboard reads only the read API. Its contract is [API.md](API.md), with ty
 
 ## Conventions
 - Colours only from the semantic tokens in `src/global.css` (incl. `scale-1…5`, `event-*`, `chart-1…5`), never raw palette classes. Inline `style` only for runtime geometry or runtime CSS-variable colours.
-- Dates via `@/utils/format-date-time`, numbers and units via `@/utils/format-number`, physical constants in `constants/units.ts`; toasts only via `useToast()`.
+- Dates via `@/utils/format-date-time`, numbers and units via `@/utils/format-number`, physical constants in `constants/units.ts`.
 - Constants sit next to where they're used; move one to `constants/` once it's shared.
 - Closed sets are const objects + `typeof` types, not `enum`s. File and folder names kebab-case, except `routes/` and `components/ui/`.
 - UI copy is English.

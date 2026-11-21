@@ -19,8 +19,9 @@ export interface LiveDevice {
   speedMs: number | null;
   courseDeg: number | null;
   hAccM: number | null;
-  /** Roughness of the last few seconds, m/s² (raw, not normalized). */
+  /** Roughness of the last few seconds, m/s² (raw, not normalized): RMS of the 1–30 Hz band-passed vertical, τ = 5 s. */
   roughnessNow: number | null;
+  /** MSDV of the trip so far, vertical and sideways combined (D49), m/s^1.5. */
   msdvSoFar: number | null;
   battery: number | null;
   thermal: string | null;

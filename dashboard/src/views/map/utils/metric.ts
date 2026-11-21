@@ -8,7 +8,7 @@ export function metricScale(metric: MapMetric, method: RoughnessMethod | undefin
     return {
       property: "msi1hPct",
       bands: SICKNESS_BANDS,
-      title: "Motion sickness (ISO 2631-1)",
+      title: "Motion sickness (ISO 2631-1 + sway)",
       footnote: "Predicted share of passengers who may vomit after one hour of this motion (MSDV / 3). Not normalized: it is what passengers feel.",
     };
   }

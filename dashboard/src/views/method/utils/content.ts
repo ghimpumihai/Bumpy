@@ -49,10 +49,10 @@ export const METHOD_SECTIONS = [
   {
     title: "Motion sickness",
     points: [
-      "Vertical acceleration is weighted with the ISO 2631-1 Wf filter, side-to-side acceleration with the Donohew & Griffin (2004) lateral weighting (flat to 0.25 Hz, then −12 dB per octave). The two add as energies: MSDV = √(∫ (a_wz² + a_wy²) dt) = √(MSDV_z² + MSDV_y²).",
+      "Vertical acceleration is weighted with the ISO 2631-1 Wf filter, side-to-side acceleration with the Donohew & Griffin (2004) lateral weighting (flat from 0.0315 to 0.25 Hz, then −12 dB per octave to 0.8 Hz; the filter stays within ±0.8 dB of it, D50). The two add as energies: MSDV = √(∫ (a_wz² + a_wy²) dt) = √(MSDV_z² + MSDV_y²).",
       "Roughly MSDV / 3 percent of unadapted people may vomit. The number comes from the measured motion only; passengers aren't asked how they feel (D47).",
       "Sickness is not normalized across vehicles: “the bus is worse than the car on this route” is a finding. Results are split by seat and by seated or standing.",
-      "Known limits: the lateral weighting is not part of ISO 2631-1 and its exact coefficients weren't published, and the MSDV / 3 rule was fitted to vertical motion. Sideways sway is only counted once the phone's forward axis has been learned from GPS speed changes.",
+      "Known limits: the lateral weighting is not part of ISO 2631-1 and its exact coefficients weren't published, the combination of the two axes is our choice (ISO combines axes only for comfort and health), and the MSDV / 3 rule was fitted to vertical motion over exposures of 20 minutes to 6 hours, so a shorter trip's percentage is indicative. Sideways sway is only counted once the phone's forward axis has been learned from GPS speed changes.",
     ],
   },
   {

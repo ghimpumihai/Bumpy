@@ -151,7 +151,10 @@ export interface DetectionMetrics {
   speed_bump: DetectionScore;
 }
 
-/** The calculated motion-sickness dose of the whole trip (ISO 2631-1); no passenger ratings (D47). */
+/**
+ * The calculated motion-sickness dose of the whole trip: vertical (ISO 2631-1 Wf) and sideways (Donohew &
+ * Griffin, D49) combined; no passenger ratings (D47). `msiPct = msdv / 3`, ISO's rule for 20 min to 6 h.
+ */
 export interface SicknessSummary {
   msdv: number | null;
   msdvZ: number | null;
@@ -171,11 +174,11 @@ export interface SessionDetail extends SessionSummary {
 /** `GET /api/sessions/{id}/series`: columnar, about 5 Hz. */
 export interface SessionSeries {
   t: EpochMs[];
-  /** Vertical acceleration, m/s², gravity removed. */
+  /** Vertical acceleration, m/s², + up: the 1–30 Hz band-passed value with the largest |value| in each 0.2 s window. */
   aVert: number[];
-  /** Lateral (sideways) acceleration, low-passed, m/s². */
+  /** Lateral (sideways) acceleration, 2 Hz low-passed, m/s², + to the vehicle's left; 0 until the forward axis is learned. */
   aLat: number[];
-  /** Longitudinal acceleration, low-passed, m/s². */
+  /** Longitudinal acceleration, 2 Hz low-passed, m/s², + forward; 0 until the forward axis is learned. */
   aLon: number[];
   /** m/s; `null` where GPS had no valid speed. */
   speed: (number | null)[];

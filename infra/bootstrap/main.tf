@@ -16,6 +16,10 @@ terraform {
       source  = "hashicorp/random"
       version = "~> 3.6"
     }
+    azuread = {
+      source  = "hashicorp/azuread"
+      version = "~> 3.0"
+    }
   }
 }
 
@@ -46,6 +50,9 @@ provider "azurerm" {
 }
 
 data "azurerm_client_config" "current" {}
+
+# Bootstrap runs with a person's login; the CI identities have no Microsoft Graph rights to manage groups.
+provider "azuread" {}
 
 resource "random_string" "suffix" {
   length  = 5
@@ -102,6 +109,36 @@ resource "azurerm_role_assignment" "tfstate_admins" {
   scope                = azurerm_storage_account.tfstate.id
   role_definition_name = "Storage Blob Data Contributor"
   principal_id         = each.value
+}
+
+# --- Team group (D38) -----------------------------------------------------------------
+# Owner covers the control plane only; data-plane roles (blobs, Event Hubs, Key Vault secrets) come from
+# putting this group's object ID into TF_VAR_admin_object_ids for the main stack.
+
+resource "azuread_group" "team" {
+  display_name     = "${var.project}-team"
+  description      = "Road & Ride team: Owner on the project resource groups."
+  security_enabled = true
+  owners           = [data.azurerm_client_config.current.object_id]
+}
+
+resource "azurerm_role_assignment" "team_owner" {
+  for_each = {
+    stack   = azurerm_resource_group.stack.id
+    tfstate = azurerm_resource_group.tfstate.id
+  }
+  scope                = each.value
+  role_definition_name = "Owner"
+  principal_id         = azuread_group.team.object_id
+  principal_type       = "Group"
+}
+
+# Separate from tfstate_admins: the group's ID is unknown until it exists, so it can't be a for_each key.
+resource "azurerm_role_assignment" "team_tfstate" {
+  scope                = azurerm_storage_account.tfstate.id
+  role_definition_name = "Storage Blob Data Contributor"
+  principal_id         = azuread_group.team.object_id
+  principal_type       = "Group"
 }
 
 # --- GitHub Actions identities (OIDC, no stored secrets) ------------------------------

@@ -10,6 +10,11 @@ output "tfstate_storage_account" {
   value = azurerm_storage_account.tfstate.name
 }
 
+# Add to TF_VAR_admin_object_ids in infra/.env so the group also gets the main stack's data-plane roles.
+output "team_group_object_id" {
+  value = azuread_group.team.object_id
+}
+
 output "tfstate_container" {
   value = azurerm_storage_container.tfstate.name
 }

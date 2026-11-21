@@ -7,6 +7,8 @@ name: terraform-apply
 #
 # Same settings as terraform-plan.yml (repo variables + the TF_VAR_ALERT_EMAIL secret, infra/README.md
 # "CI for Terraform"), but logs in as the deploy identity (Contributor + RBAC Administrator on the stack).
+# The NAT gateway and the Event Hubs key fallback always come from the code (variables.tf), never from a
+# repo variable, so nobody can switch on a cost or a key login for the next apply without a PR.
 # It refuses to delete or replace a resource that holds data unless allow_data_loss is ticked, and after
 # the apply removes the provider-written AzureWebJobsStorage setting (infra/README.md "Function host storage").
 #
@@ -64,8 +66,6 @@ jobs:
         env:
           ALERT_EMAIL: ${{ secrets.TF_VAR_ALERT_EMAIL }}
           ADMIN_OBJECT_IDS: ${{ vars.TF_VAR_ADMIN_OBJECT_IDS }}
-          NAT: ${{ vars.TF_VAR_PSQL_NAT_GATEWAY_ENABLED }}
-          EH_LOCAL_AUTH: ${{ vars.TF_VAR_EVENTHUB_LOCAL_AUTH_ENABLED }}
           BUDGET: ${{ vars.TF_VAR_BUDGET_AMOUNT }}
           STATE_RG: ${{ vars.TFSTATE_RESOURCE_GROUP }}
           STATE_ACCOUNT: ${{ vars.TFSTATE_STORAGE_ACCOUNT }}
@@ -81,8 +81,6 @@ jobs:
           put() { if [ -n "$2" ]; then echo "$1=$2" >> "$GITHUB_ENV"; fi; }
           put TF_VAR_alert_email "$ALERT_EMAIL"
           put TF_VAR_admin_object_ids "$ADMIN_OBJECT_IDS"
-          put TF_VAR_psql_nat_gateway_enabled "$NAT"
-          put TF_VAR_eventhub_local_auth_enabled "$EH_LOCAL_AUTH"
           put TF_VAR_budget_amount "$BUDGET"
 
       - name: init

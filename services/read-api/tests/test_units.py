@@ -4,6 +4,8 @@ import datetime as dt
 import sys
 import pathlib
 
+import pytest
+
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1]))
 
 from app.fmt import epoch_ms, iso  # noqa: E402
@@ -40,3 +42,12 @@ def test_rating_value():
     assert rating_value("3") == 3 and rating_value("4.0") == 4 and rating_value(5) == 5
     assert rating_value(None) is None and rating_value("") is None and rating_value("skip") is None
     assert rating_value("inf") is None and rating_value("nan") is None
+
+
+def test_telemetry_off_without_connection_string(monkeypatch):
+    pytest.importorskip("fastapi")
+    pytest.importorskip("psycopg")
+    from app.main import configure_telemetry
+
+    monkeypatch.delenv("APPLICATIONINSIGHTS_CONNECTION_STRING", raising=False)
+    assert configure_telemetry() is False

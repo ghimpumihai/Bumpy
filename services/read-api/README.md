@@ -41,6 +41,10 @@ Every route runs a fixed number of queries, whatever the number of trips. The pr
 | `READ_API_POOL_TIMEOUT_S` | 10 | wait for a free connection, then 503 |
 | `READ_API_STATEMENT_TIMEOUT_MS` | 10000 | the server cancels a slower statement (503) |
 
+## Telemetry
+
+When `APPLICATIONINSIGHTS_CONNECTION_STRING` is set (Terraform sets it), `configure_azure_monitor()` sends requests, logs and exceptions to Application Insights (`azure-monitor-opentelemetry`). Without it, nothing is configured.
+
 ## Database login
 
 On Azure, `PGUSER=reader` and each new connection gets a fresh Microsoft Entra token for the identity in `AZURE_CLIENT_ID`. The pool passes the token per connection (`app/db.py`), so it keeps working after the first token expires. Locally and in CI, `PGPASSWORD` is used.

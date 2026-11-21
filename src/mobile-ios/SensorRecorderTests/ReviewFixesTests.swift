@@ -239,20 +239,27 @@ final class UploadRobustnessTests: XCTestCase {
         try q.enqueue(gzippedBody: Gzip.compress(Data("{}".utf8)), sessionId: "S", seq: seq, createdUtcMs: created)
     }
 
-    func testPoisonBatchMovesToBackAfterRepeatedServerErrors() async throws {
+    /// The ingest function answers 503 only for its own outages (storage, Event Hubs, Key Vault), never
+    /// for a bad payload: however long the outage, nothing is re-ordered, parked or deleted.
+    func testServerErrorsRetryInPlaceAndNeverReorder() async throws {
         let t = MockTransport()
         let events = Locked([String]())
         let q = try makeQueue(t, events: events)
         try enqueue(q, 0, created: 1_000)
         try enqueue(q, 1, created: 2_000)
-        t.enqueue(500, 500, 500, 500, 500) // batch 0 fails 5× on the server
-        for _ in 0..<5 { _ = await q.processOnce() }
-        XCTAssertEqual(q.pendingFiles().map { UploadQueue.parse(fileName: $0.lastPathComponent)!.seq }, [1, 0],
-                       "batch 0 rotated behind batch 1; nothing deleted")
-        let ok = await q.processOnce()
-        XCTAssertEqual(ok, .uploaded(status: 200))
-        XCTAssertEqual(t.requests.last?.value(forHTTPHeaderField: "x-idempotency-key"), "S:1", "newer batch gets through")
-        XCTAssertTrue(events.current.contains { $0.contains("moved to the back") })
+        for code in [503, 500, 502, 504, 408, 429, 503, 503, 503, 503, 503, 503] { t.enqueue(code) }
+        for _ in 0..<12 {
+            guard case .retry = await q.processOnce() else { return XCTFail("server errors must be retried") }
+        }
+        XCTAssertEqual(Set(t.requests.compactMap { $0.value(forHTTPHeaderField: "x-idempotency-key") }), ["S:0"],
+                       "the head file is retried, nothing jumps ahead of it")
+        XCTAssertEqual(q.pendingFiles().map { UploadQueue.parse(fileName: $0.lastPathComponent)!.seq }, [0, 1])
+        XCTAssertTrue(q.failedFiles().isEmpty)
+        XCTAssertEqual(q.status.currentBackoff, UploadQueue.maxBackoff, "capped")
+        for _ in 0..<2 { _ = await q.processOnce() }
+        XCTAssertEqual(t.requests.suffix(2).map { $0.value(forHTTPHeaderField: "x-idempotency-key") }, ["S:0", "S:1"])
+        XCTAssertTrue(q.pendingFiles().isEmpty)
+        XCTAssertFalse(events.current.contains { $0.contains("back of the queue") })
     }
 
     func testNetworkErrorsNeverRotate() async throws {

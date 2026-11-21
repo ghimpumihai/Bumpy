@@ -105,6 +105,9 @@ final class RecordingSession: @unchecked Sendable {
     /// Window start of the next upload batch. Touched by the batch timer and by stop() (final
     /// batch), so it is locked rather than relying on stop()'s timer-cancel ordering.
     private let lastBatchEndUp: Locked<TimeInterval>
+    /// Batches built while upload is ON but not queued yet (enqueue failed: disk full, encode error),
+    /// oldest first. Retried at the next batch tick; touched by the batch timer and by stop().
+    private let unqueuedBatches = Locked<[IngestBatch]>([])
     private let stateBox = Locked((started: false, stopped: false))
     /// Set after the final close; later labels are refused instead of silently vanishing.
     private let writersClosed = Locked(false)
@@ -117,6 +120,9 @@ final class RecordingSession: @unchecked Sendable {
     static let maxBatchJSONBytes = 180 * 1024
     static let deviceInterval: TimeInterval = 5
     static let batchInterval: TimeInterval = 2
+    /// Unqueued batches kept for a retry (30 s of windows); older ones are dropped from the live
+    /// upload so memory stays bounded on a full disk (the session files still have the data).
+    static let maxUnqueuedBatches = 15
 
     var metadata: SessionMetadata { metadataBox.current }
     var shortId: String { SessionStore.shortId(id) }
@@ -228,7 +234,12 @@ final class RecordingSession: @unchecked Sendable {
         deps.activity?.stop()
         deps.audio?.stop()
 
-        makeBatch() // last partial window
+        makeBatch() // last partial window (and any batch that couldn't be queued earlier)
+        let notQueued = unqueuedBatches.withLock { w -> Int in defer { w.removeAll() }; return w.count }
+        if notQueued > 0 {
+            // batchCount below counts only queued batches, so the backend doesn't wait for these.
+            writer.log(.warn, "\(notQueued) upload batch window(s) could not be queued before Stop (the session files keep the data)")
+        }
         let anchor = timeBase.refreshAnchor()
         writeClockRow(anchor, source: "stop")
         writer.log(.info, "recording stopped")
@@ -489,20 +500,39 @@ final class RecordingSession: @unchecked Sendable {
         // consuming a batchSeq. Upload ON: build, check size, queue.
         guard let q = deps.uploadQueue, q.isEnabled else {
             accumulator.discard()
+            unqueuedBatches.withLock { $0.removeAll() }
             return
         }
         let batch = accumulator.drain(t0Up: start, t0UtcMs: timeBase.utcMs(fromUptime: start), device: latestBox.current.device)
-        do {
-            let json = try batch.jsonData()
-            if json.count > Self.maxBatchJSONBytes {
-                // The ingest function rejects bodies > 200 KB (02 §5): the data is safe on disk; say so.
-                writer.log(.warn, "upload batch \(batch.batchSeq) is \(json.count / 1024) KB (> \(Self.maxBatchJSONBytes / 1024) KB): the backend may reject it")
-            }
-            try q.enqueue(gzippedBody: Gzip.compress(json), sessionId: batch.sessionId, seq: batch.batchSeq,
-                          createdUtcMs: Int64(timeBase.utcMs(fromUptime: end)))
-        } catch {
-            writer.log(.warn, "could not queue upload batch \(batch.batchSeq): \(error.localizedDescription)")
+        var waiting = unqueuedBatches.withLock { w -> [IngestBatch] in
+            w.append(batch)
+            defer { w.removeAll() }
+            return w
         }
+        if waiting.count > Self.maxUnqueuedBatches {
+            let dropped = waiting.count - Self.maxUnqueuedBatches
+            waiting.removeFirst(dropped)
+            writer.log(.warn, "\(dropped) upload batch window(s) could not be queued and were dropped from the live upload (the session files keep the data)")
+        }
+        // Oldest first; each batch gets its batchSeq only when it is actually queued (no holes).
+        let createdUtcMs = Int64(timeBase.utcMs(fromUptime: end))
+        while var b = waiting.first {
+            b.batchSeq = accumulator.nextSeq
+            do {
+                let json = try b.jsonData()
+                if json.count > Self.maxBatchJSONBytes {
+                    // The ingest function rejects bodies > 200 KB (02 §5): the data is safe on disk; say so.
+                    writer.log(.warn, "upload batch \(b.batchSeq) is \(json.count / 1024) KB (> \(Self.maxBatchJSONBytes / 1024) KB): the backend may reject it")
+                }
+                try q.enqueue(gzippedBody: Gzip.compress(json), sessionId: b.sessionId, seq: b.batchSeq, createdUtcMs: createdUtcMs)
+                accumulator.markQueued(seq: b.batchSeq)
+                waiting.removeFirst()
+            } catch {
+                writer.log(.warn, "could not queue upload batch \(b.batchSeq) (\(waiting.count) window(s) waiting, retried in \(Int(Self.batchInterval)) s): \(error.localizedDescription)")
+                break
+            }
+        }
+        unqueuedBatches.withLock { $0 = waiting + $0 }
     }
 
     /// §6.1 body: session.json, plus `batchCount` in the Stop copy, plus `source: "live"` (the

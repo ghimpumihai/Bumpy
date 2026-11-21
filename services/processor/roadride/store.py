@@ -123,6 +123,12 @@ class Store:
             (session_id,),
         )
 
+    def _foreign(self, kind: str, session_id: str, device_id: str | None, owner: str) -> str:
+        # Any valid device key can name any sessionId (D54): this device's message is not the trip's data.
+        log.warning("ignoring a %s for session %s from device %s: the session belongs to device %s",
+                    kind, session_id, device_id, owner)
+        return "foreign_device"
+
     def _refresh_exclusions(self, session_id: str) -> None:
         row = self.conn.execute(
             "SELECT source, status, context_known, mount, quality_status FROM sessions "
@@ -144,7 +150,8 @@ class Store:
 
     def apply_batch(self, f: BatchFacts, received_at: dt.datetime) -> str:
         """Returns "new", "late" (older than a batch already processed), "duplicate" (the phone sent
-        it again) or "replayed" (the same Event Hubs event read a second time by the processor).
+        it again), "replayed" (the same Event Hubs event read a second time by the processor) or
+        "foreign_device" (another device's batch under this sessionId: ignored).
 
         The batch itself (ingest_batches row, session counters, track) is all or nothing; labels,
         the signal processing and the live state are optional parts in their own savepoints, so a
@@ -158,12 +165,16 @@ class Store:
               device_id = COALESCE(sessions.device_id, EXCLUDED.device_id),
               source = CASE WHEN EXCLUDED.source = 'replay' THEN 'replay' ELSE sessions.source END,
               started_at = COALESCE(sessions.started_at, EXCLUDED.started_at)
+            WHERE sessions.device_id IS NULL OR sessions.device_id = EXCLUDED.device_id
             """,
             (f.session_id, f.device_id, f.source, f.t0_utc),
         )
-        last_seq, status = self.conn.execute(
-            "SELECT last_batch_seq, status FROM sessions WHERE session_id = %s FOR UPDATE", (f.session_id,)
+        owner, last_seq, status = self.conn.execute(
+            "SELECT device_id, last_batch_seq, status FROM sessions WHERE session_id = %s FOR UPDATE",
+            (f.session_id,),
         ).fetchone()
+        if owner != f.device_id:
+            return self._foreign("batch", f.session_id, f.device_id, owner)
         late = last_seq is not None and f.batch_seq < last_seq
 
         inserted = self.conn.execute(
@@ -356,17 +367,22 @@ class Store:
     # --- session metadata ----------------------------------------------------------------
 
     def apply_session(self, s: SessionFacts) -> str:
-        """Returns "applied", or "stale_start" for a Start copy that arrived after the Stop copy."""
+        """Returns "applied", "stale_start" for a Start copy that arrived after the Stop copy, or
+        "foreign_device" for another device's copy (ignored)."""
         self._touch_device(s.device_id)
         self.conn.execute(
             "INSERT INTO sessions (session_id, device_id, started_at) VALUES (%s, %s, %s) "
             "ON CONFLICT (session_id) DO NOTHING",
             (s.session_id, s.device_id, s.started_at),
         )
-        has_stop, status = self.conn.execute(
-            "SELECT expected_batch_count IS NOT NULL, status FROM sessions WHERE session_id = %s FOR UPDATE",
+        owner, has_stop, status = self.conn.execute(
+            "SELECT device_id, expected_batch_count IS NOT NULL, status FROM sessions "
+            "WHERE session_id = %s FOR UPDATE",
             (s.session_id,),
         ).fetchone()
+        # Ingest requires a deviceId; only an uploaded or archived copy can lack one.
+        if owner is not None and s.device_id is not None and owner != s.device_id:
+            return self._foreign("session copy", s.session_id, s.device_id, owner)
         if s.phase == "start" and has_stop:
             return "stale_start"
 

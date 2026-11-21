@@ -137,7 +137,8 @@ def from_upload(t: upload.UploadedTrip) -> Trip:
                 incomplete=t.incomplete)
 
 
-def load_trip(archive: Archive, session_id: str) -> Trip:
+def load_trip(archive: Archive, session_id: str, device_id: str | None = None) -> Trip:
+    """`device_id`: the session's device; blobs another device posted under this sessionId are skipped."""
     names = archive.list_names(session_id)
 
     def fetch(name: str) -> tuple[str, dict]:
@@ -149,6 +150,9 @@ def load_trip(archive: Archive, session_id: str) -> Trip:
     meta = {}
     for name, doc in docs:
         base = name.rsplit("/", 1)[-1]
+        if device_id is not None and (not isinstance(doc, dict) or doc.get("deviceId") != device_id):
+            log.warning("skipping archive blob %s: not from the session's device %s", name, device_id)
+            continue
         if base.startswith("session-"):
             meta[base] = doc
             continue
@@ -519,7 +523,7 @@ def write_parquet(archive: Archive, trip: Trip, sig: TripSignal) -> list[str]:
 # --- Writing --------------------------------------------------------------------------------
 
 def pick_trip(archive: Archive, uploads: upload.Uploads | None, session_id: str, *,
-              require_upload: bool = False) -> Trip:
+              require_upload: bool = False, device_id: str | None = None) -> Trip:
     """The uploaded folder if there is a complete one, else the live archive. Raises
     upload.UploadInvalid only when `require_upload` (a message for that upload)."""
     if uploads is not None and (require_upload or upload.has_upload(uploads, session_id)):
@@ -529,7 +533,7 @@ def pick_trip(archive: Archive, uploads: upload.Uploads | None, session_id: str,
             if require_upload:
                 raise
             log.warning("upload of %s can't be used (%s); finalizing from the live archive", session_id, e)
-    return load_trip(archive, session_id)
+    return load_trip(archive, session_id, device_id)
 
 
 def _vehicle_type(conn: Connection, trip: Trip, session_id: str) -> str | None:
@@ -544,14 +548,14 @@ def finalize_session(conn: Connection, archive: Archive, session_id: str,
     """Finalizes one trip; returns a short summary, {"superseded": reason} when the trip got new data
     after the message (it is finalized again once it ends), or None if there's nothing to finalize it from."""
     with conn.transaction():
-        row = conn.execute("SELECT status, received_batches, expected_batch_count FROM sessions "
+        row = conn.execute("SELECT status, device_id, received_batches, expected_batch_count FROM sessions "
                            "WHERE session_id = %s", (session_id,)).fetchone()
-    status0, *seen = row if row else (None, 0, None)
+    status0, device_id, *seen = row if row else (None, None, 0, None)
     if status0 == "live" and not require_upload:
         # Reopened since ready.py sent this message (store.Store._reopen): it is sent again once it ends.
         log.info("not finalizing %s: it is live again", session_id)
         return {"superseded": "live"}
-    trip = pick_trip(archive, uploads, session_id, require_upload=require_upload)
+    trip = pick_trip(archive, uploads, session_id, require_upload=require_upload, device_id=device_id)
     if not trip.batches:
         return None
     # Computed on the trip's own timeline (clock.py: a wall-clock step mid-trip); the fixes and labels

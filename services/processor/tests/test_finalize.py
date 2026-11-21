@@ -521,6 +521,24 @@ def test_data_that_arrives_while_finalize_runs_is_not_overwritten(db, batch, ses
 
 
 @requires_db
+def test_finalize_skips_archive_blobs_from_another_device(db, batch, session_meta, tmp_path):
+    """Another device's batch and Start copy under this sessionId (any device key can post one, D54)
+    are not part of the trip, and don't make it a replay."""
+    sid = "trip-foreign"
+    batches, (start, stop) = _trip(batch, session_meta, sid, n=5)
+    _stream(db, batches, [start, stop])
+    foreign = motion_batch(batch, sid, 5, T0 + 10, _vert(T0 + 999))
+    foreign.update(deviceId="OTHER", source="replay")
+    foreign_start = dict(start, deviceId="OTHER", replayOf="x", source="replay", vehicle={"type": "tram"})
+    _write_archive(tmp_path, sid, batches + [foreign], [foreign_start, stop])
+    summary = fz.finalize_session(db, fz.DirArchive(tmp_path), sid)
+    assert summary["batches"] == 5
+    assert _one(db, "SELECT status, source, replay_of, vehicle_type, device_id FROM sessions") == \
+        ("complete", "live", None, "bus", session_meta["deviceId"])
+    assert _one(db, "SELECT quality->>'missingBatches' FROM sessions")[0] == "0"
+
+
+@requires_db
 def test_ready_sweep_sends_once_and_closes_silent_trips(db, batch, session_meta):
     import datetime as dt
 

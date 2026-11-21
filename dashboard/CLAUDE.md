@@ -43,4 +43,5 @@ The dashboard reads only the read API. Its contract is [API.md](API.md), with ty
 
 ## Done means
 - `npm run check` and `npm run build` pass. Run `npm run test:e2e` (slow: every route, console errors, axe in both themes) before merging to `main`, not on every change.
+- `e2e/real-api.spec.ts` (project `real-api`, only with `REAL_API_PYTHON` set) runs the dashboard against `services/read-api` on a PostGIS database whose name contains `e2e`, seeded through the processor's write path (`e2e/real-api/seed.py`). CI (`dashboard-ci.yml`) runs both suites on PRs, so they run before merging without anyone running them locally.
 - Don't write new tests for views or UI; keep the existing mock-backend tests passing (they pin the plan's rules).

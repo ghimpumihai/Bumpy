@@ -1,0 +1,217 @@
+name: terraform-plan
+
+# Plan 02 §13: on every PR that touches infra/**, check formatting and validate both stacks, then show
+# what `terraform apply` would change in Azure and post it on the PR. Nothing is applied here.
+#
+# The plan job logs in with the read-only `plan` identity (infra/bootstrap: id-roadride-gh-plan, Reader on
+# the stack resource group, federated credential for `pull_request`). Reader can't run the "list" actions
+# the provider calls while refreshing (app settings, keys), so the plan runs with -refresh=false: it
+# compares the PR's configuration with the last applied state, which is what a review needs, but doesn't
+# detect drift made outside Terraform. It never takes the state lock, so it can't block an apply.
+#
+# Needs, once (see infra/README.md "CI for Terraform"):
+#   repo variables AZURE_CLIENT_ID_PLAN, AZURE_TENANT_ID, AZURE_SUBSCRIPTION_ID, TFSTATE_RESOURCE_GROUP,
+#   TFSTATE_STORAGE_ACCOUNT, TFSTATE_CONTAINER (all from `terraform -chdir=infra/bootstrap output
+#   github_variables`) and TF_VAR_ADMIN_OBJECT_IDS (the JSON list from infra/.env);
+#   repo secret TF_VAR_ALERT_EMAIL (from infra/.env; a secret so it is masked in the public logs).
+# Optional repo variables, only if infra/.env overrides them: TF_VAR_PSQL_NAT_GATEWAY_ENABLED,
+# TF_VAR_EVENTHUB_LOCAL_AUTH_ENABLED, TF_VAR_BUDGET_AMOUNT, TFSTATE_KEY.
+
+on:
+  pull_request:
+    paths:
+      - "infra/**"
+      - ".github/workflows/terraform-plan.yml"
+      - "!**/*.md"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: terraform-plan-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+env:
+  TF_VERSION: "1.13.4"
+  TF_IN_AUTOMATION: "true"
+  TF_INPUT: "false"
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: ${{ env.TF_VERSION }}
+          terraform_wrapper: false
+
+      - name: fmt
+        run: terraform -chdir=infra fmt -check -recursive -diff
+
+      - name: validate (main and bootstrap, no backend)
+        run: |
+          for stack in main bootstrap; do
+            terraform -chdir="infra/$stack" init -backend=false -input=false -no-color >/dev/null
+            terraform -chdir="infra/$stack" validate -no-color
+          done
+
+      - name: Is the plan job set up?
+        if: vars.AZURE_CLIENT_ID_PLAN == ''
+        run: |
+          echo "::warning::No plan against Azure: the repo variable AZURE_CLIENT_ID_PLAN is not set (infra/README.md, CI for Terraform)."
+
+  plan:
+    needs: check
+    # Fork and Dependabot PRs get no OIDC token or secrets; their check job above still runs.
+    # Skipped until the repo variables exist (warning in the check job).
+    if: >-
+      github.event.pull_request.head.repo.full_name == github.repository &&
+      github.actor != 'dependabot[bot]' && vars.AZURE_CLIENT_ID_PLAN != ''
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write # OIDC login as the plan identity
+      pull-requests: write # the plan comment
+    env:
+      ARM_USE_OIDC: "true"
+      ARM_CLIENT_ID: ${{ vars.AZURE_CLIENT_ID_PLAN }}
+      ARM_TENANT_ID: ${{ vars.AZURE_TENANT_ID }}
+      ARM_SUBSCRIPTION_ID: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: ${{ env.TF_VERSION }}
+          terraform_wrapper: false
+
+      # If Azure refuses the login (AADSTS700213 "no matching federated identity record"), compare this
+      # with the plan identity's federated credential subject in infra/bootstrap/main.tf.
+      - name: Show the OIDC subject GitHub sends
+        run: |
+          token=$(curl -sS -H "Authorization: bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" \
+            "$ACTIONS_ID_TOKEN_REQUEST_URL&audience=api://AzureADTokenExchange" | jq -r .value)
+          payload=$(printf '%s' "$token" | cut -d. -f2 | tr '_-' '/+')
+          while [ $(( ${#payload} % 4 )) -ne 0 ]; do payload="$payload="; done
+          printf '%s' "$payload" | base64 -d | jq -r '"sub: \(.sub)"'
+
+      - name: Settings from repo variables
+        env:
+          ALERT_EMAIL: ${{ secrets.TF_VAR_ALERT_EMAIL }}
+          ADMIN_OBJECT_IDS: ${{ vars.TF_VAR_ADMIN_OBJECT_IDS }}
+          NAT: ${{ vars.TF_VAR_PSQL_NAT_GATEWAY_ENABLED }}
+          EH_LOCAL_AUTH: ${{ vars.TF_VAR_EVENTHUB_LOCAL_AUTH_ENABLED }}
+          BUDGET: ${{ vars.TF_VAR_BUDGET_AMOUNT }}
+          STATE_RG: ${{ vars.TFSTATE_RESOURCE_GROUP }}
+          STATE_ACCOUNT: ${{ vars.TFSTATE_STORAGE_ACCOUNT }}
+        run: |
+          missing=""
+          for v in ARM_CLIENT_ID ARM_TENANT_ID ARM_SUBSCRIPTION_ID ALERT_EMAIL STATE_RG STATE_ACCOUNT; do
+            if [ -z "${!v}" ]; then missing="$missing $v"; fi
+          done
+          if [ -n "$missing" ]; then
+            echo "::error::Not set:$missing. See infra/README.md \"CI for Terraform\" for the repo variables and the secret."
+            exit 1
+          fi
+          # Unset variables keep the Terraform default (an empty TF_VAR_x would not parse as a bool).
+          put() { if [ -n "$2" ]; then echo "$1=$2" >> "$GITHUB_ENV"; fi; }
+          put TF_VAR_alert_email "$ALERT_EMAIL"
+          put TF_VAR_admin_object_ids "$ADMIN_OBJECT_IDS"
+          put TF_VAR_psql_nat_gateway_enabled "$NAT"
+          put TF_VAR_eventhub_local_auth_enabled "$EH_LOCAL_AUTH"
+          put TF_VAR_budget_amount "$BUDGET"
+          if [ -z "$ADMIN_OBJECT_IDS" ]; then
+            echo "::warning::TF_VAR_ADMIN_OBJECT_IDS is not set: the plan will remove the team's role assignments if infra/.env lists any."
+          fi
+
+      - name: init (remote state, read only)
+        env:
+          STATE_RG: ${{ vars.TFSTATE_RESOURCE_GROUP }}
+          STATE_ACCOUNT: ${{ vars.TFSTATE_STORAGE_ACCOUNT }}
+          STATE_CONTAINER: ${{ vars.TFSTATE_CONTAINER || 'tfstate' }}
+          STATE_KEY: ${{ vars.TFSTATE_KEY || 'main.tfstate' }}
+        run: |
+          terraform -chdir=infra/main init -input=false -no-color \
+            -backend-config="resource_group_name=$STATE_RG" \
+            -backend-config="storage_account_name=$STATE_ACCOUNT" \
+            -backend-config="container_name=$STATE_CONTAINER" \
+            -backend-config="key=$STATE_KEY"
+
+      - name: plan
+        id: plan
+        run: |
+          set +e
+          terraform -chdir=infra/main plan -refresh=false -lock=false -input=false -no-color \
+            -detailed-exitcode -out=tfplan > "$RUNNER_TEMP/plan.log" 2>&1
+          code=$?
+          set -e
+          cat "$RUNNER_TEMP/plan.log"
+          echo "exitcode=$code" >> "$GITHUB_OUTPUT"
+          if [ "$code" = "1" ]; then exit 1; fi
+          terraform -chdir=infra/main show -no-color tfplan > "$RUNNER_TEMP/plan.txt"
+          terraform -chdir=infra/main show -json tfplan > "$RUNNER_TEMP/plan.json"
+
+      # Deleting or replacing any of these loses data (database, lake, stream, queue, device keys).
+      - name: No data-holding resource is deleted or replaced
+        id: guard
+        run: |
+          jq -r '
+            (.resource_changes // [])[]
+            | select(.change.actions | index("delete"))
+            | select(.type | IN(
+                "azurerm_postgresql_flexible_server", "azurerm_postgresql_flexible_server_database",
+                "azurerm_storage_account", "azurerm_storage_container",
+                "azurerm_eventhub_namespace", "azurerm_eventhub",
+                "azurerm_servicebus_namespace", "azurerm_servicebus_queue",
+                "azurerm_key_vault", "azurerm_container_registry"))
+            | "\(.address) (\(.change.actions | join("/")))"' "$RUNNER_TEMP/plan.json" > "$RUNNER_TEMP/stateful.txt"
+          if [ -s "$RUNNER_TEMP/stateful.txt" ]; then
+            echo "found=true" >> "$GITHUB_OUTPUT"
+            while read -r line; do echo "::error::This plan deletes or replaces $line"; done < "$RUNNER_TEMP/stateful.txt"
+          else
+            echo "found=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Post the plan on the PR
+        if: always() && steps.plan.outputs.exitcode != ''
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR: ${{ github.event.pull_request.number }}
+          EXITCODE: ${{ steps.plan.outputs.exitcode }}
+          STATEFUL: ${{ steps.guard.outputs.found }}
+        run: |
+          body="$RUNNER_TEMP/comment.md"
+          {
+            echo "### terraform plan (infra/main) for ${GITHUB_SHA::7}"
+            echo
+            case "$EXITCODE" in
+              0) echo "No changes." ;;
+              2) grep -E '^Plan:|must be replaced|will be destroyed' "$RUNNER_TEMP/plan.txt" | sed 's/^/    /' || true ;;
+              *) echo "**plan failed**, see the [workflow log]($GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID)." ;;
+            esac
+            if [ "$STATEFUL" = "true" ]; then
+              echo
+              echo "> [!CAUTION]"
+              echo "> Deletes or replaces a resource that holds data:"
+              sed 's/^/> - /' "$RUNNER_TEMP/stateful.txt"
+            fi
+            echo
+            echo "Compared with the applied state (\`-refresh=false\`: drift made outside Terraform is not shown)."
+            if [ -f "$RUNNER_TEMP/plan.txt" ]; then
+              echo
+              echo "<details><summary>Full plan</summary>"
+              echo
+              echo '```'
+              head -c 55000 "$RUNNER_TEMP/plan.txt"
+              echo '```'
+              echo "</details>"
+            fi
+          } > "$body"
+          cat "$body" >> "$GITHUB_STEP_SUMMARY"
+          gh pr comment "$PR" --repo "$GITHUB_REPOSITORY" --body-file "$body" --edit-last --create-if-none
+
+      - name: Fail on data-holding deletes
+        if: steps.guard.outputs.found == 'true'
+        run: exit 1

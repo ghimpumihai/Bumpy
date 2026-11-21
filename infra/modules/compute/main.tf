@@ -178,8 +178,11 @@ resource "azurerm_container_app" "read_api" {
 
   ingress {
     external_enabled = true
-    target_port      = 8000 # the read-api image runs as non-root, which can't bind ports below 1024
-    transport        = "auto"
+    # 80 is where the placeholder image listens, so a fresh app starts healthy. The real read-api image
+    # runs as non-root and listens on 8000; deploy-services switches the port together with the image
+    # (READ_API_PORT) and Terraform then leaves it alone (ignore_changes below).
+    target_port = 80
+    transport   = "auto"
 
     traffic_weight {
       latest_revision = true
@@ -213,7 +216,8 @@ resource "azurerm_container_app" "read_api" {
   }
 
   lifecycle {
-    ignore_changes = [template[0].container[0].image]
+    # Image and port belong to the deployed code (deploy-services), not to Terraform.
+    ignore_changes = [template[0].container[0].image, ingress[0].target_port]
   }
 
   depends_on = [time_sleep.rbac]
@@ -467,8 +471,14 @@ resource "azurerm_function_app_flex_consumption" "ingest" {
     minimum_tls_version                    = "1.2"
   }
 
+  # Identity-based host storage (keys are off on the account). azurerm 4.x (checked in v4.81.0) also
+  # writes a plain `AzureWebJobsStorage=DefaultEndpointsProtocol=https;AccountName=<acct>;AccountKey=;...`
+  # on every create and every update of this resource, whatever storage_authentication_type says
+  # (hashicorp/terraform-provider-azurerm#29149, #33211). The host prefers that key-based string over the
+  # `__` settings below, can't use it (no key) and never starts. So it is deleted after every apply
+  # (infra/tf.ps1 apply, terraform-apply.yml) and before every deploy (deploy-ingest.yml); see
+  # infra/README.md "Function host storage". Setting it here instead would show a diff on every plan.
   app_settings = {
-    # Identity-based host storage (keys are off on the account).
     "AzureWebJobsStorage__accountName" = azurerm_storage_account.func.name
     "AzureWebJobsStorage__credential"  = "managedidentity"
     "AzureWebJobsStorage__clientId"    = var.identities.ingest.client_id
@@ -480,7 +490,10 @@ resource "azurerm_function_app_flex_consumption" "ingest" {
     LAKE_CONTAINER                     = "lake"
     KEY_VAULT_URI                      = azurerm_key_vault.this.vault_uri
     DEVICE_KEYS_SECRET_NAME            = var.device_keys_secret_name
-    MAX_BODY_BYTES                     = "204800"
+    # Largest *decompressed* body in bytes (413 above it): 200 KB, MAX_INFLATED in
+    # services/ingest/ingest_core/contract.py. The code may only lower it (an Event Hubs Basic event is at
+    # most 256 KB); the 20 MiB cap on the compressed body (MAX_BODY) is fixed in code.
+    MAX_BODY_BYTES = "204800"
   }
 
   depends_on = [time_sleep.func_rbac]

@@ -82,14 +82,14 @@ Solid boxes and arrows are built. Dashed ones are not: the laptop upload script 
 | **Finalize + aggregate jobs** | [`services/processor/`](services/processor/README.md#finalize-job-roadridefinalizepy) | When a trip ends (Stop + all batches, or 15 minutes of silence) the processor queues it; the finalize job reruns the whole trip from the raw archive, replaces the live results, scores its data quality, splits it into H3 road-segment passes and rebuilds the shared map: vehicle-normalized roughness, crowd-confirmed potholes, sickness by seat. |
 | **Read API** | [`services/read-api/`](services/read-api/README.md) | All 12 routes of [`dashboard/API.md`](dashboard/API.md), read-only. Hides the first and last 200 m of every trip for privacy. |
 | **Replay tool** | [`tools/replay/`](tools/replay/README.md) | Re-sends a recorded trip through the live path as a new trip (`source=replay`, never aggregated), at real speed or faster. Used for the end-to-end test without driving, for the demo, and for tuning the pothole threshold on real data. |
-| **CI/CD** | [`.github/workflows/`](.github/workflows) | Tests on every PR and every push to `staging` or `main`, including integration tests against a real PostGIS. Only `main` deploys: merges there ship the ingest function and the processor + read API (migrations first, then a check that every API route answers). |
+| **CI/CD** | [`.github/workflows/`](.github/workflows) | Tests on every PR and every push to `staging` or `main`, including integration tests against a real PostGIS. Only `main` deploys: merges there run the same tests again and, only if they pass, ship the ingest function (then check that it answers) and the processor + read API (migrations first, then a check that every API route answers). |
 
 ### Done, waiting on one step
 
 | Part | What's missing |
 |---|---|
 | **Dashboard** ([`dashboard/`](dashboard/README.md)) | Built, and the deploy workflow exists, but **deploy-dashboard hasn't been run yet**. Until it is, the website runs on its built-in mock data. Run it from the Actions tab: it points the site at the real read API and uploads it. |
-| **iPhone app** ([`src/mobile-ios/`](src/mobile-ios/README.md)) | Built and tested by the team. The phone needs the ingest URL and a device key in its upload settings: `.\infra\scripts\add-device-key.ps1 -DeviceId <name>` creates the key. |
+| **iPhone app** ([`src/mobile-ios/`](src/mobile-ios/README.md)) | Built and tested by the team. The phone needs the ingest URL and a device key in its upload settings. The URL is `ingest_base_url` from `./infra/tf.ps1 output` (`https://<function host>`, no path; the app adds `/api/ingest`); `pwsh infra/scripts/add-device-key.ps1 -DeviceId <name>` creates the key. |
 | **End-to-end test** | Every piece is tested on its own, and the deploys check the Azure logins. **No real batch has gone from a phone to the dashboard yet.** The first test is either a real drive or a [replay](tools/replay/README.md) of a recorded session folder. If the Live page stays empty, check the ingest function's logs first. |
 
 ### Not built yet
@@ -98,7 +98,7 @@ In the plan's build order:
 
 1. **Speed bumps**: need the vehicle's pitch axis.
 2. **Finalize for uploaded folders, Parquet output, detection scoring against manual taps, phone-moved / gravity-drift quality checks.**
-3. From the plan's cut list: laptop upload fallback, monitoring workbook, Terraform plan on PRs.
+3. From the plan's cut list: laptop upload fallback, monitoring workbook.
 
 ## Branches
 
@@ -131,9 +131,9 @@ docker-compose.yml    local PostGIS for development
 
 | What | How |
 |---|---|
-| Infrastructure | `cd infra; .\tf.ps1 apply` (settings in `infra/.env`, see [`infra/README.md`](infra/README.md)) |
+| Infrastructure | `cd infra; ./tf.ps1 apply` in `pwsh` on macOS (`brew install --cask powershell`) or in Windows PowerShell (settings in `infra/.env`, see [`infra/README.md`](infra/README.md)) |
 | Ingest function | automatic on merge to `main` (`deploy-ingest`), or `services/ingest/deploy.ps1` |
 | Processor, migrations, read API | automatic on merge to `main` (`deploy-services`) |
 | Dashboard | manual: Actions → **deploy-dashboard** → Run workflow |
-| A phone's device key | `.\infra\scripts\add-device-key.ps1 -DeviceId <name>` (prints the key once) |
-| A replay of a recorded trip | `python tools/replay/replay.py <session folder or .zip>` with `$env:REPLAY_API_URL` and `$env:REPLAY_DEVICE_KEY` set ([tools/replay](tools/replay/README.md)) |
+| A phone's device key | `pwsh infra/scripts/add-device-key.ps1 -DeviceId <name>` (prints the key once) |
+| A replay of a recorded trip | `python3 tools/replay/replay.py <session folder or .zip>` with `REPLAY_API_URL` (= `ingest_base_url`) and `REPLAY_DEVICE_KEY` set: `export` in bash/zsh, `$env:` in PowerShell ([tools/replay](tools/replay/README.md)) |

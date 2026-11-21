@@ -20,20 +20,26 @@ are in [`decisions/01-initial-plan.md`](../../decisions/01-initial-plan.md) (bac
    killed when the cable or wireless-debug link drops.
 
 On first use the preflight asks for Motion & Fitness, Location (choose **Precise**) and Microphone.
-Turn the ring/silent switch **off silent**, so the PROBLEM alert sound is audible (haptics work either way).
+Turn the ring/silent switch **off silent**, so the problem alert sound is audible (haptics work either way).
 
 ## Using it (operator)
 
-Sessions → **New session** → setup (pre-filled with your last values, plus a mount photo; for
-**bus/tram** also the line number, seat, passenger posture, and **audio recording defaults to OFF**) →
-**Preflight** (must be all green; *Override* exists for emergencies and is recorded) →
-**Recording dashboard** → hold **Stop** for 2 s → **Summary** (red rows = gaps > 1 s) →
-**Export**. The full drive protocol is in the app (the **?** button) and in spec §9.
+Three screens (D51): **Start** → **Recording** → **Recap**. Lay the phone flat, screen up, and tap
+**Start trip**. The preflight checks run silently; only a failing one shows, as one red line with a
+fix, and starting anyway asks for a confirm (recorded as an override). While recording the screen
+shows a timer and one status line (red while something is wrong, "GPS back · 12 s gap" for a few
+seconds after GPS recovers). Hold **Hold to end trip** for 2 s. The recap shows data quality (share
+of the trip with motion and GPS data) and how much of the trip reached the cloud. Every trip is
+recorded as a car; there are no labels or sickness prompts. Results are on the web dashboard.
+
+The menu (top left) holds **Web app** and **Settings**: server address, device key, Test
+connection, and **Record road noise** (off by default). The dashboard link appears once its address
+is set, for now with the launch argument `-dashboard.baseURL <url>`.
 
 ## What gets written
 
 `Documents/sessions/<UTC start>_<shortId>/` is visible in the **Files app** and in Finder over USB
-(`UIFileSharingEnabled`), so data can be copied off even without the Export button.
+(`UIFileSharingEnabled`): that is how a session is copied off the phone (there is no in-app export).
 
 | File | Content |
 |---|---|
@@ -178,7 +184,7 @@ in the repo.
 - Background modes `location` + `audio` keep recording alive if the app is backgrounded (WARN).
 - Every warning rule of spec §7 is implemented in `Core/HealthEvaluator.swift`. New PROBLEMs
   trigger a haptic, a sound and an `app_log.txt` entry.
-- The dashboard's live numbers use the backend's definitions, so the phone and the web dashboard
+- The on-phone live estimates (no longer shown since D51) use the backend's definitions, so the phone and the web dashboard
   agree (`Recording/LiveSignals.swift`):
   - **Roughness now:** RMS of the 1–30 Hz band-passed vertical acceleration (the backend's filter
     coefficients), averaged exponentially over about 5 s.
@@ -218,9 +224,9 @@ xcodebuild -project SensorRecorder.xcodeproj -scheme SensorRecorder \
   gap/rate stats, every warning rule, session.json, crash recovery, gzip/CRC, the batch payload
   shape, every upload-queue rule, the Wf filter response vs ISO values, zip
   export, and a full 3-second recording that checks every file on disk.
-- **UI tests** drive the real app: setup → preflight → dashboard → every label control →
-  short tap doesn't stop → hold-to-stop → summary →
-  session list, plus kill-while-recording → relaunch → RECOVERED.
+- **UI tests** drive the real app: Start (override on the Simulator) → Recording → short tap
+  doesn't stop → hold-to-stop → Recap → Done, kill-while-recording → relaunch → recovered, and
+  Settings (upload off, road noise off by default).
 - **The Simulator has no motion or barometer hardware.** Motion and barometer show "n/a" there,
   preflight can't be all green (the UI tests use the recorded *override*), GPS comes from
   `simctl location`, and audio comes from the Mac's microphone. **Real data needs the iPhone.** Unit

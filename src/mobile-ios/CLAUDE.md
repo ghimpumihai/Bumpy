@@ -47,11 +47,12 @@ Requirements: `decisions/01-initial-plan.md`. Losing data is the worst possible 
 - Upload problems are WARN at most: the data is safe on disk.
 
 ## UI
-- Colours only through `Theme` tokens. Status colours mean exactly: green OK, amber WARN, red PROBLEM, grey neutral/off ("UPLOAD OFF" is grey).
+- Three screens (D51): Start → Recording → Recap, plus the menu panel and Settings. No manual data entry: no setup form, labels or sickness prompts. Anything computed in the cloud is shown on the web dashboard, not here.
+- Light theme only. Colours only through `Theme` tokens: ink black for the main action, neutral greys otherwise. Colour means trouble: amber WARN, red PROBLEM; OK is plain grey text ("Upload off" is grey).
 - Stop is a 2 s long-press. Never add a single-tap stop or a pause.
 - Every interactive control has an `accessibilityIdentifier` (UI tests rely on them). Never put one on a container: SwiftUI propagates it and overwrites the children's. Toggles expose state through `accessibilityValue` ("active"/"inactive").
-- Hit targets ≥ 44 pt, label buttons 52–60 pt (used in a moving car).
-- Validation lives in model types (`UploadConfig.parseBaseURL`, `SessionSetup`), not views. `SetupDefaults` remembers the last session so setup takes ~30 s.
+- Hit targets ≥ 44 pt (used in a moving car); a smaller-looking button keeps a 44 pt tap area.
+- Validation lives in model types (`UploadConfig.parseBaseURL`, `SessionSetup`, `TripSummary`), not views. `SetupDefaults` keeps the last mount and people values; every trip is recorded as a car.
 - UI copy is English.
 
 ## Real data only
@@ -59,7 +60,7 @@ The app ships real sensors only: no mock or demo mode. Fakes live in the test ta
 
 ## Testing
 - Tests are required where data can be lost: `Upload/`, the on-disk schema (`StreamFile`, `SessionWriter`), `session.json` and the contract types. Elsewhere, skip them.
-- Launch arguments: `-uiTesting`, `-uiTestingReset`, `-upload.baseURL <url>`.
+- Launch arguments: `-uiTesting`, `-uiTestingReset`, `-upload.baseURL <url>`, `-dashboard.baseURL <url>`.
 
 ```bash
 xcodebuild -project SensorRecorder.xcodeproj -scheme SensorRecorder \

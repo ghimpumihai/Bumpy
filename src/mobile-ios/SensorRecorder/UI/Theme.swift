@@ -1,56 +1,108 @@
 import SwiftUI
 
-/// High-contrast palette for use in a car in daylight (spec §7: big text, sunlight-readable).
+/// Neutral palette shared with the web dashboard (light only), ink-black accent. Colour appears
+/// only when something is wrong: amber WARN, red PROBLEM; OK is plain text.
 enum Theme {
-    static let ok = Color(red: 0.13, green: 0.80, blue: 0.35)
-    static let warn = Color(red: 1.00, green: 0.70, blue: 0.00)
-    static let problem = Color(red: 1.00, green: 0.23, blue: 0.19)
-    static let neutral = Color(white: 0.55)
-    static let panel = Color(white: 0.11)
-    static let panelHigh = Color(white: 0.18)
-    static let holdTrack = Color(white: 0.25)
-    static let background = Color.black
-    static let accent = Color(red: 0.25, green: 0.60, blue: 1.0)
-
-    // Label buttons (distinct hues so they can be hit without reading)
-    static let labelPothole = problem
-    static let labelSpeedBump = Color(red: 1.00, green: 0.50, blue: 0.05)
-    static let labelPhoneMoved = Color(red: 0.62, green: 0.32, blue: 0.95)
-
-    /// Map track colors by speed bucket: < 10, < 30, < 50, < 80, ≥ 80 km/h.
-    static let speedBuckets: [Color] = [accent, ok, Color(red: 1.0, green: 0.88, blue: 0.10), labelSpeedBump, problem]
-
-    // Foregrounds on coloured surfaces, overlays
-    /// Text on bright surfaces: ok/warn/accent/speed-bump (white there fails WCAG contrast).
-    static let onBright = Color.black
-    /// Text on dark surfaces and on `problem`/`labelPhoneMoved` (bold/large text only).
-    static let onSurface = Color.white
-    static let toastBackground = Color.white
-    static let toastForeground = Color.black
-    static let hairline = Color.white.opacity(0.08)
-    static let plotBackground = Color.white.opacity(0.03)
-    static let plotZeroLine = Color.white.opacity(0.2)
-    static let mapLabelBackground = Color.black.opacity(0.6)
+    static let background = Color.white
+    static let surface = Color(hex: 0xF5F5F5)
+    static let text = Color(hex: 0x0A0A0A)
+    static let muted = Color(hex: 0x737373)
+    static let line = Color(hex: 0xE5E5E5)
+    /// Primary buttons, the recording dot, progress bars.
+    static let ink = Color(hex: 0x0A0A0A)
+    static let onInk = Color.white
+    static let warn = Color(hex: 0xB45309)
+    static let problem = Color(hex: 0xB91C1C)
+    static let scrim = Color(hex: 0x0A0A0A).opacity(0.35)
 
     static func color(_ level: HealthLevel) -> Color {
         switch level {
-        case .ok: return ok
+        case .ok: return muted
         case .warn: return warn
         case .problem: return problem
         }
     }
 
-    static let mono = Font.system(.body, design: .monospaced)
-    static func mono(_ size: CGFloat, weight: Font.Weight = .regular) -> Font {
-        .system(size: size, weight: weight, design: .monospaced)
+    static let gutter: CGFloat = 16
+}
+
+extension Color {
+    init(hex: UInt32) {
+        self.init(red: Double((hex >> 16) & 0xFF) / 255, green: Double((hex >> 8) & 0xFF) / 255,
+                  blue: Double(hex & 0xFF) / 255)
     }
 }
 
-struct StatusDot: View {
-    var color: Color
-    var size: CGFloat = 12
-    var body: some View {
-        Circle().fill(color).frame(width: size, height: size)
-            .overlay(Circle().stroke(Color.white.opacity(0.25), lineWidth: 1))
+/// The black 56 pt button used for the one main action on each screen.
+struct PrimaryButtonStyle: ButtonStyle {
+    func makeBody(configuration: Configuration) -> some View {
+        configuration.label
+            .font(.system(size: 17, weight: .semibold))
+            .foregroundStyle(Theme.onInk)
+            .frame(maxWidth: .infinity, minHeight: 56)
+            .background(Theme.ink, in: RoundedRectangle(cornerRadius: 14))
+            .scaleEffect(configuration.isPressed ? 0.98 : 1)
+            .animation(.easeOut(duration: 0.15), value: configuration.isPressed)
     }
+}
+
+/// 44 pt round outline button (menu, close, back).
+struct CircleIconButton: View {
+    let systemName: String
+    let label: String
+    let id: String
+    var size: CGFloat = 44
+    let action: () -> Void
+
+    var body: some View {
+        Button(action: action) {
+            Image(systemName: systemName)
+                .font(.system(size: size > 40 ? 17 : 14, weight: .semibold))
+                .foregroundStyle(Theme.text)
+                .frame(width: size, height: size)
+                .overlay(Circle().stroke(Theme.line, lineWidth: 1))
+                .frame(width: 44, height: 44) // hit target stays 44 pt even when the circle is smaller
+                .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .accessibilityLabel(label)
+        .accessibilityIdentifier(id)
+    }
+}
+
+/// A dot that keeps rippling while recording: proof at a glance that the app is alive.
+struct PulsingDot: View {
+    var color: Color = Theme.ink
+    @State private var pulse = false
+
+    var body: some View {
+        ZStack {
+            Circle().fill(color).scaleEffect(pulse ? 2.8 : 1).opacity(pulse ? 0 : 0.4)
+            Circle().fill(color).opacity(pulse ? 0.55 : 1)
+        }
+        .frame(width: 10, height: 10)
+        .onAppear {
+            withAnimation(.easeOut(duration: 1.6).repeatForever(autoreverses: false)) { pulse = true }
+        }
+        .accessibilityHidden(true)
+    }
+}
+
+/// Lines that rise in one after another when a screen appears.
+struct RiseIn: ViewModifier {
+    let delay: Double
+    @State private var shown = false
+
+    func body(content: Content) -> some View {
+        content
+            .opacity(shown ? 1 : 0)
+            .offset(y: shown ? 0 : 20)
+            .onAppear {
+                withAnimation(.spring(response: 0.6, dampingFraction: 0.85).delay(delay)) { shown = true }
+            }
+    }
+}
+
+extension View {
+    func riseIn(_ delay: Double) -> some View { modifier(RiseIn(delay: delay)) }
 }

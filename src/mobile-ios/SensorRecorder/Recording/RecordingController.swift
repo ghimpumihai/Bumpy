@@ -40,6 +40,8 @@ final class RecordingController {
     private(set) var activeSegments: Set<SegmentKind> = []
     private(set) var finished: SessionMetadata?
     private(set) var trackPoints: [TrackBuffer.Point] = []
+    /// "GPS back · 12 s gap", shown for a few seconds after GPS recovers.
+    private(set) var recoveryNote: String?
 
     @ObservationIgnored private var timer: Timer?
     @ObservationIgnored private var issueTracker = IssueTracker()
@@ -47,8 +49,12 @@ final class RecordingController {
     @ObservationIgnored private var trackVersion = -1
     @ObservationIgnored private var tickCount = 0
     @ObservationIgnored private let alerter: Alerter
+    @ObservationIgnored private var recoveryExpiry: Date?
+    /// Uptime of the last GPS fix before the current outage; nil while GPS is fine.
+    @ObservationIgnored private var gpsLostSinceUp: TimeInterval?
 
     static let refreshHz = 8.0
+    static let recoveryNoteSeconds: TimeInterval = 5
     // Audio level bar: 6 bars from −60 dBFS up, 10 dB each.
     static let levelBars = 6
     static let levelFloorDbfs = -60.0
@@ -126,6 +132,7 @@ final class RecordingController {
         overall = HealthEvaluator.overall(newIssues)
 
         if let exp = toastExpiry, Date() > exp { toast = nil; toastExpiry = nil }
+        if let exp = recoveryExpiry, Date() > exp { recoveryNote = nil; recoveryExpiry = nil }
 
         snapshot = buildSnapshot(now: now, inputs: inputs)
 
@@ -144,6 +151,31 @@ final class RecordingController {
         for i in t.appeared { session.log(i.level == .problem ? .problem : .warn, i.message) }
         for key in t.resolved { session.log(.info, "resolved: \(key)") }
         if t.alert { alerter.newProblem() } // spec: strong haptic + sound on PROBLEM
+
+        let gpsLost = new.contains { $0.key == "gps.nofix" }
+        if gpsLost, gpsLostSinceUp == nil {
+            gpsLostSinceUp = session.latest.gpsFixUp ?? session.startUp
+        } else if !gpsLost, let since = gpsLostSinceUp {
+            gpsLostSinceUp = nil
+            if let back = session.latest.gpsFixUp, back > since {
+                recoveryNote = "GPS back · \(TripFormat.gap(back - since)) gap"
+                recoveryExpiry = Date().addingTimeInterval(Self.recoveryNoteSeconds)
+            }
+        }
+    }
+
+    /// The one status line above "Hold to end trip": the worst current issue, else the recovery
+    /// note, else "All saved".
+    var statusLine: (text: String, level: HealthLevel) {
+        if let worst = issues.max(by: { $0.level < $1.level }) {
+            var text = worst.message
+            if worst.key == "gps.nofix" {
+                text = text.replacingOccurrences(of: "GPS: no fix for", with: "GPS lost for") + " · motion still saving"
+            }
+            if issues.count > 1 { text += " · +\(issues.count - 1) more" }
+            return (text, worst.level)
+        }
+        return (recoveryNote ?? "All saved", .ok)
     }
 
     private func buildSnapshot(now: TimeInterval, inputs: HealthInputs) -> DashboardSnapshot {

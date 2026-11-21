@@ -461,3 +461,24 @@ final class BatchSeqWithoutHolesTests: XCTestCase {
                        "the window that failed to queue was retried, not dropped")
     }
 }
+
+/// The recap's "Trip in the cloud" must never overstate: rejected batches are not sent, and the
+/// session.json start/stop items are not part of the trip's data.
+final class UploadBatchCountTests: XCTestCase {
+    func testCountsOnlyThisSessionsBatchesAndReportsRejectedOnes() throws {
+        let q = UploadQueue(directory: try makeTempDir().appendingPathComponent("upload_queue"), transport: MockTransport(),
+                            backgroundTime: nil,
+                            config: { UploadConfig(baseURL: URL(string: "https://fn.test"), deviceKey: "k") })
+        let body = Gzip.compress(Data("{}".utf8))
+        try q.enqueue(gzippedBody: body, sessionId: "S", seq: 1, createdUtcMs: 1)
+        try q.enqueue(gzippedBody: body, sessionId: "S", seq: 2, createdUtcMs: 2)
+        try q.enqueue(gzippedBody: body, sessionId: "T", seq: 1, createdUtcMs: 3)
+        try q.enqueueSessionMetadata(json: Data("{}".utf8), sessionId: "S", phase: .stop, createdUtcMs: 4)
+        let rejected = UploadQueue.fileName(createdUtcMs: 0, sessionId: "S", seq: 0)
+        try body.write(to: q.failedDirectory.appendingPathComponent(rejected))
+
+        let c = q.batchCounts(sessionId: "S")
+        XCTAssertEqual(c.pending, 2, "metadata and other sessions don't count")
+        XCTAssertEqual(c.failed, 1)
+    }
+}

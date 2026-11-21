@@ -337,19 +337,6 @@ final class UploadRobustnessTests: XCTestCase {
     }
 }
 
-// MARK: - Map decimation
-
-final class MapDecimationTests: XCTestCase {
-    func testDecimateKeepsRecentTrackAndBoundsSize() {
-        let pts = (0..<20_000).map { TrackBuffer.Point(lat: Double($0), lon: 0, speed: 10) }
-        let d = TrackMapView.decimate(pts, max: 1500)
-        XCTAssertLessThanOrEqual(d.count, 1501)
-        XCTAssertEqual(d.first, pts.first)
-        XCTAssertEqual(d.last, pts.last)
-        XCTAssertEqual(Array(d.suffix(750)), Array(pts.suffix(750)), "newest stretch drawn at full resolution")
-        XCTAssertEqual(TrackMapView.decimate(Array(pts.prefix(100))).count, 100, "short tracks untouched")
-    }
-}
 
 // MARK: - RecordingController: alerts
 

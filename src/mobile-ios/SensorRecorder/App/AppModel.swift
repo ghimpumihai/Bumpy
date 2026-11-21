@@ -4,11 +4,7 @@ import SwiftUI
 import UIKit
 
 enum Route: Hashable {
-    case setup
-    case preflight
-    case detail(String) // folder name
     case settings
-    case help
 }
 
 /// App-wide state and long-lived services. Main actor.
@@ -45,6 +41,7 @@ final class AppModel {
                 try? FileManager.default.removeItem(at: docs.appendingPathComponent(name))
             }
             UserDefaults.standard.removeObject(forKey: SetupDefaults.key)
+            UserDefaults.standard.removeObject(forKey: AppSettings.roadNoiseKey)
         }
         #endif
         try? store.ensureRoot()
@@ -152,6 +149,9 @@ final class AppModel {
         guard !isRecovering else {
             throw CocoaError(.userCancelled, userInfo: [NSLocalizedDescriptionKey: "Still checking previous sessions, try again in a second."])
         }
+        // D51: no setup form. Every trip is a car; mount and people keep the remembered defaults.
+        setup.vehicle = SessionMetadata.Vehicle()
+        setup.audioEnabled = AppSettings.recordRoadNoise
         SetupDefaults.save(setup)
         let deps = makeDependencies()
         let session = try RecordingSession(store: store, setup: setup, preflight: preflight, deps: deps)

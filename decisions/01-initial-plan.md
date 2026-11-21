@@ -141,6 +141,8 @@ Notes:
 
 ### 3.7 Human labels (manual input during the drive), the ground truth
 
+> **Superseded by D51** (no label buttons) **and D47** (no sickness ratings): the app no longer offers label buttons or sickness prompts. `labels.csv` keeps its schema; new trips simply contain no human labels.
+
 The operator is **a passenger, never the driver.**
 
 | # | Label | UI | Why | Prio |
@@ -338,6 +340,8 @@ Everything here is **additive**: the §6 keys keep their names, types and units,
 ---
 
 ## 7. App screens and the live health dashboard
+
+> **Superseded by D51** (decisions/README.md): the app is now Start → Recording → Recap with no setup form, no labels and no sickness prompts. The screens below describe the original operator app; the health rules still apply and drive the Recording status line.
 
 ### Screen 1: Sessions
 - List of past sessions (date, duration, size, recovered flag) → tap → detail plus **Export** (share sheet / AirDrop the folder, or open in Files).

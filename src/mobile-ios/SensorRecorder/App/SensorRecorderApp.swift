@@ -9,8 +9,8 @@ struct SensorRecorderApp: App {
         WindowGroup {
             RootView()
                 .environment(model)
-                .preferredColorScheme(.dark)
-                .tint(Theme.accent)
+                .preferredColorScheme(.light)
+                .tint(Theme.ink)
                 .onAppear { model.onLaunch() }
         }
         .onChange(of: scenePhase) { _, phase in
@@ -19,48 +19,58 @@ struct SensorRecorderApp: App {
     }
 }
 
+/// Start → (cover) Recording → Recap. The burger menu and Settings are reachable from every screen.
 struct RootView: View {
     @Environment(AppModel.self) private var model
 
     var body: some View {
-        @Bindable var model = model
-        NavigationStack(path: $model.path) {
-            SessionsListView()
-                .navigationDestination(for: Route.self) { route in
-                    switch route {
-                    case .setup: SessionSetupView()
-                    case .preflight: PreflightView()
-                    case .detail(let name): SessionDetailView(folderName: name)
-                    case .settings: SettingsView()
-                    case .help: HelpView()
-                    }
-                }
+        WithMenu { openMenu in
+            StartView(openMenu: openMenu)
         }
         .fullScreenCover(isPresented: Binding(get: { model.recording != nil }, set: { _ in })) {
             if let rec = model.recording {
                 RecordingFlowView(controller: rec)
                     .environment(model)
-                    .preferredColorScheme(.dark)
+                    .preferredColorScheme(.light)
                     .interactiveDismissDisabled(true)
             }
         }
     }
 }
 
-/// Dashboard while recording, summary after Stop.
+/// Recording while it runs, the recap after Stop.
 struct RecordingFlowView: View {
     let controller: RecordingController
     @Environment(AppModel.self) private var model
 
     var body: some View {
-        if let meta = controller.finished {
-            NavigationStack {
-                SessionSummaryView(metadata: meta, folder: controller.session.folder) {
+        WithMenu { openMenu in
+            if let meta = controller.finished {
+                RecapView(metadata: meta, trackPoints: controller.trackPoints, openMenu: openMenu) {
                     model.closeRecording()
                 }
+                .transition(.opacity.combined(with: .offset(y: 16)))
+            } else {
+                RecordingView(controller: controller, openMenu: openMenu)
+                    .transition(.opacity.combined(with: .offset(y: 16)))
             }
-        } else {
-            RecordingDashboardView(controller: controller)
         }
+        .animation(.spring(response: 0.5, dampingFraction: 0.9), value: controller.isFinished)
+    }
+}
+
+/// A screen with the burger menu over it and Settings pushed from the right.
+struct WithMenu<Content: View>: View {
+    @ViewBuilder var content: (_ openMenu: @escaping () -> Void) -> Content
+    @State private var menuOpen = false
+    @State private var showSettings = false
+
+    var body: some View {
+        NavigationStack {
+            content { menuOpen = true }
+                .toolbar(.hidden, for: .navigationBar)
+                .navigationDestination(isPresented: $showSettings) { SettingsView() }
+        }
+        .overlay { MenuDrawer(isOpen: $menuOpen) { showSettings = true } }
     }
 }

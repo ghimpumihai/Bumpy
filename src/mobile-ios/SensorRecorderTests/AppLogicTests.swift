@@ -22,22 +22,6 @@ final class MotionTestAnalysisTests: XCTestCase {
     }
 }
 
-final class MapSegmentTests: XCTestCase {
-    func testSegmentsSplitBySpeedBucketAndShareBoundary() {
-        let pts: [TrackBuffer.Point] = [
-            .init(lat: 0, lon: 0, speed: 5),   // 18 km/h
-            .init(lat: 0, lon: 1, speed: 5),
-            .init(lat: 0, lon: 2, speed: 20),  // 72 km/h
-            .init(lat: 0, lon: 3, speed: 20),
-        ]
-        let segs = TrackMapView.segments(pts)
-        XCTAssertEqual(segs.count, 2)
-        XCTAssertEqual(segs[0].coords.map(\.longitude), [0, 1, 2])
-        XCTAssertEqual(segs[1].coords.map(\.longitude), [2, 3])
-        XCTAssertTrue(TrackMapView.segments([pts[0]]).isEmpty)
-    }
-}
-
 final class ExportTests: XCTestCase {
     func testFolderZipProducesZipArchive() throws {
         let dir = try makeTempDir().appendingPathComponent("2026-11-21T09-12-03Z_abcd")

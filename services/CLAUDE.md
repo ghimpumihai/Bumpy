@@ -9,7 +9,7 @@ Python 3.12 everywhere (Function runtime, Dockerfiles, CI); no 3.13+ features.
 - Grants: `GRANTS` in `migrate.py` covers schema `public` only and re-runs on every deploy. Locally migrate skips the `writer`/`reader` roles and everything runs as the superuser, so a missing grant or a write from the read API passes the tests and fails only on Azure.
 
 ## Processor
-- A new `RUN_MODE` needs its app or job in `infra/modules/compute/main.tf` and an image-update step in `.github/workflows/deploy-services.yml`. (`finalize` and `aggregate` exist in Terraform but still run the placeholder image.)
+- A new `RUN_MODE` needs its app or job in `infra/modules/compute/main.tf` and an image-update step in `.github/workflows/deploy-services.yml`.
 - A batch's rows and its partition's checkpoint (`stream_checkpoints`) commit in one transaction. Never commit one without the other.
 - `dsp.py` must give the same result fed batch by batch as in one pass (`test_chunked_feed_equals_one_pass`). The DSP state is saved as JSON in `signal_state` per trip: new keys need defaults in `Pipeline.__init__`, and changing the filter design or sample grid breaks trips that are in progress during a deploy.
 - The app sends acceleration in g; convert with `G`. The `WF` values are cited ISO 2631-1 constants, not tunables; only the pothole and forward-axis thresholds (PROVISIONAL in the `dsp.py` docstring) may be tuned.

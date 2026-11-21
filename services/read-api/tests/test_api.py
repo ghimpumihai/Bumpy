@@ -235,6 +235,78 @@ def test_signal_results_are_served(client, seed, fixture_batch):
     assert _ok(client, "/api/events", vehicle="all")["features"] == []
 
 
+SEGMENT_KEYS = {
+    "h3", "vehicleType", "nSessions", "nPasses", "meanSpeedKmh", "roughness", "roughnessPctl",
+    "roughnessMethod", "potholeHits", "potholePasses", "potholeRatio", "potholeConfirmed", "sicknessAwRms",
+    "msi1hPct", "sicknessSessions",
+}
+SEGMENT_DETAIL_KEYS = {"h3", "center", "byVehicle", "sicknessBySeat", "observations", "updatedAt"}
+OBSERVATION_KEYS = {"sessionId", "vehicleType", "tStart", "speedKmh", "roughnessRms", "awRms", "potholeCount",
+                    "includedInAgg"}
+SICKNESS_SPLIT_KEYS = {"vehicleType", "raterSeat", "raterPosture", "sicknessAwRms", "msi1hPct", "nSessions"}
+
+
+def test_finalized_trip_reaches_the_map(client, seed, dbname, fixture_batch, tmp_path):
+    """Stream a trip, finalize it from its raw archive (the finalize job's own code), then read the
+    aggregated map, a segment, the overview and the session's quality panel."""
+    import gzip
+    import json
+
+    import numpy as np
+    import psycopg
+
+    from roadride import finalize
+
+    start = dt.datetime.now(UTC) - dt.timedelta(seconds=60)
+    pothole_at = start.timestamp() + 2 * 15 + 1.0
+
+    def vert(t):
+        return 0.8 * np.sin(2 * np.pi * 0.2 * t) + 15.0 * np.exp(-((t - pothole_at) / 0.01) ** 2)
+
+    batches = [_with_motion(b, vert) for b in _trip(fixture_batch, 30, start=start)]
+    metas = [session_meta(SID), session_meta(SID, batchCount=30, endedAtUtc=dt.datetime.now(UTC).isoformat())]
+    seed(meta=metas[:1], batches=batches)
+    seed(meta=metas[1:])
+    folder = tmp_path / "raw" / f"session={SID}"
+    folder.mkdir(parents=True)
+    for b in batches:
+        (folder / f"{b['batchSeq']:08d}.json.gz").write_bytes(gzip.compress(json.dumps(b).encode()))
+    for m, phase in zip(metas, ("start", "stop")):
+        (folder / f"session-{phase}.json.gz").write_bytes(gzip.compress(json.dumps(m).encode()))
+    with psycopg.connect(dbname=dbname) as conn:
+        assert finalize.handle(conn, finalize.DirArchive(tmp_path), json.dumps({"sessionId": SID}).encode()) \
+            == ("complete", SID)
+
+    s = _ok(client, f"/api/sessions/{SID}")
+    assert (s["status"], s["includeInAgg"], s["exclusionReasons"]) == ("complete", True, [])
+    assert 0 < s["validFraction"] <= 1 and ISO.match(s["processedAt"])
+    assert s["quality"]["streams"]["deviceMotion"]["expectedHz"] == 100.0
+
+    fc = _ok(client, "/api/segments", vehicle="all")
+    assert fc["type"] == "FeatureCollection" and len(fc["features"]) > 5
+    feature = fc["features"][0]
+    assert feature["geometry"]["type"] == "Polygon" and len(feature["geometry"]["coordinates"][0]) == 7
+    assert set(feature["properties"]) == SEGMENT_KEYS
+    assert feature["properties"]["roughnessMethod"] == "percentile"  # one trip can't fit the model
+    assert _ok(client, "/api/segments", vehicle="bus")["features"]
+    assert _ok(client, "/api/segments", vehicle="tram")["features"] == []
+
+    detail = _ok(client, f"/api/segments/{feature['properties']['h3']}")
+    assert set(detail) == SEGMENT_DETAIL_KEYS and ISO.match(detail["updatedAt"])
+    assert [a["vehicleType"] for a in detail["byVehicle"]] == ["all", "bus"]
+    (obs,) = detail["observations"]
+    assert set(obs) == OBSERVATION_KEYS and obs["includedInAgg"] is True and obs["vehicleType"] == "bus"
+    assert all(set(x) == SICKNESS_SPLIT_KEYS for x in detail["sicknessBySeat"])
+
+    ov = _ok(client, "/api/overview")
+    assert ov["segments"] == len(fc["features"]) and ov["distanceKm"] > 1
+    assert ov["sessions"]["includedInAgg"] == 1 and ISO.match(ov["lastProcessedAt"])
+    assert ov["aggregation"]["method"] == "percentile" and ISO.match(ov["aggregation"]["fittedAt"])
+
+    # Finalized, so its pothole is on the shared map now.
+    assert len(_ok(client, "/api/events", vehicle="all")["features"]) == 1
+
+
 def test_cors_only_for_configured_origin(dbname, monkeypatch):
     from fastapi.testclient import TestClient
 

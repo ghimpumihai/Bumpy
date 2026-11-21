@@ -108,12 +108,16 @@ def create_app(pool: ConnectionPool | None = None) -> FastAPI:
 
     @app.get("/api/segments")
     def segments(vehicle: str | None = None):
-        q.enum_param(vehicle, "vehicle", q.VEHICLE_FILTERS)
-        return q.empty_feature_collection()
+        vehicle = q.enum_param(vehicle, "vehicle", q.VEHICLE_FILTERS)
+        with pool.connection() as conn:
+            return q.segments(conn, vehicle)
 
     @app.get("/api/segments/{h3}")
     def segment(h3: str):
-        return q.segment_detail(h3)
+        if not q.is_h3_cell(h3):
+            raise q.BadRequest(f"{h3} is not an H3 cell")
+        with pool.connection() as conn:
+            return q.segment_detail(conn, h3)
 
     @app.get("/api/events")
     def events(vehicle: str | None = None, type: str | None = None):  # noqa: A002 - API.md name

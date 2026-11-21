@@ -109,6 +109,9 @@ class SeriesPoint:
     a_lon: float
     speed: float | None  # m/s
     msdv: float  # m/s^1.5 so far
+    # For the finalize job's segment passes (not stored in session_series):
+    rough_rms: float = 0.0  # m/s², RMS of the band-passed vertical over the 0.2 s window
+    dose_inc: float = 0.0  # ∫ a_w² dt over the window (m²/s³), so a pass's a_w RMS = √(Σ dose_inc / Σ dt)
 
 
 @dataclass
@@ -176,7 +179,7 @@ class Pipeline:
             "zi_low": (signal.sosfilt_zi(SOS_LOW) * x0).tolist(),
             "zi_h": _zeros(SOS_LOW, 3),
             "zi_wf": _zeros(SOS_WF)[0],
-            "win": {"n": 0, "peak": 0.0, "lat": 0.0, "lon": 0.0},
+            "win": {"n": 0, "peak": 0.0, "lat": 0.0, "lon": 0.0, "b2": 0.0, "aw2": 0.0},
         }
 
     @staticmethod
@@ -299,9 +302,11 @@ class Pipeline:
                 fix_i += 1
             b = float(band[i])
             self.rough_ema = b * b if self.rough_ema is None else self.rough_ema + alpha * (b * b - self.rough_ema)
+            win["b2"] = win.get("b2", 0.0) + b * b
             if dec[i]:
                 a = float(next(aw_iter))
                 self.dose += a * a / FS_WF
+                win["aw2"] = win.get("aw2", 0.0) + a * a / FS_WF
             self.h_acc = (np.array(self.h_acc) + h_low[i]).tolist() if self.h_n else h_low[i].tolist()
             self.h_n += 1
 
@@ -319,8 +324,9 @@ class Pipeline:
                 out.series.append(SeriesPoint(
                     t=tt, a_vert=round(win["peak"], 4), a_lat=round(win["lat"] / win["n"], 4),
                     a_lon=round(win["lon"] / win["n"], 4), speed=self._speed_at(tt),
-                    msdv=round(math.sqrt(self.dose), 5)))
-                win.update(n=0, peak=0.0, lat=0.0, lon=0.0)
+                    msdv=round(math.sqrt(self.dose), 5),
+                    rough_rms=math.sqrt(win.get("b2", 0.0) / win["n"]), dose_inc=win.get("aw2", 0.0)))
+                win.update(n=0, peak=0.0, lat=0.0, lon=0.0, b2=0.0, aw2=0.0)
         self.pending_fixes = list(fixes[fix_i:])  # later than the last sample: taken next time
 
     def _axes(self, down: np.ndarray) -> tuple[np.ndarray, np.ndarray]:

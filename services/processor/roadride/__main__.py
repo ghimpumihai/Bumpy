@@ -18,8 +18,12 @@ def main() -> int:
         from .migrate import run
     elif mode == "stream":
         from .stream import run
+    elif mode == "finalize":
+        from .finalize import run
+    elif mode == "aggregate":
+        from .aggregate import run
     else:
-        logging.error("RUN_MODE %r is not implemented yet (finalize and aggregate come with processing)", mode)
+        logging.error("unknown RUN_MODE %r (stream, migrate, finalize, aggregate)", mode)
         return 2
     run()
     return 0

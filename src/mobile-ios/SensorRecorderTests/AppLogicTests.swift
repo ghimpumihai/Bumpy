@@ -131,3 +131,52 @@ final class LifecycleNoteTests: XCTestCase {
         XCTAssertEqual(sources.filter { $0 == "foreground" }.count, 1)
     }
 }
+
+final class LateLogTests: XCTestCase {
+    func testUploadEventsAfterStopReachTheSessionLog() throws {
+        let session = try makeRunningSession(root: try makeTempDir())
+        session.stop()
+        // What AppModel's uploadQueue.onEvent does for the final batches / Stop metadata.
+        session.log(.warn, "upload retry: HTTP 503")
+        session.log(.warn, "upload: batch_000007 rejected with HTTP 400, moved to upload_failed/")
+        session.writer.drainLateLog()
+        let log = try String(contentsOf: session.folder.appendingPathComponent("app_log.txt"), encoding: .utf8)
+        let lines = log.split(separator: "\n").map(String.init)
+        let stopped = try XCTUnwrap(lines.firstIndex { $0.contains("recording stopped") })
+        let retry = try XCTUnwrap(lines.firstIndex { $0.contains("[WARN] upload retry: HTTP 503") })
+        let rejected = try XCTUnwrap(lines.firstIndex { $0.contains("batch_000007 rejected") })
+        XCTAssertLessThan(stopped, retry)
+        XCTAssertLessThan(retry, rejected, "late lines keep their order")
+        XCTAssertTrue(log.hasSuffix("\n"))
+        // The finished session is still a finished session: recovery leaves it alone.
+        XCTAssertTrue(SessionStore(root: session.folder.deletingLastPathComponent()).recoverUnfinishedSessions().isEmpty)
+        XCTAssertNotNil(try SessionMetadata.load(from: session.folder.appendingPathComponent("session.json")).endedAtUtc)
+    }
+
+    func testLateLineNeverRecreatesADeletedSession() throws {
+        let dir = try makeTempDir().appendingPathComponent("s")
+        let w = try SessionWriter(folder: dir, files: [])
+        w.close()
+        try FileManager.default.removeItem(at: dir)
+        w.log(.warn, "upload retry after delete")
+        w.drainLateLog()
+        XCTAssertFalse(FileManager.default.fileExists(atPath: dir.path))
+    }
+
+    func testCloseRacingAppendNeverLosesAcceptedLines() throws {
+        for _ in 0..<50 {
+            let url = try makeTempDir().appendingPathComponent("x.txt")
+            let w = try BufferedFileWriter(url: url, header: nil)
+            let accepted = Locked(0)
+            let group = DispatchGroup()
+            DispatchQueue.global().async(group: group) {
+                for i in 0..<200 where w.append(line: "l\(i)") { accepted.withLock { $0 += 1 } }
+            }
+            try w.close()
+            group.wait()
+            let lines = try String(contentsOf: url, encoding: .utf8).split(separator: "\n")
+            XCTAssertEqual(lines.count, accepted.current, "every accepted line is in the final flush")
+            XCTAssertEqual(lines.count + w.droppedAfterClose.current, 200)
+        }
+    }
+}

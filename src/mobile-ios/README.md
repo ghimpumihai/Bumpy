@@ -48,7 +48,7 @@ Sessions → **New session** → setup (pre-filled with your last values, plus a
 | `audio_level.csv` | RMS and peak dBFS at 10 Hz |
 | `device.csv` | battery, thermal, Low Power Mode, free disk, network, every 5 s |
 | `labels.csv` | `t_up,t_utc_ms,type,value,note` (all human labels and sickness ratings) |
-| `app_log.txt` | warnings, problems, permission state, interruptions, upload rejections |
+| `app_log.txt` | warnings, problems, permission state, interruptions, upload rejections (also those after Stop: the file can grow past the size in `session.json` stats) |
 | `mount.jpg` | mount photo |
 
 Every sensor CSV starts with `t_up` (seconds since boot, the CoreMotion clock, 6 decimals) and

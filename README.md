@@ -98,7 +98,7 @@ In the plan's build order:
 
 1. **Speed bumps**: need the vehicle's pitch axis.
 2. **Finalize for uploaded folders, Parquet output, detection scoring against manual taps, phone-moved / gravity-drift quality checks.**
-3. From the plan's cut list: laptop upload fallback, monitoring workbook, Terraform plan on PRs.
+3. From the plan's cut list: laptop upload fallback, monitoring workbook.
 
 ## Branches
 

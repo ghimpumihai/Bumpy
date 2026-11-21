@@ -50,6 +50,47 @@ Contracts the service code must follow (set as environment variables by Terrafor
 
 Database tokens: request `https://ossrdbms-aad.database.windows.net/.default` with `ManagedIdentityCredential(client_id=AZURE_CLIENT_ID)` and use it as the password with `sslmode=require`.
 
+## CI for Terraform
+
+| Workflow | Runs | Identity | What it does |
+|---|---|---|---|
+| `terraform-plan` | every PR touching `infra/**` | `plan` (Reader + state blob access) | `fmt -check`, `validate` (main and bootstrap), then `plan -refresh=false -lock=false` against the remote state, posted as a PR comment; fails if the plan deletes or replaces the database, a storage account or container, Event Hubs, Service Bus, Key Vault or the registry |
+| `terraform-apply` | manual (Actions → Run workflow) | `deploy` (`prod` environment) | plan with refresh, the same delete guard (override: `allow_data_loss`), apply, then the host-storage clean-up |
+| `security` | every PR and push to `main` | none | gitleaks over the whole history |
+
+The plan runs with `-refresh=false` because Reader can't call the "list" actions the provider uses while
+refreshing (function app settings, keys). It shows what the PR changes relative to the last apply, not
+drift made outside Terraform; `tf.ps1 plan` on a laptop shows both. Fork and Dependabot PRs get the fmt
+and validate job only (no OIDC token there). Teardown stays on a laptop (`tf.ps1 destroy`): purging the
+soft-deleted Key Vault needs rights at subscription level.
+
+Set once in the repo (Settings → Secrets and variables → Actions):
+
+| Name | Kind | Value |
+|---|---|---|
+| `AZURE_CLIENT_ID_PLAN` | variable | from `terraform -chdir=infra/bootstrap output github_variables` |
+| `TFSTATE_RESOURCE_GROUP`, `TFSTATE_STORAGE_ACCOUNT`, `TFSTATE_CONTAINER` | variables | same output (also in `infra/.env`) |
+| `TF_VAR_ADMIN_OBJECT_IDS` | variable | the JSON list from `infra/.env`, exactly (a different list = role assignments added or removed) |
+| `TF_VAR_ALERT_EMAIL` | **secret** | from `infra/.env` (a secret so the public logs mask it) |
+| `TF_VAR_PSQL_NAT_GATEWAY_ENABLED`, `TF_VAR_EVENTHUB_LOCAL_AUTH_ENABLED`, `TF_VAR_BUDGET_AMOUNT`, `TFSTATE_KEY` | variables, optional | only if `infra/.env` overrides them |
+
+`AZURE_CLIENT_ID_DEPLOY`, `AZURE_TENANT_ID` and `AZURE_SUBSCRIPTION_ID` are already set for the deploys.
+
+### If the Azure login fails in a workflow
+
+The federated credentials in `bootstrap/main.tf` use GitHub's immutable subject format
+(`repo:ghimpumihai@163877193/DataInfrastructure_Chuds@1465690625:environment:prod` and `…:pull_request`),
+which GitHub uses for repositories created after 2026-07-15 (plan §5, D36). On 2026-11-21 the repo's
+OIDC settings returned exactly that prefix:
+
+```
+gh api repos/ghimpumihai/DataInfrastructure_Chuds/actions/oidc/customization/sub
+```
+
+If a login fails with `AADSTS700213` (no matching federated identity record), compare the `sub` that
+terraform-plan prints in its "Show the OIDC subject GitHub sends" step with the credential's subject.
+A job with `environment:` gets `…:environment:<name>`; a `pull_request` job without one gets `…:pull_request`.
+
 ## Function host storage (provider bug, read before applying)
 
 The function app's own storage (`stroadridefn*`) has storage keys switched off, so the Functions host
@@ -89,5 +130,5 @@ Terraform doesn't see the setting (the provider hides it), so deleting it never 
 
 ## Known risks to check on the first apply
 
-- The `plan` identity for pull requests only has Reader. If `terraform plan` in CI fails reading the function app's settings or the Static Web App's key (those are "list" actions Reader doesn't have), give it a custom role with those read actions.
+- The `plan` identity for pull requests only has Reader, so terraform-plan runs with `-refresh=false` (see "CI for Terraform"). If a full refresh is ever wanted in CI, it needs a custom role with the provider's "list" actions, which would also expose keys to PR workflows.
 - If Event Hubs Basic refuses managed-identity login (plan §16 day-0 test), set `TF_VAR_eventhub_local_auth_enabled=true` in `.env` and apply.

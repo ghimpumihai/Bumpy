@@ -319,3 +319,60 @@ def test_cors_only_for_configured_origin(dbname, monkeypatch):
         assert ok.headers.get("access-control-allow-origin") == "https://dash.example"
         other = c.get("/api/overview", headers={"Origin": "https://evil.example"})
         assert "access-control-allow-origin" not in other.headers
+
+
+# --- Errors carry CORS headers too --------------------------------------------------------
+
+@pytest.fixture
+def cors_client(dbname, monkeypatch):
+    from fastapi.testclient import TestClient
+
+    from app.db import make_pool
+    from app.main import create_app
+
+    monkeypatch.setenv("CORS_ALLOWED_ORIGINS", "https://dash.example")
+    with TestClient(create_app(make_pool(dbname))) as c:
+        yield c
+
+
+ORIGIN = {"Origin": "https://dash.example"}
+
+
+def test_500_is_json_with_cors_and_logged(cors_client, monkeypatch, caplog):
+    # Without CORS headers on a 500, the browser reports a network error ("API unreachable").
+    import app.queries as q
+
+    def boom(conn):
+        raise RuntimeError("kaboom")
+
+    monkeypatch.setattr(q, "overview", boom)
+    r = cors_client.get("/api/overview", headers=ORIGIN)
+    assert r.status_code == 500 and r.json() == {"error": "internal error"}
+    assert r.headers.get("access-control-allow-origin") == "https://dash.example"
+    assert any("unhandled error on /api/overview" in rec.getMessage() and rec.exc_info
+               for rec in caplog.records)
+
+
+@pytest.mark.parametrize("path,status", [
+    ("/api/sessions/nope", 404), ("/api/nothing-here", 404), ("/api/sessions?source=satellite", 400),
+])
+def test_4xx_carry_cors(cors_client, path, status):
+    r = cors_client.get(path, headers=ORIGIN)
+    assert r.status_code == status and set(r.json()) == {"error"}
+    assert r.headers.get("access-control-allow-origin") == "https://dash.example"
+
+
+def test_slow_query_is_cancelled_with_503(dbname, monkeypatch):
+    from fastapi.testclient import TestClient
+
+    import app.queries as q
+    from app.db import make_pool
+    from app.main import create_app
+
+    monkeypatch.setenv("READ_API_STATEMENT_TIMEOUT_MS", "200")
+    monkeypatch.setenv("CORS_ALLOWED_ORIGINS", "https://dash.example")
+    monkeypatch.setattr(q, "overview", lambda conn: conn.execute("SELECT pg_sleep(5)").fetchone())
+    with TestClient(create_app(make_pool(dbname))) as c:
+        r = c.get("/api/overview", headers=ORIGIN)
+        assert r.status_code == 503 and set(r.json()) == {"error"}
+        assert r.headers.get("access-control-allow-origin") == "https://dash.example"

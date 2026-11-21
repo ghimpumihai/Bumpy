@@ -14,13 +14,48 @@ from fastapi import FastAPI, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
-from psycopg_pool import ConnectionPool
+from psycopg import errors as pg_errors
+from psycopg_pool import ConnectionPool, PoolTimeout
 from starlette.exceptions import HTTPException as StarletteHTTPException
+from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
 from . import queries as q
 from .db import make_pool
 
 log = logging.getLogger("read-api")
+
+
+class CatchErrors:
+    """Turns an unhandled exception into the JSON 500 of API.md and logs it.
+
+    Starlette sends `exception_handler(Exception)` responses from ServerErrorMiddleware, the outermost
+    layer, i.e. outside CORSMiddleware: such a 500 has no Access-Control-Allow-Origin, so the browser
+    reports a network error and the dashboard says "API unreachable". This middleware sits INSIDE
+    CORSMiddleware, so the 500 it sends gets the CORS headers like every other response.
+    """
+
+    def __init__(self, app: ASGIApp) -> None:
+        self.app = app
+
+    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+        if scope["type"] != "http":
+            await self.app(scope, receive, send)
+            return
+        started = False
+
+        async def _send(message: Message) -> None:
+            nonlocal started
+            if message["type"] == "http.response.start":
+                started = True
+            await send(message)
+
+        try:
+            await self.app(scope, receive, _send)
+        except Exception:
+            log.exception("unhandled error on %s", scope.get("path"))
+            if started:  # part of the response is already out; nothing valid can follow
+                raise
+            await JSONResponse({"error": "internal error"}, status_code=500)(scope, receive, send)
 
 
 def create_app(pool: ConnectionPool | None = None) -> FastAPI:
@@ -37,6 +72,8 @@ def create_app(pool: ConnectionPool | None = None) -> FastAPI:
     app = FastAPI(title="Road & Ride read API", docs_url=None, redoc_url=None, openapi_url=None,
                   lifespan=lifespan)
 
+    # Added first, so it sits inside CORS (the last middleware added is the outermost).
+    app.add_middleware(CatchErrors)
     origins = [o.strip() for o in os.environ.get("CORS_ALLOWED_ORIGINS", "").split(",") if o.strip()]
     if origins:
         app.add_middleware(CORSMiddleware, allow_origins=origins, allow_methods=["GET"],
@@ -61,6 +98,17 @@ def create_app(pool: ConnectionPool | None = None) -> FastAPI:
         message = f"no route for {request.url.path}" if exc.status_code == 404 else str(exc.detail)
         return JSONResponse({"error": message}, status_code=exc.status_code)
 
+    @app.exception_handler(PoolTimeout)
+    async def _busy(request: Request, exc: PoolTimeout):
+        log.warning("no free database connection for %s", request.url.path)
+        return JSONResponse({"error": "database busy, try again"}, status_code=503)
+
+    @app.exception_handler(pg_errors.QueryCanceled)
+    async def _slow(request: Request, exc: pg_errors.QueryCanceled):
+        log.warning("statement timeout on %s: %s", request.url.path, exc)
+        return JSONResponse({"error": "query took too long"}, status_code=503)
+
+    # Last resort for errors outside CatchErrors (in the CORS middleware itself): still JSON.
     @app.exception_handler(Exception)
     async def _crash(request: Request, exc: Exception):
         log.exception("unhandled error on %s", request.url.path)

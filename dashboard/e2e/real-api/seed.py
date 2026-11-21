@@ -5,7 +5,7 @@ Azure), starting from the batch the iPhone app's real encoder produced
 (src/mobile-ios/tools/fixtures/ingest_batch_v1.json.gz), so the read API answers exactly as in production.
 
 Three trips, one per state the dashboard must handle:
-- LIVE: recording now, well past its first 200 m, so it shows on the live view;
+- LIVE: recording now, so it shows on the live view;
 - ENDED: Stop received and every batch in, so it is being processed;
 - NO_CONTEXT: batches only, session.json never arrived (unknown context).
 
@@ -40,7 +40,7 @@ LIVE = "e2e00000-0000-4000-8000-00000000live"
 ENDED = "e2e00000-0000-4000-8000-0000000ended"
 NO_CONTEXT = "e2e00000-0000-4000-8000-00000context"
 BATCH_S = 2
-# 20 m per batch eastwards (≈ 36 km/h): 40 batches = 800 m, far past the 200 m privacy zone at each end.
+# 20 m per batch eastwards (≈ 36 km/h): 40 batches = 800 m.
 STEP_DEG_LON = 20 / 75_000  # ~75 km per degree of longitude at 47.6° N
 START = (47.60, 8.50)
 

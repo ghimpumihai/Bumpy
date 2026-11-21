@@ -7,8 +7,8 @@ the working spec.
 
 Every list route runs a fixed number of queries, whatever the number of sessions: the per-session
 numbers (distance, GPS accuracy, ratings, public event counts, stream rates) are computed for all
-sessions at once with GROUP BY / LATERAL joins. The privacy rule (below) is SQL too, so it is applied
-the same way by every route, before any position leaves the database.
+sessions at once with GROUP BY / LATERAL joins. Positions are returned untrimmed (D40); only fixes
+less accurate than MAX_HACC_M are left out.
 """
 
 from __future__ import annotations
@@ -22,8 +22,7 @@ from .fmt import epoch_ms, iso, rnd
 if TYPE_CHECKING:  # only for type hints; keeps the pure helpers importable without a driver
     from psycopg import Connection
 
-PRIVACY_TRIM_M = 200.0  # plan §11: no position within 200 m of where a trip starts or ends
-MAX_ANCHOR_HACC_M = 50.0  # fixes less accurate than this (or without an accuracy) are never public
+MAX_HACC_M = 50.0  # fixes less accurate than this (or without an accuracy) are never returned
 TRIP_SILENCE_CLOSE_S = 15 * 60  # API.md: a trip has ended after 15 min without batches
 LIVE_WINDOW_S = 60  # devices heard from in the last minute
 LIVE_TRACK_S = 120  # last ~2 minutes of track on the live view
@@ -67,80 +66,20 @@ def enum_param(value: str | None, name: str, allowed: tuple[str, ...]) -> str | 
 
 
 def _params(**extra) -> dict:
-    """Named parameters shared by the privacy fragments, plus the query's own."""
-    return {"trim_m": PRIVACY_TRIM_M, "max_hacc": MAX_ANCHOR_HACC_M, "silence_s": TRIP_SILENCE_CLOSE_S,
+    """Named parameters shared by the fragments below, plus the query's own."""
+    return {"max_hacc": MAX_HACC_M, "silence_s": TRIP_SILENCE_CLOSE_S,
             "sickness": SICKNESS_LABEL, **extra}
 
 
-# --- Privacy (plan §11, API.md) -------------------------------------------------------------
-#
-# Positions near where a trip starts (and, once it has ended, where it ends) never leave the database.
-#
-# * Only accurate fixes count: h_acc_m <= MAX_ANCHOR_HACC_M. A fix without an accuracy, or a poor one
-#   (a garage start, a cold GPS), never anchors the zones and is never public.
-# * The start zone is a 200 m radius (geodesic, ST_DWithin on geography) around the first accurate fix.
-#   Everything is private until the track LEAVES that radius: the first accurate fix outside it whose
-#   next accurate fix is outside it too (so one jittery outlier while parked doesn't open the track).
-#   This is a prefix, not a hole punched around home: a trip that later drives past its start again
-#   stays public there. Jitter while parked can't add up to 200 m, unlike a cumulative path length.
-# * The end zone is the same around the LAST accurate fix, as a suffix, for trips that have ended.
-# * A trip has ended (ENDED_SQL) when any sign says so, even if its status is still 'live': status
-#   not 'live', an end time, a Stop message (expected_batch_count), or 15 min without batches.
-# * Events must be public in time (inside the public part of the track) AND lie outside both radii,
-#   since an event takes the position of its nearest fix.
-# * A track that never leaves its start zone has no public part at all.
-
+# A trip has ended when any sign says so, even if its status is still 'live': status not 'live', an
+# end time, a Stop message (expected_batch_count), or 15 min without batches.
 ENDED_SQL = """(s.status <> 'live' OR s.ended_at IS NOT NULL OR s.expected_batch_count IS NOT NULL
         OR s.last_received_at < now() - make_interval(secs => %(silence_s)s))"""
 
-# Appended to `FROM ps`, where the CTE `ps` has session_id and ended (boolean). Each LATERAL walks the
-# track_points primary key (session_id, t) from one end and stops at the first match, so it reads the
-# start (or end) of a track, not the whole of it.
-PRIVACY_JOINS = """
-LEFT JOIN LATERAL (
-  SELECT f.t, f.geom FROM track_points f
-  WHERE f.session_id = ps.session_id AND f.h_acc_m <= %(max_hacc)s
-  ORDER BY f.t LIMIT 1) a ON true
-LEFT JOIN LATERAL (
-  SELECT f.t FROM track_points f
-  WHERE f.session_id = ps.session_id AND f.t > a.t AND f.h_acc_m <= %(max_hacc)s
-    AND NOT ST_DWithin(f.geom, a.geom, %(trim_m)s)
-    AND NOT ST_DWithin((SELECT n.geom FROM track_points n
-                        WHERE n.session_id = f.session_id AND n.t > f.t AND n.h_acc_m <= %(max_hacc)s
-                        ORDER BY n.t LIMIT 1), a.geom, %(trim_m)s)
-  ORDER BY f.t LIMIT 1) ex ON true
-LEFT JOIN LATERAL (
-  SELECT f.t, f.geom FROM track_points f
-  WHERE ps.ended AND f.session_id = ps.session_id AND f.h_acc_m <= %(max_hacc)s
-  ORDER BY f.t DESC LIMIT 1) b ON true
-LEFT JOIN LATERAL (
-  SELECT f.t FROM track_points f
-  WHERE f.session_id = ps.session_id AND f.t < b.t AND f.h_acc_m <= %(max_hacc)s
-    AND NOT ST_DWithin(f.geom, b.geom, %(trim_m)s)
-    AND NOT ST_DWithin((SELECT n.geom FROM track_points n
-                        WHERE n.session_id = f.session_id AND n.t < f.t AND n.h_acc_m <= %(max_hacc)s
-                        ORDER BY n.t DESC LIMIT 1), b.geom, %(trim_m)s)
-  ORDER BY f.t DESC LIMIT 1) en ON true
-"""
-# pub_from: first public time (NULL: nothing public). pub_to: last public time of an ended trip.
-PRIVACY_COLUMNS = "ex.t AS pub_from, en.t AS pub_to, a.geom AS start_geom, b.geom AS end_geom"
 
-
-def _public_point(p: str, w: str = "pw") -> str:
-    """SQL condition: track point `p` is public under privacy window `w`."""
-    return (f"({p}.h_acc_m <= %(max_hacc)s AND {p}.t >= {w}.pub_from"
-            f" AND (NOT {w}.ended OR {p}.t <= {w}.pub_to))")
-
-
-def _public_event(e: str, w: str = "pw") -> str:
-    return (f"({e}.geom IS NOT NULL AND {e}.t >= {w}.pub_from AND (NOT {w}.ended OR {e}.t <= {w}.pub_to)"
-            f" AND NOT ST_DWithin({e}.geom, {w}.start_geom, %(trim_m)s)"
-            f" AND (NOT {w}.ended OR NOT ST_DWithin({e}.geom, {w}.end_geom, %(trim_m)s)))")
-
-
-def _privacy_cte(ps_sql: str) -> str:
-    """`ps` (rows with session_id and ended) and `pw` (ps plus its privacy window) CTEs."""
-    return f"ps AS ({ps_sql}),\npw AS (SELECT ps.*, {PRIVACY_COLUMNS} FROM ps {PRIVACY_JOINS})"
+# Positions are returned whole: there is no start/end privacy trim (D40). Only inaccurate fixes are left out.
+def _accurate(p: str) -> str:
+    return f"{p}.h_acc_m <= %(max_hacc)s"
 
 
 # --- Sessions ----------------------------------------------------------------------------
@@ -151,11 +90,6 @@ SESSION_FILTERS = {
             " AND (%(vehicle)s::text IS NULL OR s.vehicle_type = %(vehicle)s)",
     "all": "true",
 }
-
-
-# Privacy windows are only needed for trips that have events.
-WITH_EVENTS_PS = ("SELECT s.session_id, s.ended FROM s"
-                  " WHERE EXISTS (SELECT 1 FROM events e WHERE e.session_id = s.session_id)")
 
 
 def _summary_sql(where: str) -> str:
@@ -176,13 +110,12 @@ rt AS (
   WHERE l.type = %(sickness)s AND l.session_id IN (SELECT session_id FROM s)
   GROUP BY l.session_id
 ),
-{_privacy_cte(WITH_EVENTS_PS)},
 ev AS (
   SELECT e.session_id,
          count(*) FILTER (WHERE e.type = 'pothole') AS pothole,
          count(*) FILTER (WHERE e.type = 'speed_bump') AS speed_bump,
          count(*) FILTER (WHERE e.type = 'rail_joint') AS rail_joint
-  FROM events e JOIN pw USING (session_id) WHERE {_public_event("e")}
+  FROM events e WHERE e.session_id IN (SELECT session_id FROM s) AND e.geom IS NOT NULL
   GROUP BY e.session_id
 )
 SELECT s.*,
@@ -498,9 +431,8 @@ def quality_list(conn: Connection, cache: TripStatsCache | None = None) -> dict:
 
 
 TRACK_SQL = f"""
-WITH {_privacy_cte("SELECT s.session_id, " + ENDED_SQL + " AS ended FROM sessions s WHERE s.session_id = %(sid)s")}
 SELECT ST_X(p.geom::geometry), ST_Y(p.geom::geometry), p.t, p.speed_ms
-FROM pw JOIN track_points p ON p.session_id = pw.session_id AND {_public_point("p")}
+FROM track_points p WHERE p.session_id = %(sid)s AND {_accurate("p")}
 ORDER BY p.t
 """
 
@@ -515,7 +447,7 @@ def session_track(conn: Connection, session_id: str) -> dict:
             "sessionId": session_id,
             "times": [epoch_ms(t) for _, _, t, _ in pts],
             "speeds": [rnd(speed, 2) for *_, speed in pts],
-            "trimmedM": PRIVACY_TRIM_M,
+            "trimmedM": 0,
         },
     }
 
@@ -543,20 +475,17 @@ def session_series(conn: Connection, session_id: str) -> dict:
 
 
 EVENTS_SQL = """
-WITH {privacy}
 SELECT e.session_id, e.type, e.t, ST_X(e.geom::geometry), ST_Y(e.geom::geometry), e.speed_ms,
-       e.magnitude, e.confidence, e.matched_label, pw.vehicle_type
-FROM events e JOIN pw USING (session_id)
-WHERE {public} AND (%(etype)s::text IS NULL OR e.type = %(etype)s)
+       e.magnitude, e.confidence, e.matched_label, s.vehicle_type
+FROM events e JOIN sessions s USING (session_id)
+WHERE {where} AND e.geom IS NOT NULL AND (%(etype)s::text IS NULL OR e.type = %(etype)s)
 ORDER BY e.t, e.session_id, e.type
 """
 
 
 def _event_features(conn: Connection, where: str, **args) -> list[dict]:
-    """Events of the matching sessions as GeoJSON features, minus those inside the private zones."""
-    ps = ("SELECT s.session_id, s.vehicle_type, " + ENDED_SQL + " AS ended FROM sessions s WHERE " + where +
-          " AND EXISTS (SELECT 1 FROM events e WHERE e.session_id = s.session_id)")
-    sql = EVENTS_SQL.format(privacy=_privacy_cte(ps), public=_public_event("e"))
+    """Events of the matching sessions (those with a position) as GeoJSON features."""
+    sql = EVENTS_SQL.format(where=where)
     features = []
     for sid, etype, t, lon, lat, speed, magnitude, confidence, matched, vtype in conn.execute(
             sql, _params(**{"etype": None, **args})).fetchall():
@@ -594,39 +523,28 @@ def all_events(conn: Connection, vehicle: str | None, etype: str | None) -> dict
 # --- Live ---------------------------------------------------------------------------------
 
 LIVE_SQL = f"""
-WITH {_privacy_cte('''
-  SELECT ls.device_id, ls.session_id, ls.updated_at, ls.received_at, ls.lat, ls.lon, ls.speed_ms,
-         ls.course_deg, ls.h_acc_m, ls.roughness_now, ls.msdv_so_far, ls.battery, ls.thermal,
-         s.source, s.status, s.vehicle_type, false AS ended
-  FROM live_state ls JOIN sessions s USING (session_id)
-  WHERE ls.received_at > %(since)s AND ls.lat IS NOT NULL AND ls.lon IS NOT NULL
-    AND NOT ''' + ENDED_SQL)}
-SELECT pw.device_id, pw.session_id, pw.source, pw.status, pw.vehicle_type, pw.updated_at, pw.received_at,
-       pw.lat, pw.lon, pw.speed_ms, pw.course_deg, pw.h_acc_m, pw.roughness_now, pw.msdv_so_far,
-       pw.battery, pw.thermal, tr.lons, tr.lats, rt.ts, rt.vals
-FROM pw
+SELECT ls.device_id, ls.session_id, s.source, s.status, s.vehicle_type, ls.updated_at, ls.received_at,
+       ls.lat, ls.lon, ls.speed_ms, ls.course_deg, ls.h_acc_m, ls.roughness_now, ls.msdv_so_far,
+       ls.battery, ls.thermal, tr.lons, tr.lats, rt.ts, rt.vals
+FROM live_state ls JOIN sessions s USING (session_id)
 LEFT JOIN LATERAL (
   SELECT array_agg(ST_X(p.geom::geometry) ORDER BY p.t) AS lons,
          array_agg(ST_Y(p.geom::geometry) ORDER BY p.t) AS lats
   FROM track_points p
-  WHERE p.session_id = pw.session_id AND p.t >= pw.updated_at - make_interval(secs => %(track_s)s)
-    AND {_public_point("p")}) tr ON true
+  WHERE p.session_id = ls.session_id AND p.t >= ls.updated_at - make_interval(secs => %(track_s)s)
+    AND {_accurate("p")}) tr ON true
 LEFT JOIN LATERAL (
   SELECT array_agg(l.t ORDER BY l.t DESC) AS ts, array_agg(l.value ORDER BY l.t DESC) AS vals
-  FROM (SELECT t, value FROM labels WHERE session_id = pw.session_id AND type = %(sickness)s
+  FROM (SELECT t, value FROM labels WHERE session_id = ls.session_id AND type = %(sickness)s
         ORDER BY t DESC LIMIT 5) l) rt ON true
-WHERE pw.pub_from IS NOT NULL
-  AND NOT ST_DWithin(ST_SetSRID(ST_MakePoint(pw.lon, pw.lat), 4326)::geography, pw.start_geom, %(trim_m)s)
-ORDER BY pw.device_id
+WHERE ls.received_at > %(since)s AND ls.lat IS NOT NULL AND ls.lon IS NOT NULL
+ORDER BY ls.device_id
 """
 
 
 def live(conn: Connection, now: dt.datetime) -> dict:
-    """Devices heard from in the last minute, with the last ~2 min of their public track.
-
-    Privacy: a device is left out once its trip has ended (its position is then its endpoint), until
-    its track has left the start zone, and whenever it is back inside the start zone.
-    """
+    """Devices heard from in the last minute, with the last ~2 min of their track, including a trip
+    that has just ended (D40: no start/end privacy rule)."""
     rows = _rows(conn, LIVE_SQL, _params(since=now - dt.timedelta(seconds=LIVE_WINDOW_S), track_s=LIVE_TRACK_S))
     devices = []
     for r in rows:
@@ -733,20 +651,12 @@ def segments(conn: Connection, vehicle: str | None) -> dict:
         {"type": "Feature", "geometry": json.loads(r["boundary"]), "properties": _aggregate(r)} for r in rows]}
 
 
-# A pass is public if the finalize job didn't flag it AND it passes the read API's own rule: inside the
-# public part of its trip, and its cell centre outside both radii (the same windows as the tracks).
-OBSERVATIONS_SQL = f"""
-WITH {_privacy_cte("SELECT s.session_id, s.vehicle_type, s.include_in_agg, " + ENDED_SQL + " AS ended"
-                   " FROM sessions s WHERE s.session_id IN"
-                   " (SELECT session_id FROM segment_observations WHERE h3 = %(h3)s)")}
-SELECT o.session_id, pw.vehicle_type, o.t_start, o.mean_speed_ms, o.roughness_rms, o.aw_rms,
-       o.pothole_count, pw.include_in_agg
-FROM segment_observations o JOIN pw USING (session_id) JOIN segments g ON g.h3 = o.h3
-WHERE o.h3 = %(h3)s AND NOT o.in_privacy_zone
-  AND o.t_start >= pw.pub_from
-  AND (NOT pw.ended OR o.t_start + make_interval(secs => o.duration_s) <= pw.pub_to)
-  AND NOT ST_DWithin(g.center, pw.start_geom, %(trim_m)s)
-  AND (NOT pw.ended OR NOT ST_DWithin(g.center, pw.end_geom, %(trim_m)s))
+# Every pass is returned, including ones finalized before D40 with the old `in_privacy_zone` flag.
+OBSERVATIONS_SQL = """
+SELECT o.session_id, s.vehicle_type, o.t_start, o.mean_speed_ms, o.roughness_rms, o.aw_rms,
+       o.pothole_count, s.include_in_agg
+FROM segment_observations o JOIN sessions s USING (session_id)
+WHERE o.h3 = %(h3)s
 ORDER BY o.t_start
 """
 

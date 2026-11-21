@@ -93,15 +93,6 @@ def test_passes_follow_the_cells_and_carry_roughness_dose_and_potholes():
     assert all(p.mean_speed_ms == 10.0 for p in passes)
 
 
-def test_privacy_zone_marks_the_first_and_last_200_m():
-    series = _series(600)  # 120 s
-    fixes = [(T0 + s, 46.0 + 0.00009 * s, 23.0) for s in range(0, 121)]  # ≈ 10 m/s, 1.2 km
-    passes = fz.build_passes(series, fixes, [], cell_of=_band_cell)
-    private = [p.in_privacy_zone for p in passes]
-    assert private[0] and private[-1] and not all(private)
-    assert 0.25 < sum(private) / len(private) < 0.45  # ≈ 400 m of 1.2 km
-
-
 def test_no_position_without_nearby_fixes():
     series = _series(100)
     fixes = [(T0, 46.0, 23.0), (T0 + 1, 46.0001, 23.0), (T0 + 19, 46.0019, 23.0), (T0 + 20, 46.002, 23.0)]
@@ -254,12 +245,11 @@ def test_finalize_reproduces_a_clean_live_trip_and_aggregates_it(db, batch, sess
     assert (status, incomplete, quality, include, reasons) == ("complete", False, "ok", True, [])
     assert msdv == pytest.approx(live_msdv, rel=1e-9) and valid > 0.9 and finalized
 
-    n_obs, n_private = _one(db, "SELECT count(*), count(*) FILTER (WHERE in_privacy_zone) FROM segment_observations")
-    assert n_obs > 10 and 0 < n_private < n_obs
+    assert _one(db, "SELECT count(*) FROM segment_observations")[0] > 10
     method, n_sessions = _one(db, "SELECT method, n_sessions FROM aggregation_fit")
     assert (method, n_sessions) == ("percentile", 1)  # one trip can't fit the model
     assert _one(db, "SELECT count(*) FROM segment_agg WHERE vehicle_type = 'all'")[0] == \
-        _one(db, "SELECT count(DISTINCT h3) FROM segment_observations WHERE NOT in_privacy_zone")[0]
+        _one(db, "SELECT count(DISTINCT h3) FROM segment_observations")[0]
     assert _one(db, "SELECT count(*) FROM segment_agg WHERE vehicle_type = 'bus'")[0] > 0
     assert _one(db, "SELECT bool_and(ST_NPoints(boundary::geometry) = 7) FROM segments")[0]
 

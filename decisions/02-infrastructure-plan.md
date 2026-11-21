@@ -425,7 +425,7 @@ Raw values are always stored as measured; normalization happens only in the aggr
 | Permissions | One managed identity per service, least privilege; key-based access off on Storage, Event Hubs and Service Bus |
 | CI/CD credentials | GitHub OIDC with federated credentials; no stored Azure secrets; deploy identity usable only from the protected `prod` environment |
 | Secrets in the repo | None; gitleaks scans every push |
-| Privacy | Raw audio never uploaded live; audio off on public transport; GPS trimmed near trip start and end on the public dashboard |
+| Privacy | Raw audio never uploaded live; audio off on public transport; GPS shown whole, start and end included (D40: the start/end trim hid every short test drive and isn't wanted; everyone recording accepts that their routes are visible to anyone with the dashboard link) |
 
 ---
 

@@ -10,8 +10,6 @@ import { getWorld, ROUTE_STEP_M, STOPS, type Route, type RouteSample } from "./w
 /** The read API's session_series is about 5 Hz (plan 02 §8). */
 export const SERIES_HZ = 5;
 const DT_S = 1 / SERIES_HZ;
-/** Metres trimmed at both ends of a trip on the public dashboard (plan 02 §11). */
-export const PRIVACY_TRIM_M = 200;
 /** Potholes are only counted above 15 km/h (plan 02 §9). */
 export const POTHOLE_MIN_SPEED_MS = 15 / MS_TO_KMH;
 /** Detections are matched to manual taps within ±1.5 s (plan 02 §9). */
@@ -72,7 +70,6 @@ export interface SimulatedObservation {
   roughnessRms: number | null;
   awRms: number;
   potholeCount: number;
-  inPrivacyZone: boolean;
 }
 
 interface Tap {
@@ -419,7 +416,6 @@ function buildObservations(
       }
     }
     const count = end - start;
-    const sMid = sim.s[Math.floor((start + end) / 2)];
     observations.push({
       cell,
       passIndex: observations.length,
@@ -431,7 +427,6 @@ function buildObservations(
       roughnessRms: moving >= 3 ? Math.sqrt(roughSum / moving) * Math.exp(random.gaussian() * noise) : null,
       awRms: Math.sqrt(awSum / count) * Math.exp(random.gaussian() * noise),
       potholeCount: potholes,
-      inPrivacyZone: sMid < PRIVACY_TRIM_M || sMid > sim.totalDistanceM - PRIVACY_TRIM_M,
     });
     start = end;
   };

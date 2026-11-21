@@ -355,12 +355,76 @@ def test_no_speed_bump_when_fast_or_from_one_pitch_peak():
     assert _feed_bumps(t, ua, grav, fixes, rr)[0].events == []
 
 
+def _pitch_only(t, pitch_up):
+    """Rotation rate for a nose-up pitch rate pitch_up(rel t)."""
+    rel = t - T0
+    return np.column_stack([0 * rel, -pitch_up(rel), 0 * rel]) @ _phone_frame().T
+
+
+@pytest.mark.parametrize("at", np.round(np.arange(5.0, 6.0, 0.05), 2))
+def test_speed_bump_found_whenever_a_fix_lands_in_its_front_peak(at):
+    # Fixes at s + 0.3: for some bump times one is taken between the front peak's extreme and its
+    # end, and the speed was then looked up too late (None), dropping the front axle.
+    t, ua, grav, fixes, rr = synth_bumps(12, [at])
+    out, p = _feed_bumps(t, ua, grav, fixes, rr)
+    assert [e.type for e in out.events + p.flush()] == ["speed_bump"]
+
+
+def test_pothole_just_before_a_slow_speed_bump_is_not_released_early():
+    """A bus (5 m wheelbase) braking into a bump: the jolt 0.45 s before the front axle is taken at
+    the old fix's 4.3 m/s, the bump at 2.5 m/s, so its rear axle comes 2 s later. The bump covers the
+    jolt, but a fixed 2.5 s hold had already reported it as a pothole."""
+    front, wheelbase, v = 6.0, 5.0, 2.5
+    rear = front + wheelbase / v
+    jolts = lambda rel: (_pulse(front - 0.45, 15.0, 0.01)(rel) + _pulse(front, 15.0, 0.01)(rel)  # noqa: E731
+                         + _pulse(rear, 15.0, 0.01)(rel))
+    t, ua, grav, _ = synth(12, vert=jolts)
+    fixes = [(T0 + s + 0.3, 4.3) for s in range(5)] + [(T0 + s + 0.9, v) for s in range(5, 11)]
+    rr = _pitch_only(t, lambda rel: _pulse(front, 0.4)(rel) - _pulse(rear, 0.4)(rel))
+    out, p = _feed_bumps(t, ua, grav, fixes, rr)
+    assert [(e.type, round(e.t - T0, 1)) for e in out.events + p.flush()] == [("speed_bump", front)]
+
+
+@pytest.mark.parametrize("speed", [6.0, 8.0, 10.0])
+@pytest.mark.parametrize("hz,zeta", [(1.0, 0.3), (1.3, 0.3), (1.5, 0.2), (1.5, 0.4)])
+def test_a_single_impact_ringing_in_pitch_is_a_pothole_not_a_speed_bump(speed, hz, zeta):
+    # One jolt that sets the body pitching: its rebound has the sign and timing of a rear axle, but no
+    # rear-axle jolt of its own.
+    wd = 2 * np.pi * hz * np.sqrt(1 - zeta ** 2)
+
+    def ring(rel):
+        tt = np.clip(rel - 5.0, 0, None)
+        return np.where(rel >= 5.0, 0.4 * np.exp(-zeta * 2 * np.pi * hz * tt) * np.sin(wd * tt), 0.0)
+
+    t, ua, grav, fixes = synth(12, vert=_pulse(5.0, 12.0, 0.01), speed=lambda t: 0 * t + speed)
+    out, p = _feed_bumps(t, ua, grav, fixes, _pitch_only(t, ring))
+    assert [e.type for e in out.events + p.flush()] == ["pothole"]
+
+
+def test_a_trip_saved_mid_bump_by_the_previous_version_continues():
+    """Front peaks saved without their speed, front axles without their jolt, no recent-jolt list."""
+    t, ua, grav, fixes, rr = synth_bumps(12, [5.0])
+    whole, p = _feed_bumps(t, ua, grav, fixes, rr)
+    cut = int(np.searchsorted(t, T0 + 5.5))  # between the two axles: the front one is pending
+    first, q = _feed_bumps(t[:cut], ua[:cut], grav[:cut], [f for f in fixes if f[0] < t[cut]], rr[:cut])
+    old = json.loads(json.dumps(q.to_state()))
+    bump = old["grid"]["bump"]
+    assert bump["p1"] is not None
+    bump["p1"] = bump["p1"][:4]
+    bump.pop("recent")
+    if bump["peak"] is not None:
+        bump["peak"] = bump["peak"][:5]
+    q = dsp.Pipeline(old)
+    rest = q.feed(t[cut:], ua[cut:], grav[cut:], [f for f in fixes if f[0] >= t[cut]], rr=rr[cut:])
+    assert [e.type for e in first.events + rest.events + q.flush()] == ["speed_bump"]
+
+
 def test_potholes_are_held_back_and_flushed_at_the_end():
-    t, ua, grav, fixes = synth(10, vert=_spike(8.5), speed=lambda t: 0 * t + 10.0)
+    t, ua, grav, fixes = synth(10, vert=_spike(9.6), speed=lambda t: 0 * t + 10.0)
     out, p = run_whole(t, ua, grav, fixes)
-    assert out.events == []  # still within POTHOLE_HOLD_S of the end
+    assert out.events == []  # a front peak could still start within BUMP_SPAN_PAD_S of it
     (ev,) = p.flush()
-    assert ev.type == "pothole" and abs(ev.t - (T0 + 8.5)) < 0.05
+    assert ev.type == "pothole" and abs(ev.t - (T0 + 9.6)) < 0.05
     assert p.flush() == [] and p.to_state()["held"] == []
 
 

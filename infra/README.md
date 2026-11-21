@@ -1,6 +1,6 @@
 # infra: Terraform for the Azure stack
 
-Implements [decisions/02-infrastructure-plan.md](../decisions/02-infrastructure-plan.md) §12. Everything runs on Windows PowerShell through [`tf.ps1`](tf.ps1), which reads settings from `infra/.env`.
+Implements [decisions/02-infrastructure-plan.md](../decisions/02-infrastructure-plan.md) §12. Everything runs through [`tf.ps1`](tf.ps1), a PowerShell script that reads settings from `infra/.env`. It works in Windows PowerShell 5.1 and in PowerShell 7 (`pwsh`) on macOS and Linux; the commands below are the same in both, with `./` or `.\` in front.
 
 ```
 bootstrap/   run once by hand: stack resource group, Terraform state storage, GitHub OIDC identities, provider registration
@@ -11,15 +11,17 @@ scripts/     add-device-key.ps1 (device key hashes into Key Vault)
 
 ## First run
 
-1. Install the tools: `winget install Hashicorp.Terraform` and `winget install Microsoft.AzureCLI`, then open a new terminal.
+1. Install the tools, then open a new terminal:
+   - macOS: `brew tap hashicorp/tap && brew install hashicorp/tap/terraform azure-cli && brew install --cask powershell`, then start PowerShell with `pwsh`.
+   - Windows: `winget install Hashicorp.Terraform` and `winget install Microsoft.AzureCLI`.
 2. `az login`, then `az account set --subscription <id>` if you have more than one.
-3. `Copy-Item infra/.env.example infra/.env` and fill in the first block (the comments say which `az` command prints each value).
-4. `cd infra; .\tf.ps1 bootstrap`. It writes the state settings into `.env` and prints the GitHub repo variables for CI.
-5. `.\tf.ps1 plan`, then `.\tf.ps1 apply` (about 15 minutes; PostgreSQL is the slow part).
-6. `.\scripts\add-device-key.ps1 -DeviceId <phone-name>` for each phone and for the replay tool, then restart the function app.
-7. `.\tf.ps1 output` prints `ingest_base_url` (`https://<function host>`, no path: paste it into the iPhone app's upload settings and into `REPLAY_API_URL`; both add `/api/ingest` themselves) and `read_api_url`. `ingest_batch_url` is the full `POST` endpoint, for manual checks.
+3. `cp infra/.env.example infra/.env` (Windows: `Copy-Item infra/.env.example infra/.env`) and fill in the first block (the comments say which `az` command prints each value).
+4. In `pwsh` (or Windows PowerShell): `cd infra; ./tf.ps1 bootstrap`. It writes the state settings into `.env` and prints the GitHub repo variables for CI.
+5. `./tf.ps1 plan`, then `./tf.ps1 apply` (about 15 minutes; PostgreSQL is the slow part). The apply ends by removing a storage setting the provider writes by mistake ([Function host storage](#function-host-storage-provider-bug-read-before-applying)).
+6. `./scripts/add-device-key.ps1 -DeviceId <phone-name>` for each phone and for the replay tool, then restart the function app so it reloads the keys: `az functionapp restart -g rg-roadride -n <ingest function>`.
+7. `./tf.ps1 output` prints `ingest_base_url` (`https://<function host>`, no path: paste it into the iPhone app's upload settings and into `REPLAY_API_URL`; both add `/api/ingest` themselves) and `read_api_url`. `ingest_batch_url` is the full `POST` endpoint, for manual checks.
 
-After the hackathon: `.\tf.ps1 destroy` (the bootstrap resource groups are deleted by hand).
+After the hackathon: `./tf.ps1 destroy` (the bootstrap resource groups are deleted by hand).
 
 ## What runs on it now
 

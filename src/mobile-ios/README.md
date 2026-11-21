@@ -44,7 +44,7 @@ Sessions → **New session** → setup (pre-filled with your last values, plus a
 | `altimeter.csv`, `abs_altitude.csv` | CMAltimeter relative (kPa, m) and absolute altitude |
 | `activity.csv` | CMMotionActivity (+ `start_utc_ms`) |
 | `audio_000.m4a`, `audio_001.m4a`, … | AAC 48 kHz mono 64 kbps, in 5-minute segments |
-| `audio_segments.csv` | `t_up,t_utc_ms,event,file`: start/stop/interrupted per segment |
+| `audio_segments.csv` | `t_up,t_utc_ms,event,file`: start/stop/interrupted/reset per segment; `blocked_background` (empty `file`) when iOS refuses to restart the mic while the app is in the background — the gap lasts until the next `start` |
 | `audio_level.csv` | RMS and peak dBFS at 10 Hz |
 | `device.csv` | battery, thermal, Low Power Mode, free disk, network, every 5 s |
 | `labels.csv` | `t_up,t_utc_ms,type,value,note` (all human labels and sickness ratings) |
@@ -70,6 +70,10 @@ Label `type` values: `pothole`, `speed_bump`, `phone_moved`, `surface_start/surf
   drive's audio. Segments overlap at rotation (no gap), and each start time is logged, so
   segment *n* starts at the *n*-th `audio_start` row in `clock.csv`. After an interruption
   (phone call, Siri) a *new* segment starts, so every file maps linearly onto `t_up`.
+  If that interruption happens while the screen is locked, iOS may refuse to start the mic again
+  until the app is opened (`cannotStartRecording`): the app writes a `blocked_background` row and a
+  PROBLEM line, retries every 60 s, and restarts at once when the app comes to the foreground.
+  **After a call during a drive, unlock the phone and open the app.**
 - **Audio session `.playAndRecord` + mode `.measurement` + `.mixWithOthers`** (spec: `.record`).
   - Measurement mode still disables AGC and voice processing.
   - playAndRecord plus `allowHapticsAndSystemSoundsDuringRecording` is needed so the prompt and

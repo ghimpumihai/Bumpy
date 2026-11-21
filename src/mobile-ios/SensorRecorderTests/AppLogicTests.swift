@@ -232,3 +232,25 @@ final class ExportStateTests: XCTestCase {
         FolderZipper.removeExport(zip) // already gone: no throw, no crash
     }
 }
+
+final class AudioRecoveryPolicyTests: XCTestCase {
+    private func decide(now: Double, rec: Bool = false, blocked: Bool = false, last: Double = 0,
+                        seg: Double = 0, lastRotate: Double = -.infinity) -> AudioSegmentPolicy.Action {
+        AudioSegmentPolicy.decide(now: now, isRecording: rec, segmentStartedUp: seg, wantRecording: true,
+                                  interrupted: false, interruptedAtUp: 0, lastRestartAttemptUp: last,
+                                  backgroundBlocked: blocked, lastRotateAttemptUp: lastRotate)
+    }
+
+    func testBlockedInBackgroundStopsHammering() {
+        XCTAssertEqual(decide(now: 106, last: 100), .restart, "normal cadence: every 5 s")
+        XCTAssertEqual(decide(now: 106, blocked: true, last: 100), .none, "refused in background: slow down")
+        XCTAssertEqual(decide(now: 159, blocked: true, last: 100), .none)
+        XCTAssertEqual(decide(now: 161, blocked: true, last: 100), .restart)
+    }
+
+    func testFailedRotationIsRetriedLaterNotEveryTick() {
+        XCTAssertEqual(decide(now: 300, rec: true), .rotate)
+        XCTAssertEqual(decide(now: 300.1, rec: true, lastRotate: 300), .none, "keeps the running segment")
+        XCTAssertEqual(decide(now: 310, rec: true, lastRotate: 300), .rotate)
+    }
+}

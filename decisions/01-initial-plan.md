@@ -209,7 +209,7 @@ Documents/sessions/2026-11-21T09-12-03Z_<shortId>/
 ├── altimeter.csv         # B1 (+B2 columns or abs_altitude.csv)
 ├── activity.csv          # A1
 ├── audio_000.m4a, …      # S2, 5-minute segments (crash-safe; see the app README)
-├── audio_segments.csv    # start/stop/interrupted per audio file
+├── audio_segments.csv    # start/stop/interrupted/reset per audio file; blocked_background = gap until the app is opened
 ├── abs_altitude.csv      # B2
 ├── audio_level.csv       # S1
 ├── device.csv            # D1–D5

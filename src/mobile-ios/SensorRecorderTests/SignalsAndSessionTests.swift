@@ -173,7 +173,6 @@ final class RecordingSessionIntegrationTests: XCTestCase {
             session.toggleSurface(.gravel)      // ends cobblestones, starts gravel
             session.toggleSegment(.winding)
             session.addLabel(.note, value: nil, note: "bump, then \"silence\"")
-            session.addLabel(.sickness, value: "3", note: "prompt")
             started.fulfill()
         }
         wait(for: [started], timeout: ciTimeout)
@@ -259,11 +258,10 @@ final class RecordingSessionIntegrationTests: XCTestCase {
             String(line.split(separator: ",", omittingEmptySubsequences: false)[2])
         }
         XCTAssertEqual(types, ["sync_tap", "surface_start", "surface_end", "surface_start", "segment_start", "note",
-                               "sickness", "surface_end", "segment_end"])
+                               "surface_end", "segment_end"])
         XCTAssertTrue(labelsText.contains(",note,,\"bump, then \"\"silence\"\"\"\n"))
         XCTAssertTrue(labelsText.contains(",surface_end,gravel,auto at stop\n"))
-        XCTAssertEqual(stats.labelsCount, 9)
-        XCTAssertEqual(stats.sicknessRatings, 1)
+        XCTAssertEqual(stats.labelsCount, 8)
 
         // Upload queue, in send order: Start metadata, batches 0..n-1, Stop metadata with batchCount = n (§6.1)
         let all = uploadQueue.pendingFiles()

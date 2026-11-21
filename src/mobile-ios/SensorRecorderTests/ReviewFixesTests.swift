@@ -351,22 +351,20 @@ final class MapDecimationTests: XCTestCase {
     }
 }
 
-// MARK: - RecordingController: alerts + sickness prompt flows
+// MARK: - RecordingController: alerts
 
 @MainActor
 final class FakeAlerter: Alerter {
-    var problems = 0, prompts = 0, labels = 0, stops = 0
+    var problems = 0, labels = 0, stops = 0
     func prepare() {}
     func labelConfirmed() { labels += 1 }
-    func sicknessPrompt() { prompts += 1 }
     func newProblem() { problems += 1 }
     func stopped() { stops += 1 }
 }
 
 @MainActor
 final class RecordingControllerTests: XCTestCase {
-    private func makeController(device: FakeDeviceStatus = FakeDeviceStatus(), audio: FakeAudio = FakeAudio(),
-                                interval: TimeInterval = 120, timeout: TimeInterval = 30) throws -> (RecordingController, FakeAlerter) {
+    private func makeController(device: FakeDeviceStatus = FakeDeviceStatus(), audio: FakeAudio = FakeAudio()) throws -> (RecordingController, FakeAlerter) {
         let deps = RecordingSession.Dependencies(
             motion: SyntheticMotionSource(), location: FakeLocationSource(), altimeter: FakeAltimeter(),
             activity: FakeActivity(), audio: audio, deviceStatus: device, uploadQueue: nil, deviceId: "D",
@@ -374,7 +372,7 @@ final class RecordingControllerTests: XCTestCase {
         let session = try RecordingSession(store: SessionStore(root: try makeTempDir()), setup: SessionSetup(),
                                            preflight: nil, deps: deps)
         let alerter = FakeAlerter()
-        let c = RecordingController(session: session, sicknessInterval: interval, sicknessTimeout: timeout, alerter: alerter)
+        let c = RecordingController(session: session, alerter: alerter)
         return (c, alerter)
     }
 
@@ -401,47 +399,6 @@ final class RecordingControllerTests: XCTestCase {
         device.status.lowPowerMode = false
         c.refresh()
         XCTAssertFalse(c.issues.contains { $0.key == "lowpower" })
-    }
-
-    /// Spins the main run loop (the controller's 8 Hz timer keeps firing) until `cond` holds.
-    private func waitUntil(_ timeout: TimeInterval, _ cond: () -> Bool) -> Bool {
-        let end = Date().addingTimeInterval(timeout)
-        while Date() < end {
-            if cond() { return true }
-            RunLoop.main.run(until: Date().addingTimeInterval(0.02))
-        }
-        return cond()
-    }
-
-    func testPromptTimesOutAsMissedSkipIsMissedAndStopDuringPromptIsMissed() throws {
-        let (c, alerter) = try makeController(interval: 0.3, timeout: 0.3)
-        c.start()
-        XCTAssertTrue(waitUntil(ciTimeout) { c.sicknessPromptActive })
-        XCTAssertGreaterThanOrEqual(alerter.prompts, 1)
-        XCTAssertTrue(waitUntil(ciTimeout) { c.session.labels.sicknessMissed >= 1 }, "unanswered prompt → sickness_missed")
-        XCTAssertTrue(waitUntil(ciTimeout) { c.sicknessPromptActive })
-        let before = c.session.labels.sicknessMissed
-        c.skipSicknessPrompt() // no run-loop turn in between: deterministic
-        XCTAssertEqual(c.session.labels.sicknessMissed, before + 1)
-        XCTAssertFalse(c.sicknessPromptActive)
-        XCTAssertEqual(c.session.labels.sicknessRatings, 0, "skip never fakes a rating")
-        XCTAssertTrue(waitUntil(ciTimeout) { c.sicknessPromptActive })
-        c.stop()
-        let labels = try String(contentsOf: c.session.folder.appendingPathComponent("labels.csv"), encoding: .utf8)
-        XCTAssertTrue(labels.contains("sickness_missed,,skipped"))
-        XCTAssertTrue(labels.contains("sickness_missed,,recording stopped"))
-        XCTAssertEqual(alerter.stops, 1)
-    }
-
-    func testRatingClosesPromptAndIsLoggedAsPrompted() throws {
-        let (c, _) = try makeController(interval: 0.2, timeout: 5)
-        c.start()
-        defer { c.stop() }
-        XCTAssertTrue(waitUntil(ciTimeout) { c.sicknessPromptActive })
-        c.rateSickness(4)
-        XCTAssertFalse(c.sicknessPromptActive)
-        XCTAssertEqual(c.session.labels.sicknessRatings, 1)
-        XCTAssertEqual(c.snapshot.lastSickness, 4)
     }
 
     func testAudioOffSessionHasNoAudioProblemAndIsRecordedAsOff() throws {
@@ -522,6 +479,7 @@ final class ContractFixtureTests: XCTestCase {
         m.endedAtUtc = "2026-11-21T10:00:00.000Z"
         m.audioEnabled = false
         m.vehicle.type = "bus"; m.vehicle.line = "24B"
+        // sicknessRatings: 1 matches the committed (pre-D47) fixture; the app now always writes 0.
         m.stats = .init(durationSec: 2808.488, streams: [:], labelsCount: 3, sicknessRatings: 1, sicknessMissed: 0,
                         audioFiles: [], fileSizes: [:], totalBytes: 1, writeErrors: 0, uploadBatchesCreated: 3)
         let body = try RecordingSession.sessionMetadataBody(m, batchCount: 3)

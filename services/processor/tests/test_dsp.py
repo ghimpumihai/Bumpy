@@ -21,7 +21,7 @@ def _phone_frame():
     return rx @ rz
 
 
-def synth(seconds, *, vert=lambda t: 0 * t, speed=lambda t: 0 * t + 12.0, lon=None, seed=1,
+def synth(seconds, *, vert=lambda t: 0 * t, speed=lambda t: 0 * t + 12.0, lon=None, lat=None, seed=1,
           jitter=True, rate=FS):
     """deviceMotion-like samples (epoch s, ua g, gravity g) and 1 Hz fixes, for a vehicle signal.
     ua has CoreMotion's sign: minus the phone's acceleration (dsp.UA_SIGN)."""
@@ -36,6 +36,8 @@ def synth(seconds, *, vert=lambda t: 0 * t, speed=lambda t: 0 * t + 12.0, lon=No
     a_vehicle[:, 2] = vert(t)
     if lon is not None:
         a_vehicle[:, 0] = lon(t)
+    if lat is not None:
+        a_vehicle[:, 1] = lat(t)
     ua = dsp.UA_SIGN * (a_vehicle @ r.T) / dsp.G
     grav = np.tile(np.array([0, 0, -1.0]) @ r.T, (n, 1))
     fixes = [(T0 + s + 0.3, float(speed(np.array(s + 0.3)))) for s in range(int(seconds))]
@@ -81,6 +83,116 @@ def test_wf_peaks_near_017_hz_and_rejects_road_frequencies():
 
 
 # --- Physical sanity ----------------------------------------------------------------------
+
+# --- Lateral sway (D49) ---------------------------------------------------------------------
+
+def test_wy_digital_matches_analog_in_the_sway_band():
+    f = np.geomspace(0.0315, 0.8, 25)
+    analog, digital = dsp.wy_analog_gain(f), dsp.wy_digital_gain(f)
+    assert np.max(np.abs(digital / analog - 1)) < 0.015
+
+
+def test_wy_is_flat_to_025_hz_then_falls_12_db_per_octave():
+    g = dsp.wy_analog_gain(np.array([0.06, 0.1, 0.16, 1.0, 2.0]))
+    assert np.all(np.abs(20 * np.log10(g[:3])) < 1.0)  # ≈ unit gain in the flat band, like Wf at its peak
+    assert 20 * np.log10(g[4] / g[3]) == pytest.approx(-12.0, abs=0.3)
+
+
+def _sine(amp, f0):
+    return lambda t: amp * np.sin(2 * np.pi * f0 * t)
+
+
+def _run_known(t, ua, grav, fixes):
+    p = dsp.Pipeline(_forward_known_state())
+    return p.feed(t, ua, grav, fixes), p
+
+
+def test_lateral_msdv_of_a_sine_matches_the_weighting():
+    amp, f0, secs = 1.0, 0.2, 600
+    t, ua, grav, fixes = synth(secs, lat=_sine(amp, f0), jitter=False)
+    out, _ = _run_known(t, ua, grav, fixes)
+    expected = dsp.LATERAL_K * dsp.wy_analog_gain(np.array([f0]))[0] * amp / math.sqrt(2) * math.sqrt(secs)
+    assert out.msdv_y == pytest.approx(expected, rel=0.05)
+    assert out.msdv_z < 0.01 * out.msdv_y  # sideways sway doesn't leak into the vertical dose
+    assert out.msdv == pytest.approx(out.msdv_y, rel=1e-3)
+
+
+def test_vertical_and_fore_aft_motion_are_not_lateral():
+    t, ua, grav, fixes = synth(300, vert=_sine(1.0, 0.16), lon=_sine(1.0, 0.2), jitter=False)
+    out, _ = _run_known(t, ua, grav, fixes)
+    assert out.msdv_y < 0.01 * out.msdv_z
+
+
+def test_vertical_and_lateral_doses_add():
+    """The combined dose is the energy sum of the two axes, sample by sample: MSDV² = MSDV_z² + MSDV_y²,
+    and the per-window doses add up to it, so segment passes and the aggregate use the same number."""
+    t, ua, grav, fixes = synth(600, vert=_sine(0.8, 0.16), lat=_sine(1.2, 0.22), jitter=False)
+    out, p = _run_known(t, ua, grav, fixes)
+    assert out.msdv_z > 1 and out.msdv_y > 1
+    assert out.msdv ** 2 == pytest.approx(out.msdv_z ** 2 + out.msdv_y ** 2, rel=1e-9)
+    assert sum(pt.dose_inc for pt in out.series) == pytest.approx(out.msdv ** 2, rel=0.01)
+    # Each axis alone gives its own part of the combined number.
+    vz, _ = _run_known(*synth(600, vert=_sine(0.8, 0.16), jitter=False))
+    vy, _ = _run_known(*synth(600, lat=_sine(1.2, 0.22), jitter=False))
+    assert out.msdv_z == pytest.approx(vz.msdv, rel=1e-3)
+    assert out.msdv_y == pytest.approx(vy.msdv, rel=1e-3)
+
+
+def test_no_lateral_dose_before_the_forward_axis_is_known():
+    t, ua, grav, fixes = synth(120, lat=_sine(1.0, 0.2))
+    out, p = run_whole(t, ua, grav, fixes)
+    assert not p.forward_known and out.msdv_y == 0.0 and out.msdv == pytest.approx(out.msdv_z)
+
+
+def test_lateral_chunked_feed_equals_one_pass():
+    t, ua, grav, fixes = synth(300, vert=_sine(0.5, 0.16), lat=_sine(1.0, 0.2))
+    whole, _ = _run_known(t, ua, grav, fixes)
+    rng = np.random.default_rng(11)
+    state, series, start, out = _forward_known_state(), [], t[0], None
+    while start <= t[-1]:
+        end = start + rng.uniform(1.0, 3.0)
+        m = (t >= start) & (t < end)
+        p = dsp.Pipeline(json.loads(json.dumps(state)))
+        out = p.feed(t[m], ua[m], grav[m], [x for x in fixes if start <= x[0] < end])
+        series += out.series
+        state, start = p.to_state(), end
+    assert len(series) == len(whole.series)
+    for a, b in zip(series, whole.series):
+        assert a.msdv == pytest.approx(b.msdv, rel=1e-6, abs=1e-9)
+        assert a.dose_inc == pytest.approx(b.dose_inc, rel=1e-6, abs=1e-12)
+    assert out.msdv_y == pytest.approx(whole.msdv_y, rel=1e-6) and whole.msdv_y > 1
+    assert out.msdv_z == pytest.approx(whole.msdv_z, rel=1e-6)
+
+
+def test_a_remount_pauses_the_lateral_dose_and_keeps_what_was_counted():
+    """After a phone_moved tap the forward axis is relearned: until then no sideways dose is added
+    (the old axis no longer says where "sideways" is), and none of the dose so far is lost."""
+    t, ua, grav, fixes = synth(60, lat=_sine(1.0, 0.2))
+    tap = T0 + 30.0
+    p = dsp.Pipeline(_forward_known_state())
+    before = p.feed(t[t < tap], ua[t < tap], grav[t < tap], [f for f in fixes if f[0] < tap], moved=[tap - 0.5])
+    assert not p.forward_known and before.msdv_y > 1
+    dose_y = p.dose_y
+    after = p.feed(t[t >= tap], ua[t >= tap], grav[t >= tap], [f for f in fixes if f[0] >= tap])
+    assert not p.forward_known and p.dose_y == dose_y  # constant speed: nothing to relearn it from
+    assert after.msdv == pytest.approx(math.hypot(after.msdv_z, after.msdv_y), rel=1e-9)
+
+
+def test_a_trip_saved_before_the_lateral_dose_continues():
+    t, ua, grav, fixes = synth(60, vert=_sine(1.0, 0.16), lat=_sine(1.0, 0.2))
+    half = len(t) // 2
+    p = dsp.Pipeline(_forward_known_state())
+    p.feed(t[:half], ua[:half], grav[:half], [f for f in fixes if f[0] < t[half]])
+    old = json.loads(json.dumps(p.to_state()))
+    old["dose"] = old.pop("dose_z")  # the previous version's dose was vertical only
+    old.pop("dose_y")
+    old["grid"].pop("zi_wy")
+    q = dsp.Pipeline(old)
+    assert q.dose_z == q.dose and q.dose_y == 0.0
+    out = q.feed(t[half:], ua[half:], grav[half:], [f for f in fixes if f[0] >= t[half]])
+    assert not out.reset and out.msdv_y > 0 and out.msdv_z > p.dose_z ** 0.5
+    assert out.msdv ** 2 == pytest.approx(out.msdv_z ** 2 + out.msdv_y ** 2, rel=1e-9)
+
 
 def test_vertical_sign_screen_up():
     p = dsp.Pipeline()

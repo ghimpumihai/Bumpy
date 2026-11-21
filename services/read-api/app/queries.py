@@ -6,7 +6,7 @@ defaults and rules follow the dashboard's types (src/types/) and its mock backen
 the working spec.
 
 Every list route runs a fixed number of queries, whatever the number of sessions: the per-session
-numbers (distance, GPS accuracy, ratings, public event counts, stream rates) are computed for all
+numbers (distance, GPS accuracy, public event counts, stream rates) are computed for all
 sessions at once with GROUP BY / LATERAL joins. Positions are returned untrimmed (D40); only fixes
 less accurate than MAX_HACC_M are left out.
 """
@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import datetime as dt
 import json
+import math
 from typing import TYPE_CHECKING
 
 from .fmt import epoch_ms, iso, rnd
@@ -35,7 +36,9 @@ EVENT_TYPES = ("pothole", "speed_bump", "rail_joint")
 
 MOUNT_DEFAULTS = {"location": "", "phoneOrientation": "", "rigid": False, "handheld": False}
 PEOPLE_DEFAULTS = {"operatorSeat": "", "raterSeat": "", "raterPosture": "seated", "passengerCount": 0}
-SICKNESS_LABEL = "sickness"
+# D47: no MISC ratings. Older app builds may still send `sickness` labels; they are stored with the other
+# labels but never returned.
+RATING_LABEL = "sickness"
 
 # ingest_batches.sample_counts key → (dashboard stream name, expected rate in Hz, as in the mock).
 STREAMS = {
@@ -66,8 +69,7 @@ def enum_param(value: str | None, name: str, allowed: tuple[str, ...]) -> str | 
 
 def _params(**extra) -> dict:
     """Named parameters shared by the fragments below, plus the query's own."""
-    return {"max_hacc": MAX_HACC_M, "silence_s": TRIP_SILENCE_CLOSE_S,
-            "sickness": SICKNESS_LABEL, **extra}
+    return {"max_hacc": MAX_HACC_M, "silence_s": TRIP_SILENCE_CLOSE_S, **extra}
 
 
 # A trip has ended when any sign says so, even if its status is still 'live': status not 'live', an
@@ -92,22 +94,17 @@ SESSION_FILTERS = {
 
 
 def _summary_sql(where: str) -> str:
-    """The sessions' own columns plus everything cheap: ratings, public event counts, last sample time."""
+    """The sessions' own columns plus everything cheap: public event counts, last sample time."""
     return f"""
 WITH s AS MATERIALIZED (
   SELECT s.session_id, s.source, s.replay_of, s.device_id, s.status, s.incomplete, s.quality_status,
          s.include_in_agg, s.exclusion_reasons, s.context_known, s.vehicle_type, s.vehicle_make_model,
          s.vehicle_line, s.mount, s.people, s.synthetic_sensors,
          COALESCE(s.started_at, s.created_at) AS started_at, s.ended_at,
-         s.late_batches, s.duplicate_batches, s.msdv_z, s.updated_at AS version_at,
+         s.late_batches, s.duplicate_batches, s.msdv_z, s.msdv_y, s.updated_at AS version_at,
          s.valid_fraction, s.quality AS stored_quality, s.finalized_at, s.distance_m AS stored_distance_m,
          {ENDED_SQL} AS ended
   FROM sessions s WHERE {where}
-),
-rt AS (
-  SELECT l.session_id, count(*) AS ratings FROM labels l
-  WHERE l.type = %(sickness)s AND l.session_id IN (SELECT session_id FROM s)
-  GROUP BY l.session_id
 ),
 ev AS (
   SELECT e.session_id,
@@ -120,10 +117,9 @@ ev AS (
 SELECT s.*,
        (SELECT b.end_utc FROM ingest_batches b WHERE b.session_id = s.session_id
         ORDER BY b.batch_seq DESC LIMIT 1) AS last_sample_at,
-       COALESCE(rt.ratings, 0) AS ratings,
        COALESCE(ev.pothole, 0) AS ev_pothole, COALESCE(ev.speed_bump, 0) AS ev_speed_bump,
        COALESCE(ev.rail_joint, 0) AS ev_rail_joint
-FROM s LEFT JOIN rt USING (session_id) LEFT JOIN ev USING (session_id)
+FROM s LEFT JOIN ev USING (session_id)
 ORDER BY s.started_at DESC, s.session_id
 """
 
@@ -329,9 +325,21 @@ def _merge(defaults: dict, stored) -> dict:
     return out
 
 
+def _sickness(r: dict) -> dict:
+    """D49: the dose is vertical plus lateral, as energies, so the combined MSDV is the root sum of
+    squares. A trip processed before the lateral dose existed has msdv_y null: vertical only."""
+    z, y = r["msdv_z"], r["msdv_y"]
+    msdv = None if z is None else math.sqrt(z ** 2 + (y or 0.0) ** 2)
+    return {
+        "msdv": rnd(msdv, 4),
+        "msdvZ": rnd(z, 4),  # ISO 2631-1 Wf, vertical, so far (live) or whole trip
+        "msdvY": rnd(y, 4),  # lateral sway, Donohew & Griffin weighting
+        "msiPct": None if msdv is None else round(msdv / 3, 4),  # API.md: MSI % ≈ MSDV / 3
+    }
+
+
 def _summary(r: dict) -> dict:
     mount = _merge(MOUNT_DEFAULTS, r["mount"])
-    msdv = rnd(r["msdv_z"], 4)
     roughness_eligible = bool(r["context_known"]) and mount["rigid"] is True and mount["handheld"] is not True
     end = r["ended_at"] or r["last_sample_at"] or r["started_at"]
     return {
@@ -356,10 +364,8 @@ def _summary(r: dict) -> dict:
         "exclusionReasons": list(r["exclusion_reasons"] or []),  # set by the processor (plan §10)
         "roughnessEligible": roughness_eligible,
         "sicknessExperimental": not roughness_eligible,
-        "msdvZ": msdv,  # ISO 2631-1 Wf, vertical, so far (live) or whole trip
-        "msiPct": None if msdv is None else round(msdv / 3, 4),  # API.md: MSI % ≈ MSDV / 3
+        **_sickness(r),
         "eventCounts": {t: int(r[f"ev_{t}"]) for t in EVENT_TYPES},
-        "ratingsCount": int(r["ratings"]),
     }
 
 
@@ -399,64 +405,6 @@ def _detection(r: dict) -> dict | None:
     return out
 
 
-def rating_value(value) -> int | None:
-    """A MISC rating's number, or None for a label without one (a skipped prompt)."""
-    try:
-        return int(float(value))
-    except (TypeError, ValueError, OverflowError):
-        return None
-
-
-def _ratings(conn: Connection, session_id: str) -> list[dict]:
-    """Each MISC rating with the dose the passenger had had by then (plan §9 step 6): the last
-    session_series point at or before it, None before the first one."""
-    out = []
-    for t, value, msdv in conn.execute(
-            """SELECT l.t, l.value, s.msdv FROM labels l
-               LEFT JOIN LATERAL (SELECT msdv FROM session_series
-                                  WHERE session_id = l.session_id AND t <= l.t
-                                  ORDER BY t DESC LIMIT 1) s ON true
-               WHERE l.session_id = %s AND l.type = %s ORDER BY l.t""",
-            (session_id, SICKNESS_LABEL)).fetchall():
-        number = rating_value(value)
-        if number is not None:
-            out.append({"tUtc": iso(t), "value": number, "msdvSoFar": rnd(msdv, 5)})
-    return out
-
-
-def spearman(xs: list[float], ys: list[float]) -> float | None:
-    """Rank correlation with average ranks for ties, the mock's rule (src/mock/dataset.ts)."""
-    if len(xs) < 3:
-        return None
-
-    def ranks(values: list[float]) -> list[float]:
-        order = sorted(range(len(values)), key=lambda k: values[k])
-        out = [0.0] * len(values)
-        i = 0
-        while i < len(order):
-            j = i
-            while j + 1 < len(order) and values[order[j + 1]] == values[order[i]]:
-                j += 1
-            for k in range(i, j + 1):
-                out[order[k]] = (i + j) / 2
-            i = j + 1
-        return out
-
-    rx, ry = ranks(xs), ranks(ys)
-    mx, my = sum(rx) / len(rx), sum(ry) / len(ry)
-    num = sum((a - mx) * (b - my) for a, b in zip(rx, ry))
-    dx = sum((a - mx) ** 2 for a in rx)
-    dy = sum((b - my) ** 2 for b in ry)
-    return num / (dx * dy) ** 0.5 if dx > 0 and dy > 0 else None
-
-
-def _sickness(r: dict, ratings: list[dict]) -> dict:
-    paired = [x for x in ratings if x["msdvSoFar"] is not None]
-    rho = spearman([x["msdvSoFar"] for x in paired], [x["value"] for x in paired])
-    return {"msdvZ": rnd(r["msdv_z"], 4),
-            "msiPct": None if r["msdv_z"] is None else round(r["msdv_z"] / 3, 4),
-            "ratings": ratings, "spearman": rnd(rho, 4)}
-
 
 def _require_session(conn: Connection, session_id: str) -> None:
     if conn.execute("SELECT 1 FROM sessions WHERE session_id = %s", (session_id,)).fetchone() is None:
@@ -479,7 +427,7 @@ def session_detail(conn: Connection, session_id: str, cache: TripStatsCache | No
         **_summary(r),
         "quality": _quality(r, streams),
         "detection": _detection(r),
-        "sickness": _sickness(r, _ratings(conn, session_id)),
+        "sickness": _sickness(r),
         "processedAt": iso(r["finalized_at"]),
         "processorVersion": None,
     }
@@ -515,8 +463,8 @@ def session_track(conn: Connection, session_id: str) -> dict:
 
 def session_labels(conn: Connection, session_id: str) -> dict:
     _require_session(conn, session_id)
-    rows = conn.execute("SELECT t, type, value, note FROM labels WHERE session_id = %s ORDER BY t",
-                        (session_id,)).fetchall()
+    rows = conn.execute("SELECT t, type, value, note FROM labels WHERE session_id = %s AND type <> %s "
+                        "ORDER BY t", (session_id, RATING_LABEL)).fetchall()
     return {"labels": [{"tUtc": iso(t), "type": ty, "value": v, "note": n} for t, ty, v, n in rows]}
 
 
@@ -586,7 +534,7 @@ def all_events(conn: Connection, vehicle: str | None, etype: str | None) -> dict
 LIVE_SQL = f"""
 SELECT ls.device_id, ls.session_id, s.source, s.status, s.vehicle_type, ls.updated_at, ls.received_at,
        ls.lat, ls.lon, ls.speed_ms, ls.course_deg, ls.h_acc_m, ls.roughness_now, ls.msdv_so_far,
-       ls.battery, ls.thermal, tr.lons, tr.lats, rt.ts, rt.vals
+       ls.battery, ls.thermal, tr.lons, tr.lats
 FROM live_state ls JOIN sessions s USING (session_id)
 LEFT JOIN LATERAL (
   SELECT array_agg(ST_X(p.geom::geometry) ORDER BY p.t) AS lons,
@@ -594,10 +542,6 @@ LEFT JOIN LATERAL (
   FROM track_points p
   WHERE p.session_id = ls.session_id AND p.t >= ls.updated_at - make_interval(secs => %(track_s)s)
     AND {_accurate("p")}) tr ON true
-LEFT JOIN LATERAL (
-  SELECT array_agg(l.t ORDER BY l.t DESC) AS ts, array_agg(l.value ORDER BY l.t DESC) AS vals
-  FROM (SELECT t, value FROM labels WHERE session_id = ls.session_id AND type = %(sickness)s
-        ORDER BY t DESC LIMIT 5) l) rt ON true
 WHERE ls.received_at > %(since)s AND ls.lat IS NOT NULL AND ls.lon IS NOT NULL
 ORDER BY ls.device_id
 """
@@ -609,12 +553,6 @@ def live(conn: Connection, now: dt.datetime) -> dict:
     rows = _rows(conn, LIVE_SQL, _params(since=now - dt.timedelta(seconds=LIVE_WINDOW_S), track_s=LIVE_TRACK_S))
     devices = []
     for r in rows:
-        latest = None
-        for t, value in zip(r["ts"] or [], r["vals"] or []):
-            number = rating_value(value)
-            if number is not None:
-                latest = {"value": number, "tUtc": iso(t)}
-                break
         devices.append({
             "deviceId": r["device_id"],
             "sessionId": r["session_id"],
@@ -630,7 +568,6 @@ def live(conn: Connection, now: dt.datetime) -> dict:
             "hAccM": rnd(r["h_acc_m"], 1),
             "roughnessNow": rnd(r["roughness_now"], 3),
             "msdvSoFar": rnd(r["msdv_so_far"], 3),
-            "latestRating": latest,
             "battery": rnd(r["battery"], 2),
             "thermal": r["thermal"],
             "track": [[rnd(lon), rnd(lat)] for lon, lat in zip(r["lons"] or [], r["lats"] or [])],

@@ -12,7 +12,7 @@ Python 3.12 everywhere (Function runtime, Dockerfiles, CI); no 3.13+ features.
 - A new `RUN_MODE` needs its app or job in `infra/modules/compute/main.tf` and an image-update step in `.github/workflows/deploy-services.yml`.
 - A batch's rows and its partition's checkpoint (`stream_checkpoints`) commit in one transaction. Never commit one without the other.
 - `dsp.py` must give the same result fed batch by batch as in one pass (`test_chunked_feed_equals_one_pass`). The DSP state is saved as JSON in `signal_state` per trip: new keys need defaults in `Pipeline.__init__`, and changing the filter design or sample grid breaks trips that are in progress during a deploy.
-- The app sends acceleration in g; convert with `G`. The `WF` values are cited ISO 2631-1 constants, not tunables; only the pothole and forward-axis thresholds (PROVISIONAL in the `dsp.py` docstring) may be tuned.
+- The app sends acceleration in g; convert with `G`. The `WF` values are cited ISO 2631-1 constants, not tunables; only the pothole and forward-axis thresholds and the lateral weighting `WY` / `LATERAL_K` (PROVISIONAL in the `dsp.py` docstring) may be tuned.
 
 ## Ingest
 - Validation order and status codes mirror `src/mobile-ios/tools/mock_ingest_server.py` (`tests/test_parity.py`), except the differences listed in `ingest/README.md`; add any new one there.

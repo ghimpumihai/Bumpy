@@ -13,8 +13,7 @@ final class RecordingFlowUITests: XCTestCase {
         // green there and the test takes the (recorded) override path. Uploads go to
         // tools/mock_ingest_server.py if it is running on :8765 (harmless otherwise).
         app.launchArguments = ["-uiTesting", "-uiTestingReset",
-                               "-upload.baseURL", "http://127.0.0.1:8765",
-                               "-sicknessInterval", "40", "-sicknessTimeout", "10"]
+                               "-upload.baseURL", "http://127.0.0.1:8765"]
         addUIInterruptionMonitor(withDescription: "System alerts") { alert in
             for title in ["Allow While Using App", "Allow Once", "Allow", "OK", "Keep Precise Location On"] {
                 if alert.buttons[title].exists { alert.buttons[title].tap(); return true }
@@ -107,19 +106,6 @@ final class RecordingFlowUITests: XCTestCase {
         field.typeText("tram crossing, rough")
         app.buttons["noteSave"].tap()
 
-        // Manual sickness rating
-        app.buttons["sicknessButton"].tap()
-        let misc3 = app.buttons["misc.3"]
-        XCTAssertTrue(misc3.waitForExistence(timeout: 3))
-        misc3.tap()
-        XCTAssertTrue(misc3.waitForNonExistence(timeout: 3), "grid closes after rating")
-
-        // Scheduled sickness prompt (every 40 s here) with countdown; answer it
-        let countdown = app.staticTexts["sicknessCountdown"]
-        XCTAssertTrue(countdown.waitForExistence(timeout: 45), "periodic prompt appears")
-        app.buttons["misc.2"].tap()
-        XCTAssertTrue(countdown.waitForNonExistence(timeout: 3), "prompt closes after rating")
-
         // A short tap must NOT stop
         let stop = app.descendants(matching: .any)["holdToStop"]
         stop.tap()
@@ -160,20 +146,14 @@ final class RecordingFlowUITests: XCTestCase {
         XCTAssertTrue(app.descendants(matching: .any)["stat.gps"].waitForExistence(timeout: 5))
     }
 
-    /// Prompt auto-dismisses as "missed"; then the app is killed mid-recording and relaunched:
-    /// the session must be kept and flagged RECOVERED (spec §4 writer requirements).
-    func testMissedPromptAndCrashRecovery() {
-        app.launchArguments = ["-uiTesting", "-uiTestingReset", "-sicknessInterval", "6", "-sicknessTimeout", "3"]
+    /// The app is killed mid-recording and relaunched: the session must be kept and flagged
+    /// RECOVERED (spec §4 writer requirements).
+    func testCrashRecovery() {
+        app.launchArguments = ["-uiTesting", "-uiTestingReset"]
         app.launch()
         startRecording()
-        let countdown = app.staticTexts["sicknessCountdown"]
-        XCTAssertTrue(countdown.waitForExistence(timeout: 10))
-        XCTAssertTrue(countdown.waitForNonExistence(timeout: 6), "unanswered prompt auto-dismisses (missed)")
-        // Next prompt: Skip must close it without a rating
-        XCTAssertTrue(countdown.waitForExistence(timeout: 10))
-        app.buttons["sicknessSkip"].tap()
-        XCTAssertTrue(countdown.waitForNonExistence(timeout: 3))
-        sleep(2) // let some GPS fixes land on disk
+        for id in ["label.pothole", "label.speedBump", "label.phoneMoved", "syncTap"] { app.buttons[id].tap() }
+        sleep(2) // let the labels and some GPS fixes land on disk
 
         app.terminate() // simulates a crash / force-quit while recording
         app.launchArguments = ["-uiTesting"]
@@ -181,7 +161,7 @@ final class RecordingFlowUITests: XCTestCase {
         XCTAssertTrue(app.staticTexts["RECOVERED"].waitForExistence(timeout: 10), "interrupted session is recovered")
         let session = app.buttons.matching(NSPredicate(format: "identifier BEGINSWITH 'session.'")).firstMatch
         session.tap()
-        // Assert on data this test itself created (labels: prompt, missed, prompt, skipped), not on
+        // Assert on data this test itself created (the four labels above), not on
         // environment-dependent streams (the Simulator has no motion hardware and its simulated
         // location is cleared on reboot).
         let labels = app.descendants(matching: .any)["stat.labelsCount"]

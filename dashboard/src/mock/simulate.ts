@@ -1,6 +1,6 @@
 import { MS_PER_SECOND, MS_TO_KMH } from "@/constants/units";
 import type { RoadEventType, VehicleType } from "@/types/common";
-import type { DetectionMetrics, DetectionScore, SessionLabel, SicknessRating } from "@/types/sessions";
+import type { DetectionMetrics, DetectionScore, SessionLabel } from "@/types/sessions";
 import type { Position } from "@/types/common";
 
 import type { SessionSpec } from "./catalog";
@@ -14,7 +14,6 @@ const DT_S = 1 / SERIES_HZ;
 export const POTHOLE_MIN_SPEED_MS = 15 / MS_TO_KMH;
 /** Detections are matched to manual taps within ±1.5 s (plan 02 §9). */
 export const TAP_MATCH_WINDOW_S = 1.5;
-const SICKNESS_PROMPT_INTERVAL_S = 120;
 const REFERENCE_SPEED_MS = 10;
 /** True speed exponent of roughness used to generate data; the aggregation should recover ≈ this. */
 export const TRUE_SPEED_EXPONENT = 0.6;
@@ -94,10 +93,12 @@ export interface SimulatedSession {
   aVert: Float64Array;
   aLat: Float64Array;
   aLon: Float64Array;
+  /** Vertical and lateral combined, m/s^1.5. */
   msdv: Float64Array;
+  /** The lateral part: msdv² = msdvZ² + msdvY². */
+  msdvY: Float64Array;
   events: SimulatedEvent[];
   labels: (SessionLabel & { sampleIndex: number })[];
-  ratings: (SicknessRating & { sampleIndex: number })[];
   observations: SimulatedObservation[];
   taps: Tap[];
   totalDistanceM: number;
@@ -214,9 +215,9 @@ export function simulateSession(spec: SessionSpec, startMs: number): SimulatedSe
     aLat: new Float64Array(n),
     aLon: new Float64Array(n),
     msdv: new Float64Array(n),
+    msdvY: new Float64Array(n),
     events: [],
     labels: [],
-    ratings: [],
     observations: [],
     taps: [],
     totalDistanceM,
@@ -228,6 +229,7 @@ export function simulateSession(spec: SessionSpec, startMs: number): SimulatedSe
 
   let p = 0;
   let msdvSquared = 0;
+  let msdvYSquared = 0;
   for (let k = 0; k < n; k++) {
     const t = k * DT_S;
     while (p < profile.length - 2 && profile[p + 1].t <= t) p++;
@@ -253,10 +255,14 @@ export function simulateSession(spec: SessionSpec, startMs: number): SimulatedSe
     roughRms[k] = roughnessRms(truth?.roughness ?? 0.4, v, dyn, spec);
     sim.aVert[k] = random.gaussian() * roughRms[k];
     sim.aLat[k] = v * v * sample.curvature + random.gaussian() * 0.12;
-    const aw = (truth?.awRms ?? 0.05) * dyn.awFactor * (v < MOVING_SPEED_MS ? 0.35 : 1);
+    const awScale = dyn.awFactor * (v < MOVING_SPEED_MS ? 0.35 : 1);
+    const aw = (truth?.awRms ?? 0.05) * awScale;
+    const awLat = (truth?.awLatRms ?? 0) * awScale;
     awInstant[k] = aw;
     msdvSquared += aw * aw * DT_S;
+    msdvYSquared += awLat * awLat * DT_S;
     sim.msdv[k] = Math.sqrt(msdvSquared);
+    sim.msdvY[k] = Math.sqrt(msdvYSquared);
   }
   for (let k = 0; k < n; k++) {
     const prev = sim.speed[Math.max(0, k - 2)];
@@ -265,7 +271,7 @@ export function simulateSession(spec: SessionSpec, startMs: number): SimulatedSe
   }
 
   addEventsAndTaps(sim, random, dyn);
-  addLabelsAndRatings(sim, random);
+  addLabels(sim);
   sim.observations = buildObservations(sim, roughRms, awInstant, random);
   return sim;
 }
@@ -335,7 +341,7 @@ function addEventsAndTaps(sim: SimulatedSession, random: Random, dyn: VehicleDyn
   }
 }
 
-function addLabelsAndRatings(sim: SimulatedSession, random: Random) {
+function addLabels(sim: SimulatedSession) {
   const { spec, route } = sim;
   const n = sim.t.length;
   const lapSamples = route.samples.length;
@@ -371,24 +377,6 @@ function addLabelsAndRatings(sim: SimulatedSession, random: Random) {
     label(Math.round(n * 0.7), "phone_moved");
   }
 
-  const standingBonus = spec.people.raterPosture === "standing" ? 1 : 0;
-  for (let k = SICKNESS_PROMPT_INTERVAL_S * SERIES_HZ; k < n; k += SICKNESS_PROMPT_INTERVAL_S * SERIES_HZ) {
-    label(k, "sickness_prompt");
-    if (random.chance(0.08)) {
-      label(k + 30 * SERIES_HZ, "sickness_missed");
-      continue;
-    }
-    const answer = k + Math.round(random.range(3, 12) * SERIES_HZ);
-    if (answer >= n) continue;
-    const misc = Math.round(Math.min(10, Math.max(0, sim.msdv[answer] * 0.55 + standingBonus + random.gaussian() * 0.6)));
-    label(answer, "sickness", String(misc), "prompt");
-    sim.ratings.push({
-      sampleIndex: answer,
-      tUtc: new Date(sim.t[answer]).toISOString(),
-      value: misc,
-      msdvSoFar: sim.msdv[answer],
-    });
-  }
   sim.labels.sort((a, b) => a.sampleIndex - b.sampleIndex);
 }
 

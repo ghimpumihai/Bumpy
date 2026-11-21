@@ -15,7 +15,7 @@ struct RecordingView: View {
 
             Spacer()
             Text(TripFormat.timer(controller.snapshot.elapsed))
-                .font(.system(size: 96, weight: .semibold))
+                .font(Theme.font(96, .semibold))
                 .tracking(-4)
                 .monospacedDigit()
                 .minimumScaleFactor(0.6)
@@ -27,7 +27,7 @@ struct RecordingView: View {
                 PulsingDot()
                 Text("Recording")
             }
-            .font(.system(size: 17, weight: .semibold))
+            .font(Theme.font(17, .semibold))
             .foregroundStyle(Theme.text)
             .riseIn(0.22)
             Spacer()
@@ -39,7 +39,7 @@ struct RecordingView: View {
                 Text(status.text)
                     .multilineTextAlignment(.center)
             }
-            .font(.system(size: 15))
+            .font(Theme.font(15))
             .foregroundStyle(Theme.color(status.level))
             .animation(.easeInOut(duration: 0.3), value: status.text)
             .accessibilityElement(children: .combine)
@@ -71,7 +71,7 @@ struct HoldToEndButton: View {
                     .frame(width: g.size.width * progress)
             }
             Text(pressing ? "Keep holding…" : "Hold to end trip")
-                .font(.system(size: 17, weight: .semibold))
+                .font(Theme.font(17, .semibold))
                 .foregroundStyle(Theme.onInk)
                 .frame(maxWidth: .infinity)
         }

@@ -68,12 +68,6 @@ struct IngestBatch: Encodable, Equatable {
         var pressureKpa: [Double] = []
     }
 
-    struct AudioLevel: Encodable, Equatable {
-        var t: [Double] = []
-        var avgDbfs: [Double] = []
-        var peakDbfs: [Double] = []
-    }
-
     struct Label: Encodable, Equatable {
         var t: Double
         var type: String
@@ -125,7 +119,6 @@ struct IngestBatch: Encodable, Equatable {
         "location.alt": "m", "location.hAcc": "m", "location.speed": "m/s (-1 = invalid)",
         "location.speedAcc": "m/s", "location.course": "deg (-1 = invalid)",
         "altimeter.relAltM": "m", "altimeter.pressureKpa": "kPa",
-        "audioLevel.avgDbfs": "dBFS", "audioLevel.peakDbfs": "dBFS",
         "device.battery": "fraction 0-1 (-1 = unknown)", "device.freeDiskBytes": "bytes",
         "deviceMotion.roll": "rad", "deviceMotion.pitch": "rad", "deviceMotion.yaw": "rad",
         "magRaw": "µT", "heading.magHeading": "deg", "heading.trueHeading": "deg (-1 = invalid)",
@@ -140,10 +133,9 @@ struct IngestBatch: Encodable, Equatable {
     var gyroRaw = XYZ()
     var location: [Location] = []
     var altimeter = Altimeter()
-    var audioLevel = AudioLevel()
     var labels: [Label] = []
     var device: Device
-    // Additive streams (02 D32: "each batch holds every sensor at full rate; only raw audio stays").
+    // Additive streams (02 D32: "each batch holds every sensor at full rate"). No audio (D48).
     var magRaw = XYZ()
     var heading: [Heading] = []
     var absAltitude = AbsAltitude()
@@ -151,7 +143,7 @@ struct IngestBatch: Encodable, Equatable {
 
     var sampleCount: Int {
         deviceMotion.t.count + accelRaw.t.count + gyroRaw.t.count + location.count
-            + altimeter.t.count + audioLevel.t.count + labels.count
+            + altimeter.t.count + labels.count
     }
 
     func jsonData() throws -> Data {
@@ -175,7 +167,6 @@ final class BatchAccumulator: @unchecked Sendable {
         var gyro: [Vec3Sample] = []
         var location: [LocationSample] = []
         var alt: [AltimeterSample] = []
-        var audio: [AudioLevelSample] = []
         var labels: [(t: Double, type: String, value: String?, note: String?)] = []
         var mag: [Vec3Sample] = []
         var heading: [HeadingSample] = []
@@ -198,7 +189,6 @@ final class BatchAccumulator: @unchecked Sendable {
     func addGyro(_ s: Vec3Sample) { pending.withLock { $0.gyro.append(s) } }
     func add(_ s: LocationSample) { pending.withLock { $0.location.append(s) } }
     func add(_ s: AltimeterSample) { pending.withLock { $0.alt.append(s) } }
-    func add(_ s: AudioLevelSample) { pending.withLock { $0.audio.append(s) } }
     func addMag(_ s: Vec3Sample) { pending.withLock { $0.mag.append(s) } }
     func add(_ s: HeadingSample) { pending.withLock { $0.heading.append(s) } }
     func add(_ s: AbsoluteAltitudeSample) { pending.withLock { $0.absAlt.append(s) } }
@@ -285,11 +275,6 @@ final class BatchAccumulator: @unchecked Sendable {
             alt.t.append(rel(s.t)); alt.relAltM.append(round6(s.relativeAltitudeM)); alt.pressureKpa.append(round6(s.pressureKPa))
         }
         b.altimeter = alt
-        var al = IngestBatch.AudioLevel()
-        for s in p.audio {
-            al.t.append(rel(s.t)); al.avgDbfs.append(round6(s.avgDbfs)); al.peakDbfs.append(round6(s.peakDbfs))
-        }
-        b.audioLevel = al
         b.labels = p.labels.map { .init(t: rel($0.t), type: $0.type, value: $0.value, note: $0.note) }
         return b
     }

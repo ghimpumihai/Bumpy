@@ -14,8 +14,6 @@ final class AppModel {
     let store: SessionStore
     let location = LocationService()
     let deviceMonitor = DeviceStatusMonitor()
-    let audio = AudioRecorderService()
-    let audioMeter = AudioLevelMeterService()
     let uploadQueue: UploadQueue
 
     var sessions: [SessionStore.Entry] = []
@@ -41,7 +39,6 @@ final class AppModel {
                 try? FileManager.default.removeItem(at: docs.appendingPathComponent(name))
             }
             UserDefaults.standard.removeObject(forKey: SetupDefaults.key)
-            UserDefaults.standard.removeObject(forKey: AppSettings.roadNoiseKey)
         }
         #endif
         try? store.ensureRoot()
@@ -135,8 +132,6 @@ final class AppModel {
         RecordingSession.Dependencies(
             motion: CoreMotionSource(), location: location, altimeter: CoreAltimeterSource(),
             activity: CoreActivitySource(),
-            // Audio OFF (default on bus/tram, GDPR): level meter only, nothing from the mic is stored.
-            audio: setup.audioEnabled ? audio : audioMeter,
             deviceStatus: deviceMonitor, uploadQueue: uploadQueue,
             deviceId: AppSettings.deviceId, appVersion: AppInfo.version, deviceInfo: AppInfo.deviceInfo)
     }
@@ -151,7 +146,6 @@ final class AppModel {
         }
         // D51: no setup form. Every trip is a car; mount and people keep the remembered defaults.
         setup.vehicle = SessionMetadata.Vehicle()
-        setup.audioEnabled = AppSettings.recordRoadNoise
         SetupDefaults.save(setup)
         let deps = makeDependencies()
         let session = try RecordingSession(store: store, setup: setup, preflight: preflight, deps: deps)
@@ -193,23 +187,18 @@ enum SetupDefaults {
         var mount: SessionMetadata.Mount
         var people: SessionMetadata.People
         var conditions: SessionMetadata.Conditions
-        var audioEnabled: Bool? // optional: older stored setups lack it
     }
 
     static func load() -> SessionSetup {
         guard let data = UserDefaults.standard.data(forKey: key),
               let s = try? JSONDecoder().decode(Stored.self, from: data) else { return SessionSetup() }
-        // Bus/tram always start with audio OFF (spec §3.5, GDPR), whatever the last trip used.
-        let audio = s.vehicle.isPublicTransport ? false : (s.audioEnabled ?? true)
-        var setup = SessionSetup(vehicle: s.vehicle, audioEnabled: audio,
-                                 mount: s.mount, people: s.people, conditions: s.conditions)
+        var setup = SessionSetup(vehicle: s.vehicle, mount: s.mount, people: s.people, conditions: s.conditions)
         setup.mount.photoFile = nil
         return setup
     }
 
     static func save(_ setup: SessionSetup) {
-        let s = Stored(vehicle: setup.vehicle, mount: setup.mount, people: setup.people, conditions: setup.conditions,
-                       audioEnabled: setup.audioEnabled)
+        let s = Stored(vehicle: setup.vehicle, mount: setup.mount, people: setup.people, conditions: setup.conditions)
         if let data = try? JSONEncoder().encode(s) { UserDefaults.standard.set(data, forKey: key) }
     }
 }

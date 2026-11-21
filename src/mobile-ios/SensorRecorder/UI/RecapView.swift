@@ -23,11 +23,11 @@ struct RecapView: View {
             Spacer()
             VStack(alignment: .leading, spacing: 12) {
                 Text("Trip saved")
-                    .font(.system(size: 40, weight: .semibold))
+                    .font(Theme.font(40, .semibold))
                     .tracking(-1.2)
                     .foregroundStyle(Theme.text)
                 Text(subtitle(summary))
-                    .font(.system(size: 17))
+                    .font(Theme.font(17))
                     .foregroundStyle(Theme.muted)
             }
             .riseIn(0.1)
@@ -35,17 +35,17 @@ struct RecapView: View {
             if let q = summary.qualityPercent {
                 VStack(alignment: .leading, spacing: 4) {
                     Text("\(shownQuality) %")
-                        .font(.system(size: 72, weight: .semibold))
+                        .font(Theme.font(72, .semibold))
                         .tracking(-3)
                         .monospacedDigit()
                         .contentTransition(.numericText())
                         .foregroundStyle(summary.isPoor ? Theme.problem : Theme.text)
                     Text("Data quality")
-                        .font(.system(size: 17, weight: .semibold))
+                        .font(Theme.font(17, .semibold))
                         .foregroundStyle(Theme.text)
                     if let problem = summary.problem {
                         Text(problem)
-                            .font(.system(size: 15))
+                            .font(Theme.font(15))
                             .foregroundStyle(Theme.problem)
                     }
                 }
@@ -67,7 +67,7 @@ struct RecapView: View {
                         Spacer()
                         Image(systemName: "arrow.up.right")
                     }
-                    .font(.system(size: 17))
+                    .font(Theme.font(17))
                     .foregroundStyle(Theme.text)
                     .frame(minHeight: 56)
                     .overlay(alignment: .top) { Rectangle().fill(Theme.line).frame(height: 1) }
@@ -99,10 +99,10 @@ struct RecapView: View {
             let percent = uploadPercent
             VStack(alignment: .leading, spacing: 10) {
                 HStack(alignment: .firstTextBaseline) {
-                    Text("Trip in the cloud").font(.system(size: 15)).foregroundStyle(Theme.muted)
+                    Text("Trip in the cloud").font(Theme.font(15)).foregroundStyle(Theme.muted)
                     Spacer()
                     Text("\(percent ?? 0) %")
-                        .font(.system(size: 28, weight: .semibold))
+                        .font(Theme.font(28, .semibold))
                         .monospacedDigit()
                         .contentTransition(.numericText())
                         .foregroundStyle(Theme.text)
@@ -117,12 +117,12 @@ struct RecapView: View {
                 if rejected > 0 {
                     // Upload problems are WARN at most: the data is safe on disk.
                     Text("\(rejected) part(s) were rejected by the server. They are kept on this phone.")
-                        .font(.system(size: 13))
+                        .font(Theme.font(13))
                         .foregroundStyle(Theme.warn)
                 } else {
                     Text(percent == 100 ? "Complete. The web shows the whole trip."
                                         : "The rest is saved on this phone and uploads when you have signal.")
-                        .font(.system(size: 13))
+                        .font(Theme.font(13))
                         .foregroundStyle(Theme.muted)
                 }
             }
@@ -131,7 +131,7 @@ struct RecapView: View {
             .accessibilityIdentifier("uploadProgress")
         } else {
             Text("Upload off · the trip is kept on this phone")
-                .font(.system(size: 13))
+                .font(Theme.font(13))
                 .foregroundStyle(Theme.muted)
                 .accessibilityIdentifier("uploadProgress")
         }
@@ -162,11 +162,15 @@ struct RecapView: View {
     private func subtitle(_ summary: TripSummary) -> String {
         var parts: [String] = []
         if let start = ISO8601.date(metadata.startedAtUtc) {
-            let f = DateFormatter()
-            f.dateStyle = .medium
-            f.timeStyle = .short
-            f.doesRelativeDateFormatting = true
-            parts.append(f.string(from: start))
+            // "Today, 14:05" (relative day, then the time).
+            let day = DateFormatter()
+            day.dateStyle = .medium
+            day.timeStyle = .none
+            day.doesRelativeDateFormatting = true
+            let time = DateFormatter()
+            time.dateStyle = .none
+            time.timeStyle = .short
+            parts.append(day.string(from: start) + ", " + time.string(from: start))
         }
         parts.append(TripFormat.duration(summary.durationSec))
         let meters = TripSummary.distanceMeters(trackPoints)

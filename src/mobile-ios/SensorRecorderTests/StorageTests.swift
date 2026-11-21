@@ -29,7 +29,7 @@ final class SessionMetadataTests: XCTestCase {
         let people = try XCTUnwrap(obj["people"] as? [String: Any])
         XCTAssertNotNil(people["operatorSeat"]); XCTAssertNotNil(people["raterSeat"]); XCTAssertNotNil(people["passengerCount"])
         let rates = try XCTUnwrap(obj["requestedRatesHz"] as? [String: Double])
-        XCTAssertEqual(rates, ["deviceMotion": 100, "accel": 100, "gyro": 100, "mag": 50, "audioLevel": 10])
+        XCTAssertEqual(rates, ["deviceMotion": 100, "accel": 100, "gyro": 100, "mag": 50], "no audioLevel (D48)")
     }
 
     func testRoundTrip() throws {
@@ -37,12 +37,30 @@ final class SessionMetadataTests: XCTestCase {
         m.endedAtUtc = "2026-11-21T10:00:00.000Z"
         m.stats = .init(durationSec: 10, streams: ["accel": .init(samples: 1000, meanRateHz: 99.9, maxGapSec: 0.02,
                                                                    gapsOver1s: 0, droppedEstimate: 0, fileBytes: 100)],
-                        labelsCount: 3, audioFiles: ["audio_000.m4a"],
+                        labelsCount: 3,
                         fileSizes: [:], totalBytes: 100, writeErrors: 0, uploadBatchesCreated: 5)
         let dir = try makeTempDir()
         let url = dir.appendingPathComponent("session.json")
         try m.write(to: url)
         XCTAssertEqual(try SessionMetadata.load(from: url), m)
+    }
+
+    /// A pre-D48 session.json (audio keys, audio stats) still loads, stats included: stats decode with
+    /// `try?`, so a stats shape that no longer matched would silently become nil.
+    func testPreD48AudioKeysStillDecode() throws {
+        var m = Self.sample()
+        m.stats = .init(durationSec: 10, streams: [:], labelsCount: 0, fileSizes: [:], totalBytes: 1, writeErrors: 0,
+                        uploadBatchesCreated: 2)
+        var obj = try XCTUnwrap(JSONSerialization.jsonObject(with: m.jsonData()) as? [String: Any])
+        obj["audioEnabled"] = true
+        obj["requestedRatesHz"] = ["deviceMotion": 100, "audioLevel": 10]
+        var stats = try XCTUnwrap(obj["stats"] as? [String: Any])
+        stats["audioFiles"] = ["audio_000.m4a"]
+        stats["audioFilesIncomplete"] = ["audio_000.m4a"]
+        obj["stats"] = stats
+        let old = try JSONDecoder().decode(SessionMetadata.self, from: JSONSerialization.data(withJSONObject: obj))
+        XCTAssertEqual(old.stats, m.stats)
+        XCTAssertEqual(old.sessionId, m.sessionId)
     }
 }
 

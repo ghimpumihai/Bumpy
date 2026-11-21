@@ -260,6 +260,11 @@ final class UploadQueue: @unchecked Sendable {
         return (count(pendingFiles()), count(failedFiles()))
     }
 
+    /// Trips with anything still queued (batches or metadata), for Settings' "2 trips waiting".
+    func waitingTripCount() -> Int {
+        Set(pendingFiles().compactMap { Self.parseItem(fileName: $0.lastPathComponent)?.sessionId }).count
+    }
+
     func failedFiles() -> [URL] {
         Self.queueFileNames(in: failedDirectory).sorted().map { failedDirectory.appendingPathComponent($0) }
     }
@@ -545,8 +550,8 @@ final class UploadQueue: @unchecked Sendable {
     /// probe is rejected, never stored); 401 = unknown key; 403 = key stored under another Device ID;
     /// 404 = wrong base URL. There is no `/api/health` route (02 §5). Never blocks.
     static func testConnection(config: UploadConfig, deviceId: String = AppSettings.deviceId,
-                               transport: HTTPTransport = URLSessionTransport()) async -> (ok: Bool, detail: String) {
-        guard let url = config.ingestURL else { return (false, "upload off (no URL)") }
+                               transport: HTTPTransport = URLSessionTransport()) async -> ProbeResult {
+        guard let url = config.ingestURL else { return (false, "upload off (no URL)", "Upload off") }
         var r = URLRequest(url: url)
         r.httpMethod = "POST"
         r.setValue("application/json", forHTTPHeaderField: "Content-Type")
@@ -560,18 +565,22 @@ final class UploadQueue: @unchecked Sendable {
         do {
             return interpretProbe(status: try await transport.send(r))
         } catch {
-            return (false, "unreachable: \(error.localizedDescription)")
+            return (false, "unreachable: \(error.localizedDescription)", "Server unreachable")
         }
     }
 
-    static func interpretProbe(status: Int) -> (ok: Bool, detail: String) {
+    /// `detail` for logs and the preflight record; `short` is the few words Settings shows.
+    typealias ProbeResult = (ok: Bool, detail: String, short: String)
+
+    static func interpretProbe(status: Int) -> ProbeResult {
         switch status {
-        case 400, 422: return (true, "reachable, key accepted (HTTP \(status) to probe)")
-        case 200..<300: return (true, "reachable (HTTP \(status))")
-        case 401: return (false, "device key rejected (HTTP 401)")
-        case 403: return (false, "device key is stored under another Device ID (HTTP 403): add it for this phone's Device ID (Settings)")
-        case 404: return (false, "endpoint not found (HTTP 404): check the API URL")
-        default: return (false, "HTTP \(status) from /api/ingest")
+        case 400, 422: return (true, "reachable, key accepted (HTTP \(status) to probe)", "Connected")
+        case 200..<300: return (true, "reachable (HTTP \(status))", "Connected")
+        case 401: return (false, "device key rejected (HTTP 401)", "Wrong device key")
+        case 403: return (false, "device key is stored under another Device ID (HTTP 403): add it for this phone's Device ID (Settings)",
+                          "Key belongs to another phone")
+        case 404: return (false, "endpoint not found (HTTP 404): check the API URL", "Wrong server address")
+        default: return (false, "HTTP \(status) from /api/ingest", "Server error (HTTP \(status))")
         }
     }
 }

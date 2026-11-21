@@ -136,7 +136,7 @@ final class LiveSignalsTests: XCTestCase {
     }
 }
 
-/// End-to-end: a real RecordingSession with synthetic 100 Hz motion and fake GPS/baro/audio/activity,
+/// End-to-end: a real RecordingSession with synthetic 100 Hz motion and fake GPS/baro/activity,
 /// writing to a temp folder. Verifies the files a backend would read.
 final class RecordingSessionIntegrationTests: XCTestCase {
     func testThreeSecondRecordingProducesValidSession() throws {
@@ -148,7 +148,7 @@ final class RecordingSessionIntegrationTests: XCTestCase {
                                       config: { UploadConfig(baseURL: URL(string: "https://api.test"), deviceKey: "k") })
         let deps = RecordingSession.Dependencies(
             motion: SyntheticMotionSource(), location: FakeLocationSource(), altimeter: FakeAltimeter(),
-            activity: FakeActivity(), audio: FakeAudio(), deviceStatus: FakeDeviceStatus(), uploadQueue: uploadQueue,
+            activity: FakeActivity(), deviceStatus: FakeDeviceStatus(), uploadQueue: uploadQueue,
             deviceId: "DEV-1", appVersion: "1.0.0 (1) test",
             deviceInfo: .init(model: "iPhone15,2", name: "iPhone 14 Pro", iosVersion: "18.1"))
         var setup = SessionSetup()
@@ -206,7 +206,6 @@ final class RecordingSessionIntegrationTests: XCTestCase {
         let stats = try XCTUnwrap(meta.stats)
         XCTAssertGreaterThanOrEqual(stats.durationSec, 3.2 - 0.01, "at least the time we recorded for")
         XCTAssertLessThanOrEqual(stats.durationSec, wallEnd - wallStart + 0.01, "never longer than the test itself")
-        XCTAssertEqual(stats.audioFiles, ["audio_000.m4a"])
         XCTAssertGreaterThan(stats.uploadBatchesCreated, 1)
 
         // Motion CSVs: ~100 Hz, monotonic t_up, t_utc_ms consistent with the clock anchors
@@ -214,7 +213,7 @@ final class RecordingSessionIntegrationTests: XCTestCase {
         XCTAssertEqual(clock.header, ["t_up", "t_utc_ms", "source"])
         XCTAssertEqual(clock.rows.first?[2], "start")
         XCTAssertEqual(clock.rows.last?[2], "stop")
-        XCTAssertTrue(clock.rows.contains { $0[2] == "audio_start" })
+        XCTAssertFalse(clock.rows.contains { $0[2] == "audio_start" }, "no audio (D48)")
         let anchorUp = Double(clock.rows[0][0])!, anchorMs = Double(clock.rows[0][1])!
 
         for file in ["device_motion.csv", "accel_raw.csv", "gyro_raw.csv", "mag_raw.csv"] {
@@ -247,8 +246,8 @@ final class RecordingSessionIntegrationTests: XCTestCase {
         XCTAssertGreaterThanOrEqual(try readCSV(folder.appendingPathComponent("abs_altitude.csv")).rows.count, 3)
         XCTAssertGreaterThanOrEqual(try readCSV(folder.appendingPathComponent("heading.csv")).rows.count, 3)
         XCTAssertEqual(try readCSV(folder.appendingPathComponent("activity.csv")).rows.first?[5], "1") // automotive
-        XCTAssertGreaterThan(try readCSV(folder.appendingPathComponent("audio_level.csv")).rows.count, 20)
-        XCTAssertEqual(try readCSV(folder.appendingPathComponent("audio_segments.csv")).rows.first?[2], "start")
+        let names = try FileManager.default.contentsOfDirectory(atPath: folder.path)
+        XCTAssertFalse(names.contains { $0.hasPrefix("audio") }, "no audio files (D48): \(names)")
         XCTAssertGreaterThanOrEqual(try readCSV(folder.appendingPathComponent("device.csv")).rows.count, 1)
         XCTAssertTrue(FileManager.default.fileExists(atPath: folder.appendingPathComponent("mount.jpg").path))
 
@@ -298,25 +297,4 @@ final class RecordingSessionIntegrationTests: XCTestCase {
         XCTAssertEqual(analysis.streams[.accel]?.count, stats.streams["accel"]?.samples)
     }
 
-    func testAudioFailureIsReportedAsProblem() throws {
-        let root = try makeTempDir()
-        let audio = FakeAudio()
-        audio.failToStart = true
-        let deps = RecordingSession.Dependencies(
-            motion: SyntheticMotionSource(), location: nil, altimeter: nil, activity: nil, audio: audio,
-            deviceStatus: FakeDeviceStatus(), uploadQueue: nil, deviceId: "D", appVersion: "t",
-            deviceInfo: .init(model: "x", name: "x", iosVersion: "x"))
-        let session = try RecordingSession(store: SessionStore(root: root), setup: SessionSetup(), preflight: nil, deps: deps)
-        let e = expectation(description: "start")
-        DispatchQueue.main.async { session.start(); e.fulfill() }
-        wait(for: [e], timeout: ciTimeout)
-        Thread.sleep(forTimeInterval: 0.5)
-        let issues = HealthEvaluator.evaluate(session.healthInputs(now: ProcessInfo.processInfo.systemUptime))
-        XCTAssertTrue(issues.contains { $0.key == "audio.off" && $0.level == .problem })
-        let e2 = expectation(description: "stop")
-        DispatchQueue.main.async { session.stop(); e2.fulfill() }
-        wait(for: [e2], timeout: ciTimeout)
-        let log = try String(contentsOf: session.folder.appendingPathComponent("app_log.txt"), encoding: .utf8)
-        XCTAssertTrue(log.contains("[PROBLEM] audio recording FAILED to start"))
-    }
 }

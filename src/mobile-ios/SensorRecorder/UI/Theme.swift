@@ -1,4 +1,5 @@
 import SwiftUI
+import UIKit
 
 /// Neutral palette shared with the web dashboard (light only), ink-black accent. Colour appears
 /// only when something is wrong: amber WARN, red PROBLEM; OK is plain text.
@@ -24,6 +25,49 @@ enum Theme {
     }
 
     static let gutter: CGFloat = 16
+
+    /// Geist, the web dashboard's typeface (variable font in `Resources/Fonts`, SIL OFL). Fixed sizes
+    /// like the design: the layout is built for one glance in a moving car, not for Dynamic Type.
+    static func font(_ size: CGFloat, _ weight: Font.Weight = .regular) -> Font {
+        // `.weight()` doesn't move a custom variable font's `wght` axis, so set the axis itself.
+        let wght: Int
+        switch weight {
+        case .medium: wght = 500
+        case .semibold: wght = 600
+        case .bold: wght = 700
+        default: wght = 400
+        }
+        let descriptor = UIFontDescriptor(fontAttributes: [
+            .family: "Geist",
+            UIFontDescriptor.AttributeName(rawValue: kCTFontVariationAttribute as String): [wghtAxis: wght],
+        ])
+        return Font(UIFont(descriptor: descriptor, size: size))
+    }
+
+    /// The OpenType tag 'wght' as a number (CoreText variation key).
+    private static let wghtAxis = 0x7767_6874
+}
+
+/// A multi-line headline with tight leading (design: line-height 1.05). SwiftUI can't set a line
+/// height below the font's own, so each line is its own Text, one `size × lineHeight` apart.
+struct Headline: View {
+    let lines: [String]
+    var size: CGFloat = 40
+    var lineHeight: CGFloat = 1.05
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            ForEach(Array(lines.enumerated()), id: \.offset) { _, line in
+                Text(line).frame(height: size * lineHeight, alignment: .leading)
+            }
+        }
+        .font(Theme.font(size, .semibold))
+        .tracking(-size * 0.03) // letter-spacing −1.2 px at 40
+        .foregroundStyle(Theme.text)
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel(lines.joined(separator: " "))
+        .accessibilityAddTraits(.isHeader)
+    }
 }
 
 extension Color {
@@ -37,7 +81,7 @@ extension Color {
 struct PrimaryButtonStyle: ButtonStyle {
     func makeBody(configuration: Configuration) -> some View {
         configuration.label
-            .font(.system(size: 17, weight: .semibold))
+            .font(Theme.font(17, .semibold))
             .foregroundStyle(Theme.onInk)
             .frame(maxWidth: .infinity, minHeight: 56)
             .background(Theme.ink, in: RoundedRectangle(cornerRadius: 14))

@@ -11,31 +11,28 @@ SensorRecorder/Core/SessionFiles.swift, then reports per stream: row count, medi
 Pass criteria (spec §10):
   - device_motion / accel_raw / gyro_raw: median rate >= 90 Hz and max gap < 0.1 s; fewer than
     2 rows is a FAIL
-  - mag_raw ~50 Hz (WARN only), audio_level ~10 Hz (WARN only)
+  - mag_raw ~50 Hz (WARN only)
   - location ~1 Hz, lat/lon valid and not 0,0, h_acc median reported; 0 rows is a FAIL
   - altimeter / heading / abs_altitude / activity / device with a header but 0 data rows: WARN
   - t_utc_ms of motion rows vs clock.csv anchors: <= 20 ms PASS, <= 100 ms WARN, > 100 ms FAIL
   - labels present (WARN if none); multi-line quoted notes are parsed with the csv module
-  - audio: if session.json audioEnabled is false, no audio file is expected (level meter only);
-    otherwise (true, or missing in older app versions) no audio_*.m4a is a FAIL. Files must be
-    consistent with audio_segments.csv. audio_level.csv is expected in both cases (WARN if missing)
-  - audio playability: every audio_*.m4a / audio.m4a must contain a top-level 'moov' box (the MP4
-    index, written only when AVAudioRecorder stops). Missing moov is a FAIL, except for the LAST
-    segment of a recovered session (recorded when the app died): WARN. session.json
-    stats.audioFilesIncomplete (optional) is printed and must agree with the scan (WARN otherwise)
   - rows before the session start (t_utc_ms < startedAtUtc), in every CSV: location rows up to 5 s
     early are INFO (the app keeps CoreLocation's cached first fix if <= 5 s old), older ones WARN;
     activity.csv is exempt (the current CMMotionActivity may have begun earlier); any other file
     with pre-start rows is a WARN (file, count, earliest offset)
-  - stream coverage: location / audio_level must span (last - first t_up) at least 50% of the
+  - stream coverage: location must span (last - first t_up) at least 50% of the
     session duration ((endedAtUtc or the last row of any stream) - startedAtUtc), else WARN;
     sessions shorter than 30 s are not checked
   - stats.durationSec (if present) vs endedAtUtc - startedAtUtc (finished sessions) or vs the last
     sensor row t_up - startUptimeSec (recovered / unfinished sessions): |diff| > 2 s is a WARN
   - session.json: WARN if not ended cleanly (endedAtUtc null), recovered, synthetic sensors,
     preflight overridden/missing, mount.handheld true or mount.rigid false (the backend excludes
-    such sessions from roughness). Keys added in newer app versions (audioEnabled, vehicle.line,
+    such sessions from roughness). Keys added in newer app versions (vehicle.line,
     mount.handheld, mount.seatOverAxle, people.raterPosture) are INFO when absent.
+  - no audio since D48: a folder from an older build may still hold audio_level.csv,
+    audio_segments.csv, audio_*.m4a / audio.m4a, clock.csv rows with source=audio_start and
+    session.json audioEnabled / requestedRatesHz.audioLevel / stats.audioFiles /
+    stats.audioFilesIncomplete. They are not checked: one INFO line lists what was found.
 
 A check that hits unexpected data (wrong header, unreadable file, ...) becomes a FAIL line for
 that file; the remaining checks still run and the summary is always printed.
@@ -67,16 +64,22 @@ EXPECTED_HEADERS = {
     "abs_altitude": COMMON + ["altitude_m", "accuracy_m", "precision_m"],
     "activity": COMMON + ["stationary", "walking", "running", "automotive", "cycling", "unknown",
                           "confidence", "start_utc_ms"],
-    "audio_level": COMMON + ["avg_dbfs", "peak_dbfs"],
-    "audio_segments": COMMON + ["event", "file"],
     "device": COMMON + ["battery_level", "battery_state", "thermal_state", "low_power",
                         "free_disk_bytes", "net_status", "net_type"],
     "labels": COMMON + ["type", "value", "note"],
     "clock": COMMON + ["source"],
 }
-# Same schema as exact header lines, keyed by file stem (StreamFile.rawValue). test_tools.py pins it
+# Files only app builds before D48 (no audio) wrote. StreamFile keeps their headers so old sessions
+# still parse; quick_check never reads them (check_legacy_files only reports that they are there).
+LEGACY_HEADERS = {
+    "audio_level": COMMON + ["avg_dbfs", "peak_dbfs"],
+    "audio_segments": COMMON + ["event", "file"],
+}
+LEGACY_CLOCK_SOURCES = ("audio_start",)  # derived from the current anchor, not a clock read
+# Both schemas as exact header lines, keyed by file stem (StreamFile.rawValue). test_tools.py pins it
 # against tools/fixtures/csv_headers.json, which the Swift unit tests write from StreamFile.header.
-EXPECTED_HEADER_LINES = {name: ",".join(cols) for name, cols in EXPECTED_HEADERS.items()}
+EXPECTED_HEADER_LINES = {name: ",".join(cols)
+                         for name, cols in {**EXPECTED_HEADERS, **LEGACY_HEADERS}.items()}
 
 # Rate-checked streams: (min_hz, max_gap_s, severity_if_violated, missing_severity)
 MOTION = ("device_motion", "accel_raw", "gyro_raw")
@@ -85,11 +88,10 @@ RATE_RULES = {
     "accel_raw": (90.0, 0.1, "FAIL", "FAIL"),
     "gyro_raw": (90.0, 0.1, "FAIL", "FAIL"),
     "mag_raw": (45.0, 0.2, "WARN", "WARN"),
-    "audio_level": (8.0, 1.0, "WARN", "WARN"),
 }
 # Order of the per-stream table; anything not in RATE_RULES is informational only.
 STREAM_ORDER = ["device_motion", "accel_raw", "gyro_raw", "mag_raw", "location", "heading",
-                "altimeter", "abs_altitude", "activity", "audio_level", "device"]
+                "altimeter", "abs_altitude", "activity", "device"]
 MISSING_SEVERITY = {"location": "FAIL", "clock": "FAIL", "labels": "WARN"}
 # Slow / event-driven streams: a header with 0 data rows means the sensor never delivered (no
 # barometer on the Simulator, permission denied, ...). Worth a WARN, not a silent PASS.
@@ -104,7 +106,7 @@ PRESTART_ROUNDING_MS = 1.0
 LOCATION_PRESTART_OK_MS = 5000.0  # RecordingSession.staleFixMargin: cached first fix kept if <= 5 s old
 PRESTART_EXEMPT = ("activity",)   # the current CMMotionActivity may have started before the session
 
-COVERAGE_STREAMS = ("location", "audio_level")
+COVERAGE_STREAMS = ("location",)
 COVERAGE_MIN_FRACTION = 0.5    # stream span must cover at least this share of the session
 COVERAGE_MIN_SESSION_S = 30.0  # shorter sessions are not coverage-checked
 DURATION_TOLERANCE_S = 2.0     # stats.durationSec vs. timestamps
@@ -232,7 +234,7 @@ def timing_stats(tups):
 
 
 def load_clock(folder, rep):
-    """Returns sorted anchors [(up, utc_ms)] from clock.csv (excluding derived audio_start rows)."""
+    """Returns sorted anchors [(up, utc_ms)] from clock.csv (pre-D48 derived rows excluded)."""
     path = os.path.join(folder, "clock.csv")
     print("\n== clock.csv ==")
     if not os.path.exists(path):
@@ -246,8 +248,8 @@ def load_clock(folder, rep):
     for _, r in rows:
         src = r[idx["source"]] if "source" in idx else "?"
         sources[src] = sources.get(src, 0) + 1
-        if src == "audio_start":
-            continue  # derived from the current anchor, not an independent clock read
+        if src in LEGACY_CLOCK_SOURCES:
+            continue  # reported by check_legacy_files
         up, utc = fnum(r[idx.get("t_up", 0)]), fnum(r[idx.get("t_utc_ms", 1)])
         if up is not None and utc is not None:
             anchors.append((up, utc))
@@ -472,7 +474,7 @@ def check_timeline(folder, meta, times, rep):
     if not isinstance(meta, dict):
         print("  session.json unavailable - timeline checks skipped")
         return
-    for name in EXPECTED_HEADERS:  # labels / clock / audio_segments are not in the stream table
+    for name in EXPECTED_HEADERS:  # labels / clock are not in the stream table
         path = os.path.join(folder, f"{name}.csv")
         if name not in times and os.path.exists(path):
             times[name] = guarded(rep, f"{name}.csv", scan_times, path, default=([], []))
@@ -597,138 +599,31 @@ def check_labels(folder, rep, span):
         rep.add("WARN", f"labels: {outside} labels have t_up outside the motion data time span")
 
 
-def audio_segment_starts(folder, rep):
-    """Returns the list of files with a 'start' event in audio_segments.csv, or None if absent."""
-    seg_path = os.path.join(folder, "audio_segments.csv")
-    if not os.path.exists(seg_path):
-        return None
-    header, rows = read_csv(seg_path, "audio_segments", rep)
-    if header is None:
-        return []
-    idx = {h: i for i, h in enumerate(header)}
-    if not require_columns("audio_segments", idx, ("event", "file"), rep):
-        return []
-    events, started = {}, []
-    for _, r in rows:
-        ev = r[idx["event"]]
-        events[ev] = events.get(ev, 0) + 1
-        if ev == "start":
-            started.append(r[idx["file"]])
-    print("  audio_segments events: " + (", ".join(f"{k}={v}" for k, v in sorted(events.items()))
-                                         or "(none)"))
-    return started
-
-
-def has_moov_box(path):
-    """True if the file has a top-level MP4 'moov' box (the index AVAudioRecorder writes on stop;
-    without it the file is unplayable). Same walk as SessionAnalyzer.hasMoovBox: 4-byte big-endian
-    size + 4-byte type; size 1 -> 64-bit largesize follows; size 0 -> box runs to end of file."""
-    end = os.path.getsize(path)
-    with open(path, "rb") as fh:
-        offset = 0
-        while offset + 8 <= end:
-            fh.seek(offset)
-            hdr = fh.read(16)
-            if len(hdr) < 8:
-                return False
-            size, typ = int.from_bytes(hdr[0:4], "big"), hdr[4:8]
-            if typ == b"moov":
-                return True
-            if size == 1:
-                if len(hdr) < 16:
-                    return False
-                size = int.from_bytes(hdr[8:16], "big")
-            elif size == 0:
-                return False  # last box runs to EOF and it is not moov
-            if size < 8:
-                return False  # corrupt box header; cannot walk further
-            offset += size
-    return False
-
-
-def check_audio_playable(folder, files, meta, rep):
-    """files: audio file names in segment order (legacy audio.m4a last)."""
-    meta = meta if isinstance(meta, dict) else {}
-    recovered = meta.get("recovered") is True
-    unplayable = [f for f in files if not has_moov_box(os.path.join(folder, f))]
-    for f in unplayable:
-        if recovered and f == files[-1]:
-            rep.add("WARN", f"{f} unplayable (no index): it was being recorded when the app died — "
-                            f"expected after a crash")
-        else:
-            rep.add("FAIL", f"{f} unplayable (no 'moov' box / MP4 index)")
-    if not unplayable:
-        rep.ok(f"{len(files)} audio file(s) playable ('moov' box present)")
-
-    stats = meta.get("stats")
-    listed = stats.get("audioFilesIncomplete") if isinstance(stats, dict) else None
-    if listed is None:
-        return
-    if not isinstance(listed, list) or not all(isinstance(x, str) for x in listed):
-        rep.add("WARN", f"session.json: stats.audioFilesIncomplete should be a list of file names, "
-                        f"got {listed!r}")
-        return
-    print(f"  stats.audioFilesIncomplete: {', '.join(listed) or '(empty)'}")
-    if set(listed) == set(unplayable):
-        rep.ok("stats.audioFilesIncomplete agrees with the 'moov' scan")
-    else:
-        rep.add("WARN", f"session.json: stats.audioFilesIncomplete ({', '.join(listed) or 'none'}) "
-                        f"disagrees with the 'moov' scan ({', '.join(unplayable) or 'none'})")
-
-
-def check_audio(folder, rep, anchors_present, meta):
-    print("\n== audio ==")
-    enabled = meta.get("audioEnabled", True) if isinstance(meta, dict) else True
-    files = sorted(f for f in os.listdir(folder)
-                   if f.startswith("audio_") and f.endswith(".m4a"))
-    legacy = os.path.exists(os.path.join(folder, "audio.m4a"))
-    if legacy:
-        files.append("audio.m4a")
-    total = 0
-    for f in files:
-        size = os.path.getsize(os.path.join(folder, f))
-        total += size
-        print(f"  {f:16s} {size:>12,d} bytes")
-        if size == 0:
-            rep.add("WARN", f"{f} is empty (0 bytes)")
-
-    if enabled is False:
-        started = audio_segment_starts(folder, rep) or []
-        if not files and not started:
-            rep.ok("audio recording OFF (privacy) — level meter only (audio_level.csv)")
-            return
-        rep.add("WARN", f"session.json audioEnabled=false but {len(files)} audio file(s) / "
-                        f"{len(started)} segment start(s) present - check privacy (spec §3.5)")
-    if not files:
-        print("  audio MISSING")
-        rep.add("FAIL", "MISSING audio: audioEnabled is true (or absent) but no audio_*.m4a / "
-                        "audio.m4a in the folder")
-        return
-    print(f"  total {total:,d} bytes in {len(files)} file(s)")
-    guarded(rep, "audio playability", check_audio_playable, folder, files, meta, rep)
-
-    started = audio_segment_starts(folder, rep)
-    if started is None:
-        if not legacy:
-            rep.add("WARN", "MISSING audio_segments.csv (cannot cross-check audio files)")
-        return
-    on_disk = set(f for f in files if f != "audio.m4a")
-    missing = [f for f in started if f not in on_disk]
-    extra = sorted(on_disk - set(started))
-    if missing:
-        rep.add("FAIL", f"audio files listed as started but missing on disk: {', '.join(missing)}")
-    if extra:
-        rep.add("WARN", f"audio files on disk without a start event: {', '.join(extra)}")
-    if not missing and not extra:
-        rep.ok(f"{len(started)} audio segment(s) match audio_segments.csv")
-
+def check_legacy_files(folder, meta, rep):
+    """Pre-D48 audio data (older app builds): not checked, one INFO line lists what is there."""
+    found = sorted(f for f in os.listdir(folder)
+                   if (f.startswith("audio_") and f.endswith(".m4a")) or f == "audio.m4a")
+    found += [f"{name}.csv" for name in LEGACY_HEADERS
+              if os.path.exists(os.path.join(folder, f"{name}.csv"))]
     clock_path = os.path.join(folder, "clock.csv")
-    if anchors_present and os.path.exists(clock_path):
+    if os.path.exists(clock_path):
         with open(clock_path, newline="", encoding="utf-8", errors="replace") as fh:
-            n_audio_start = sum(1 for r in csv.DictReader(fh) if r.get("source") == "audio_start")
-        if n_audio_start != len(started):
-            rep.add("WARN", f"clock.csv has {n_audio_start} audio_start rows but "
-                            f"audio_segments.csv has {len(started)} start events")
+            try:
+                n = sum(1 for r in csv.DictReader(fh) if r.get("source") in LEGACY_CLOCK_SOURCES)
+            except csv.Error:
+                n = 0  # already a FAIL from load_clock
+        if n:
+            found.append(f"{n} clock.csv row(s) with source={'/'.join(LEGACY_CLOCK_SOURCES)}")
+    if isinstance(meta, dict):
+        rates, stats = _obj(meta, "requestedRatesHz"), _obj(meta, "stats")
+        found += [f"session.json {label}" for present, label in (
+            ("audioEnabled" in meta, "audioEnabled"),
+            ("audioLevel" in rates, "requestedRatesHz.audioLevel"),
+            ("audioFiles" in stats, "stats.audioFiles"),
+            ("audioFilesIncomplete" in stats, "stats.audioFilesIncomplete")) if present]
+    if found:
+        print("\n== pre-D48 files ==")
+        rep.info(f"from an app build before D48 (no audio), ignored: {', '.join(found)}")
 
 
 def _obj(meta, key):
@@ -737,7 +632,7 @@ def _obj(meta, key):
 
 
 def check_session_fields(meta, rep):
-    """Vehicle / mount / people / audio fields. Keys added in newer app versions are INFO if absent."""
+    """Vehicle / mount / people fields. Keys added in newer app versions are INFO if absent."""
     vehicle, mount, people = _obj(meta, "vehicle"), _obj(meta, "mount"), _obj(meta, "people")
 
     def show(label, container, key, newer):
@@ -754,15 +649,13 @@ def check_session_fields(meta, rep):
     has_hand, handheld = show("mount.handheld", mount, "handheld", True)
     has_axle, axle = show("mount.seatOverAxle", mount, "seatOverAxle", True)
     has_post, posture = show("people.raterPosture", people, "raterPosture", True)
-    has_audio, audio = show("audioEnabled", meta, "audioEnabled", True)
 
     if has_line and line is not None and not isinstance(line, str):
         rep.add("WARN", f"session.json: vehicle.line should be a string or null, got {line!r}")
     if vehicle.get("type") in ("bus", "tram") and not line:
         rep.info("session.json: public-transport session without a line number")
     for present, val, label in ((has_hand, handheld, "mount.handheld"),
-                                (has_axle, axle, "mount.seatOverAxle"),
-                                (has_audio, audio, "audioEnabled")):
+                                (has_axle, axle, "mount.seatOverAxle")):
         if present and not isinstance(val, bool):
             rep.add("WARN", f"session.json: {label} should be true/false, got {val!r}")
     if has_post and posture not in RATER_POSTURES:
@@ -839,7 +732,7 @@ def main(argv):
     guarded(rep, "real-time check", check_utc_realtime, utc_firstlast, meta, rep)
     guarded(rep, "session timeline", check_timeline, folder, meta, times, rep)
     guarded(rep, "labels.csv", check_labels, folder, rep, span)
-    guarded(rep, "audio", check_audio, folder, rep, bool(anchors), meta)
+    guarded(rep, "pre-D48 files", check_legacy_files, folder, meta, rep)
 
     overall = rep.overall
     print("\n== summary ==")

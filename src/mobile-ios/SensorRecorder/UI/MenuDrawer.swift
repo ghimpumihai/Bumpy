@@ -33,7 +33,7 @@ struct MenuDrawer: View {
         VStack(alignment: .leading, spacing: 36) {
             HStack {
                 Text("Road & Ride")
-                    .font(.system(size: 24, weight: .semibold))
+                    .font(Theme.font(24, .semibold))
                     .tracking(-0.6)
                     .foregroundStyle(Theme.text)
                 Spacer()
@@ -45,7 +45,7 @@ struct MenuDrawer: View {
                     item(icon: "globe", title: "Web app", hint: "Your trips and the map", trailing: "arrow.up.right",
                          id: "menuWebApp", delay: 0.14) { openURL(url) }
                 }
-                item(icon: "slider.horizontal.3", title: "Settings", hint: "Cloud and recording", trailing: "chevron.right",
+                item(icon: "slider.horizontal.3", title: "Settings", hint: "Server and device key", trailing: "chevron.right",
                      id: "settingsButton", delay: 0.21) {
                     isOpen = false
                     onSettings()
@@ -53,8 +53,8 @@ struct MenuDrawer: View {
             }
 
             Spacer()
-            Text("Version \(AppInfo.version)")
-                .font(.system(size: 13))
+            Text("Version \(AppInfo.shortVersion)")
+                .font(Theme.font(13))
                 .foregroundStyle(Theme.muted)
                 .padding(.horizontal, 4)
         }
@@ -72,10 +72,10 @@ struct MenuDrawer: View {
                     .frame(width: 48, height: 48)
                     .background(Theme.surface, in: RoundedRectangle(cornerRadius: 14))
                 VStack(alignment: .leading, spacing: 2) {
-                    Text(title).font(.system(size: 17, weight: .semibold))
-                    Text(hint).font(.system(size: 14)).foregroundStyle(Theme.muted)
+                    Text(title).font(Theme.font(17, .semibold))
+                    Text(hint).font(Theme.font(14)).foregroundStyle(Theme.muted)
                 }
-                Spacer()
+                .frame(maxWidth: .infinity, alignment: .leading)
                 Image(systemName: trailing)
                     .font(.system(size: 13, weight: .semibold))
                     .foregroundStyle(Theme.muted)

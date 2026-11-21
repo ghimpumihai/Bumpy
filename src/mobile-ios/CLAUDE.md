@@ -29,7 +29,7 @@ Requirements: `decisions/01-initial-plan.md`. Losing data is the worst possible 
 - Shared mutable state is behind `Locked<T>` or confined to one serial queue; document which.
 - Every source's `stop()` guarantees no callback after it returns (drain the queue): writers are closed right after.
 - One `CMMotionManager` for the app (`SharedMotion`). Nothing may start motion updates while a recording owns them (preflight checks `app.recording == nil`).
-- `CLLocationManager` lives on main; `AVAudioRecorder` is used only on the audio service's queue.
+- `CLLocationManager` lives on main.
 
 ## Files on disk
 - Append-only, flushed every ≤ 1 s (`SessionWriter`); `session.json` written atomically. Unfinished sessions are recovered on launch.
@@ -39,7 +39,7 @@ Requirements: `decisions/01-initial-plan.md`. Losing data is the worst possible 
 - `tools/fixtures/` (ingest batch + `csv_headers.json`) is the cross-language contract: tests compare, never rewrite. Regenerate only on purpose: `TEST_RUNNER_REGENERATE_FIXTURES=1 xcodebuild … test`.
 - `session.json` must stay decodable across app versions: new keys use `decodeIfPresent` with defaults, and a test decodes an old-format file.
 - Contract types that leave the app (`session.json`, ingest JSON) use explicit `CodingKeys`/`encode(to:)` where null vs omitted matters, with a test that pins their keys.
-- Raw audio is never sent live. With `audioEnabled == false` (default on bus/tram, GDPR) no audio is written; only the level meter runs.
+- No audio (D48): never record sound or ask for the microphone. `StreamFile.audioLevel/audioSegments` exist only so older folders and the header fixture parse; new recordings write `StreamFile.recorded`.
 
 ## Upload
 - Batches are built every 2 s and queued on disk before sending; one request at a time, oldest first, backoff 1 → 30 s. Any 2xx means done; 409 is also handled as done, though the Azure backend answers 200 for duplicates and never sends 409. Idempotency key `sessionId:batchSeq`; never drop or duplicate samples between batches.
@@ -48,7 +48,7 @@ Requirements: `decisions/01-initial-plan.md`. Losing data is the worst possible 
 
 ## UI
 - Three screens (D51): Start → Recording → Recap, plus the menu panel and Settings. No manual data entry: no setup form, labels or sickness prompts. Anything computed in the cloud is shown on the web dashboard, not here.
-- Light theme only. Colours only through `Theme` tokens: ink black for the main action, neutral greys otherwise. Colour means trouble: amber WARN, red PROBLEM; OK is plain grey text ("Upload off" is grey).
+- Light theme only. Colours only through `Theme` tokens: ink black for the main action, neutral greys otherwise. Colour means trouble: amber WARN, red PROBLEM; OK is plain grey text ("Upload off" is grey). Text only through `Theme.font(size, weight)` (Geist, the dashboard's typeface); SF Symbols keep `.system`.
 - Stop is a 2 s long-press. Never add a single-tap stop or a pause.
 - Every interactive control has an `accessibilityIdentifier` (UI tests rely on them). Never put one on a container: SwiftUI propagates it and overwrites the children's. Toggles expose state through `accessibilityValue` ("active"/"inactive").
 - Hit targets ≥ 44 pt (used in a moving car); a smaller-looking button keeps a 44 pt tap area.

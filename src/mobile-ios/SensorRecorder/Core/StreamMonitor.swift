@@ -204,7 +204,7 @@ enum SessionAnalyzer {
                                        fileBytes: fileSizes[id.file.fileName])
             }
             return .init(durationSec: durationSec, streams: s, labelsCount: labelsCount,
-                         audioFiles: audioFiles, fileSizes: fileSizes, totalBytes: totalBytes,
+                         fileSizes: fileSizes, totalBytes: totalBytes,
                          writeErrors: 0, uploadBatchesCreated: 0)
         }
     }

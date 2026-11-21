@@ -92,13 +92,14 @@ final class RecordingFlowUITests: XCTestCase {
         XCTAssertTrue(status.label.hasPrefix("Upload off"), status.label)
     }
 
-    /// GDPR: raw road noise is off unless someone turns it on.
-    func testRoadNoiseOffByDefault() {
+    /// No audio (D48): Settings has no road-noise switch; Back returns to Start.
+    func testSettingsHasNoRecordingSwitchAndGoesBack() {
         launch()
         openSettings()
-        let audio = app.switches["audioToggle"]
-        XCTAssertTrue(audio.waitForExistence(timeout: 5))
-        XCTAssertEqual(audio.value as? String, "inactive")
+        XCTAssertTrue(app.textFields["apiBaseURL"].waitForExistence(timeout: 5))
+        XCTAssertEqual(app.switches.count, 0, "nothing to switch on: the app never records audio")
+        app.buttons["settingsBack"].tap()
+        XCTAssertTrue(app.buttons["startTrip"].waitForHittable(timeout: 5))
     }
 
     private func openSettings() {

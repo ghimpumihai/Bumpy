@@ -224,7 +224,7 @@ final class SessionWriter: @unchecked Sendable {
     static let flushInterval: TimeInterval = 0.5
     static let fsyncEveryNFlushes = 20 // ~10 s
 
-    init(folder: URL, files: [StreamFile] = StreamFile.allCases,
+    init(folder: URL, files: [StreamFile] = StreamFile.recorded,
          uptime: @escaping () -> TimeInterval = { ProcessInfo.processInfo.systemUptime }) throws {
         self.folder = folder
         self.uptime = uptime

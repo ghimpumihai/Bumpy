@@ -17,21 +17,21 @@ struct StartView: View {
                 .padding(.leading, -4)
 
             Spacer()
-            Text("Ready\nto ride")
-                .font(.system(size: 40, weight: .semibold))
-                .tracking(-1.2)
-                .foregroundStyle(Theme.text)
-                .riseIn(0.08)
-            Text("Lay the phone flat, screen up, and don't move it. The sensors do the rest.")
-                .font(.system(size: 17))
-                .foregroundStyle(Theme.muted)
-                .frame(maxWidth: 300, alignment: .leading)
-                .riseIn(0.16)
-            if app.lastRecoveredCount > 0 {
-                Text("\(app.lastRecoveredCount) interrupted trip(s) were recovered. Their data is kept.")
-                    .font(.system(size: 14))
+            VStack(alignment: .leading, spacing: 12) {
+                Headline(lines: ["Ready", "to ride"])
+                    .riseIn(0.08)
+                Text("Lay the phone flat, screen up, and don't move it. The sensors do the rest.")
+                    .font(Theme.font(17))
+                    .lineSpacing(3) // 24 pt lines
                     .foregroundStyle(Theme.muted)
-                    .padding(.top, 8)
+                    .frame(maxWidth: 300, alignment: .leading)
+                    .riseIn(0.16)
+                if app.lastRecoveredCount > 0 {
+                    Text("\(app.lastRecoveredCount) interrupted trip(s) were recovered. Their data is kept.")
+                        .font(Theme.font(14))
+                        .foregroundStyle(Theme.muted)
+                        .padding(.top, 8)
+                }
             }
             Spacer()
 
@@ -91,13 +91,13 @@ struct StartView: View {
                     .accessibilityIdentifier("checkLine")
                 if failed, let fix = Self.fix(check, model: model) {
                     Button(fix.label, action: fix.action)
-                        .font(.system(size: 15, weight: .semibold))
+                        .font(Theme.font(15, .semibold))
                         .underline()
                         .frame(minHeight: 44)
                         .accessibilityIdentifier("fixCheck")
                 }
             }
-            .font(.system(size: 15))
+            .font(Theme.font(15))
             .foregroundStyle(failed ? Theme.problem : Theme.muted)
         }
     }
@@ -109,7 +109,6 @@ struct StartView: View {
         switch c.id {
         case "perm.location": return c.detail.contains("Precise") ? "Precise location is off" : "Location access is off"
         case "perm.motion": return "Motion access is off"
-        case "perm.mic": return "Microphone access is off"
         case "avail.motion", "avail.baro": return "This phone lacks a needed sensor"
         case "gps.fix": return "No precise GPS fix yet"
         case "motion.rate": return "Motion sensors are too slow"

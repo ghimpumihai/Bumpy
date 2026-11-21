@@ -15,7 +15,7 @@ on:
       - ".github/workflows/dashboard-ci.yml"
       - "!**/*.md"
   push:
-    branches: [main]
+    branches: [main, staging] # staging: the integration branch before main (no deploys)
     paths:
       - "dashboard/**"
       - "services/read-api/**"

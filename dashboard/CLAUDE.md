@@ -17,15 +17,15 @@ The dashboard reads only the read API. Its contract is [API.md](API.md), with ty
 - Types shared across files live in `src/types/<domain>/`; everything else stays next to its use.
 
 ## Data fetching
-- Polling: the live view every 2 s (`LIVE_POLL_INTERVAL_MS`, no retries: polling is the retry); recording/processing trips every 5 s until finalized; aggregates every 60 s; finalized trips never poll.
-- A trip's own data (series, track, events, labels) is keyed by "finalized", so it's fetched again when the finalize job replaces the live results.
+- Polling: the live view every 2 s (`LIVE_POLL_INTERVAL_MS`, no retries: polling is the retry); recording trips every 5 s (once a minute after 20 min of silence); processing trips every 30 s for up to 2 h after they ended; aggregates every 60 s; finalized trips never poll (`utils/session-polling.ts`).
+- A trip's own data (series, track, events, labels) is keyed by the trip's status, so it's fetched again when the trip ends and when the finalize job replaces the live results; the same trip's previous data stays on screen meanwhile.
 - Use `QueryState` with `hasData`: a failed background refresh keeps the loaded content with a small notice. Map overlays use `ErrorAlert` instead, so the map stays visible.
 - Forms: `useWatch`, not `watch` (React Compiler). `shouldUnregister: true` only for forms reused across entities; a hidden field (the API URL in mock mode) stays registered and the schema decides when it's validated.
 
 ## Domain rules (plan 02 §5, §8, §10; API.md)
 - `source` = how a trip reached the cloud (Streamed / Uploaded / Replay); `status` = Recording → Processing → finalized; `incomplete` is a separate flag. Never call a finalized streamed trip "live".
 - Only finalized trips count in the map; always show *why* a trip doesn't (`EXCLUSION_LABELS`).
-- Live freshness uses the server clock and distinguishes "behind the phone", "no data" (dead zone), "catching up", "trip ended" and "read API unreachable". Never claim "live" for old data, never blame the phone for the dashboard's own outage.
+- Live freshness uses the server clock and distinguishes "behind the phone", "no data" (dead zone), "catching up" and "read API unreachable" (a device leaves the view as soon as its trip ends; "trip ended" is only a safeguard). Never claim "live" for old data, never blame the phone for the dashboard's own outage.
 - Everything on the map must also be reachable by keyboard (the worst-segments list).
 
 ## Maps and charts
@@ -43,4 +43,5 @@ The dashboard reads only the read API. Its contract is [API.md](API.md), with ty
 
 ## Done means
 - `npm run check` and `npm run build` pass. Run `npm run test:e2e` (slow: every route, console errors, axe in both themes) before merging to `main`, not on every change.
+- `e2e/real-api.spec.ts` (project `real-api`, only with `REAL_API_PYTHON` set) runs the dashboard against `services/read-api` on a PostGIS database whose name contains `e2e`, seeded through the processor's write path (`e2e/real-api/seed.py`). CI (`dashboard-ci.yml`) runs both suites on PRs, so they run before merging without anyone running them locally.
 - Don't write new tests for views or UI; keep the existing mock-backend tests passing (they pin the plan's rules).

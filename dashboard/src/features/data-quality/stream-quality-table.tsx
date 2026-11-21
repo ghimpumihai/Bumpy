@@ -18,6 +18,10 @@ const STATUS_TEXT: Record<StreamStatus, string> = {
 };
 
 export function StreamQualityTable({ streams }: { streams: Record<string, StreamQuality> }) {
+  const entries = Object.entries(streams);
+  if (entries.length === 0) {
+    return <p className="px-1 text-sm text-muted-foreground">No per-stream counts for this trip yet.</p>;
+  }
   return (
     <Table>
       <TableHeader>
@@ -31,7 +35,7 @@ export function StreamQualityTable({ streams }: { streams: Record<string, Stream
         </TableRow>
       </TableHeader>
       <TableBody>
-        {Object.entries(streams).map(([name, stream]) => {
+        {entries.map(([name, stream]) => {
           const status = streamStatus(stream);
           return (
             <TableRow key={name}>

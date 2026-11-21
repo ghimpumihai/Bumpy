@@ -24,6 +24,7 @@ variable "psql_nat_gateway_enabled" {
 variable "alert_email" {
   description = "Where budget and error alerts go."
   type        = string
+  sensitive   = true # kept out of plan output, which the CI plan shows on a public repo
 }
 
 variable "admin_object_ids" {
@@ -39,9 +40,9 @@ variable "budget_amount" {
 }
 
 variable "budget_start_date" {
-  description = "First day of the month the budget starts, RFC 3339."
+  description = "First day of the month the budget starts, RFC 3339. Default (null): the first day of the month of the apply that creates it; Azure rejects a start in an earlier month. Later changes are ignored (observability module)."
   type        = string
-  default     = "2026-11-01T00:00:00Z"
+  default     = null
 }
 
 variable "eventhub_local_auth_enabled" {

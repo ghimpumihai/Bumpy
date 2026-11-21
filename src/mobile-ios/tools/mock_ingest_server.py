@@ -170,8 +170,9 @@ def validate(b):
         raise Invalid(f"t0Utc is not a valid date/time: {b['t0Utc']!r}")
     if not is_num(b["t0Up"]):
         raise Invalid("t0Up must be a finite number")
-    if b["units"] != EXPECTED_UNITS:
-        raise Invalid(f"units must be {json.dumps(EXPECTED_UNITS)}, got {json.dumps(b['units'])}")
+    # The four units the backend relies on must match; extra keys are allowed (spec §6.2: no fixed literal).
+    if not isinstance(b["units"], dict) or any(b["units"].get(k) != v for k, v in EXPECTED_UNITS.items()):
+        raise Invalid(f"units must include {json.dumps(EXPECTED_UNITS)}, got {json.dumps(b['units'])}")
     # Additive fields (app >= review round 3): optional, but typed when present.
     for k in ("eventType", "source"):
         if k in b and (not isinstance(b[k], str) or not b[k]):

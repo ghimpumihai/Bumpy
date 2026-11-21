@@ -1,4 +1,5 @@
 import { AnimatePresence, motion } from "motion/react";
+import { useState } from "react";
 
 import { liveApi } from "@/api/live";
 import { ErrorAlert } from "@/components/error-alert";
@@ -9,27 +10,29 @@ import { useNow } from "@/hooks/use-now";
 
 import { LiveDeviceCard } from "./components/live-device-card";
 import { LiveMap } from "./components/live-map";
+import { liveFreshness } from "./utils/freshness";
+import { StreamStatus } from "@/types/sessions";
 import { CARD_ANIMATION_OFFSET_PX, CARD_ANIMATION_S } from "./utils/constants";
 
 export function LiveView() {
   const live = liveApi.useLive();
   const now = useNow();
   const devices = live.data?.devices ?? [];
+  const [focus, setFocus] = useState<{ sessionId: string | undefined; nonce: number }>({ sessionId: undefined, nonce: 0 });
   // Ages are measured on the server's clock: offset = server time − local time at the last response.
   const clockOffsetMs = live.data ? Date.parse(live.data.serverTime) - live.dataUpdatedAt : 0;
   // If the dashboard can't reach the read API, the cards must not blame the phones for the silence.
   const apiUnreachable = live.data !== undefined && (live.isError || now - live.dataUpdatedAt > LIVE_API_STALE_MS);
+  const serverNow = now + clockOffsetMs;
+  const stale = new Set(devices.filter((device) => apiUnreachable || liveFreshness(device, serverNow).status !== StreamStatus.OK).map((device) => device.sessionId));
   return (
     <div className="grid flex-1 grid-rows-[minmax(22rem,1fr)_auto] lg:grid-cols-[1fr_24rem] lg:grid-rows-1">
       <div className="relative min-h-[22rem]">
-        <LiveMap devices={devices} />
+        <LiveMap devices={devices} stale={stale} focus={focus} />
       </div>
       <aside aria-label="Streaming devices" className="vertical gap-3 overflow-y-auto border-t p-4 lg:border-t-0 lg:border-l">
         <div className="vertical gap-1">
           <h1 className="text-lg font-semibold">Live</h1>
-          <p className="text-xs text-muted-foreground">
-            Phones and replays sending data right now, a few seconds behind the phone (target under 10 s). Refreshes every 2 s.
-          </p>
         </div>
         {apiUnreachable && (
           <ErrorAlert
@@ -57,7 +60,7 @@ export function LiveView() {
                 exit={{ opacity: 0, y: -CARD_ANIMATION_OFFSET_PX }}
                 transition={{ duration: CARD_ANIMATION_S }}
               >
-                <LiveDeviceCard device={device} now={now + clockOffsetMs} apiUnreachable={apiUnreachable} />
+                <LiveDeviceCard device={device} now={serverNow} apiUnreachable={apiUnreachable} onLocate={() => setFocus((previous) => ({ sessionId: device.sessionId, nonce: previous.nonce + 1 }))} />
               </motion.div>
             ))}
             {devices.length === 0 && (

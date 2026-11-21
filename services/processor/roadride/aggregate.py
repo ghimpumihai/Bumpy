@@ -100,8 +100,8 @@ class Result:
 
 
 def eligible(context_known: bool, mount: dict | None) -> bool:
-    """Rigid mount and known context: counts for roughness and potholes, and its sickness numbers
-    aren't experimental (plan §10; mock dataset.ts isRoughnessEligible / isSicknessExperimental)."""
+    """Rigid mount and known context: counts for roughness and potholes (plan §10; mock dataset.ts
+    isRoughnessEligible). Sickness only needs known context (D41)."""
     mount = mount or {}
     # Same rule as the read API's roughnessEligible: rigid must be stated, not just not denied.
     return bool(context_known) and mount.get("rigid") is True and mount.get("handheld") is not True
@@ -288,7 +288,7 @@ def load_observations(conn: Connection) -> list[Obs]:
         ok = eligible(ctx, mount)
         out.append(Obs(session_id=sid, h3=cell, vehicle=vehicle, duration_s=dur, speed=speed,
                        roughness=rough, aw_rms=aw, pothole_count=potholes, roughness_eligible=ok,
-                       sickness_eligible=ok, rater_seat=seat, rater_posture=posture,
+                       sickness_eligible=bool(ctx), rater_seat=seat, rater_posture=posture,
                        sickness_s=sick_s, sickness_aw_rms=sick_aw))
     return out
 

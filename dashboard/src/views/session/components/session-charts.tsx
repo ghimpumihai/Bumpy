@@ -47,7 +47,7 @@ export function SessionCharts({ session }: { session: SessionDetail }) {
                 ]}
               />
               <TimeSeriesChart
-                title="Sideways and forward acceleration — sway in curves and stop-and-go"
+                title="Sideways and forward acceleration — curves and stop-and-go (appears once the phone’s direction is learned)"
                 times={data.times}
                 height={CHART_HEIGHT_PX}
                 syncKey={syncKey}

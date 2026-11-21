@@ -52,7 +52,7 @@ Requirements: `decisions/01-initial-plan.md`. Losing data is the worst possible 
 - Stop is a 2 s long-press. Never add a single-tap stop or a pause.
 - Every interactive control has an `accessibilityIdentifier` (UI tests rely on them). Never put one on a container: SwiftUI propagates it and overwrites the children's. Toggles expose state through `accessibilityValue` ("active"/"inactive").
 - Hit targets ≥ 44 pt (used in a moving car); a smaller-looking button keeps a 44 pt tap area.
-- Validation lives in model types (`UploadConfig.parseBaseURL`, `SessionSetup`, `TripSummary`), not views. `SetupDefaults` keeps the last mount and people values; every trip is recorded as a car.
+- Validation lives in model types (`UploadConfig.parseBaseURL`, `SessionSetup`, `TripSummary`), not views. `SetupDefaults` keeps the last mount and people values, except rigid/hand-held, which reset to a rigid mount for every trip (D42); every trip is recorded as a car.
 - UI copy is English.
 
 ## Real data only

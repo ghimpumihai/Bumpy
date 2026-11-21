@@ -4,7 +4,7 @@ import { MS_PER_SECOND, MS_TO_KMH, METERS_PER_KM, SECONDS_PER_HOUR } from "@/con
 import { RoadEventType, SessionSource, VehicleType } from "@/types/common";
 import type { LiveDevice, LiveResponse } from "@/types/live";
 import type { Overview } from "@/types/overview";
-import type { SegmentCollection, SegmentDetail, VehicleFilter } from "@/types/segments";
+import type { HeatCollection, SegmentCollection, SegmentDetail, VehicleFilter } from "@/types/segments";
 import { VehicleFilter as VehicleFilters } from "@/types/segments";
 import type {
   QualityListResponse,
@@ -44,7 +44,7 @@ type Params = Record<string, string>;
 type Handler = (params: Params, query: URLSearchParams) => unknown;
 
 /** Live devices that sent nothing for this long disappear from the live view. */
-const LIVE_WINDOW_S = 60;
+const LIVE_WINDOW_S = 60; // devices heard from in the last minute
 const LIVE_TRACK_S = 120;
 const ROUGHNESS_NOW_WINDOW_S = 3;
 const TRACK_HZ = 1;
@@ -143,6 +143,15 @@ function segments(query: URLSearchParams): SegmentCollection {
   return { type: "FeatureCollection", features };
 }
 
+function heat(): HeatCollection {
+  const features = [...getDataset().sims.values()].filter((sim) => isIncluded(sim)).map((sim) => {
+    const line: [number, number][] = [];
+    for (let k = 0; k < sim.lat.length; k += SERIES_HZ / TRACK_HZ) line.push([round(sim.lon[k], 5), round(sim.lat[k], 5)]);
+    return { type: "Feature" as const, geometry: { type: "MultiLineString" as const, coordinates: [line] }, properties: {} };
+  });
+  return { type: "FeatureCollection", features };
+}
+
 function segmentDetail(h3: string): SegmentDetail {
   if (!isValidCell(h3)) throw new MockHttpError(400, `${h3} is not an H3 cell`);
   const { sims } = getDataset();
@@ -227,9 +236,11 @@ function live(): LiveResponse {
       let sumSquares = 0;
       for (let k = Math.max(0, last - window); k <= last; k++) sumSquares += sim.aVert[k] ** 2;
       const trackPoints: [number, number][] = [];
-      for (let k = Math.max(0, last - LIVE_TRACK_S * SERIES_HZ); k <= last; k += SERIES_HZ / TRACK_HZ) {
+      const stride = SERIES_HZ / TRACK_HZ;
+      for (let k = Math.max(0, Math.ceil((last - LIVE_TRACK_S * SERIES_HZ) / stride) * stride); k < last; k += stride) {
         trackPoints.push([round(sim.lon[k]), round(sim.lat[k])]);
       }
+      trackPoints.push([round(sim.lon[last]), round(sim.lat[last])]);
       const hoursRunning = (sim.t[last] - sim.t[0]) / MS_PER_SECOND / SECONDS_PER_HOUR;
       const prev = Math.max(0, last - SERIES_HZ);
       return [
@@ -290,6 +301,7 @@ const ROUTES: [RegExp, Handler][] = [
   [/^\/api\/sessions\/(?<id>[^/]+)\/events$/, ({ id }) => eventsOf([findSession(id)], null)],
   [/^\/api\/sessions\/(?<id>[^/]+)\/labels$/, ({ id }) => labels(findSession(id))],
   [/^\/api\/segments$/, (_, query) => segments(query)],
+  [/^\/api\/heat$/, () => heat()],
   [/^\/api\/segments\/(?<h3>[^/]+)$/, ({ h3 }) => segmentDetail(h3)],
   [/^\/api\/events$/, (_, query) => allEvents(query)],
   [/^\/api\/live$/, () => live()],

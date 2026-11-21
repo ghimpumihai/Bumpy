@@ -9,10 +9,10 @@ import pytest
 from roadride import aggregate as agg
 
 
-def _obs(sid, cell, vehicle, speed, rough, *, potholes=0, aw=0.3, dur=2.0, ok=True, seat="front",
+def _obs(sid, cell, vehicle, speed, rough, *, potholes=0, aw=0.3, dur=2.0, ok=True, sick=None, seat="front",
          posture="seated", sick_s=None, sick_aw=None):
     return agg.Obs(session_id=sid, h3=cell, vehicle=vehicle, duration_s=dur, speed=speed, roughness=rough,
-                   aw_rms=aw, pothole_count=potholes, roughness_eligible=ok, sickness_eligible=ok,
+                   aw_rms=aw, pothole_count=potholes, roughness_eligible=ok, sickness_eligible=ok if sick is None else sick,
                    rater_seat=seat, rater_posture=posture, sickness_s=sick_s, sickness_aw_rms=sick_aw)
 
 
@@ -108,13 +108,14 @@ def test_sickness_is_duration_weighted_and_split_by_seat():
     # Observations finalized before sickness_s existed: weighted by their whole duration.
     rows = [_obs("a", "c1", "bus", 10, 1.0, aw=0.2, dur=1.0, seat="front"),
             _obs("b", "c1", "bus", 10, 1.0, aw=0.4, dur=3.0, seat="rear", posture="standing"),
-            _obs("c", "c1", "bus", 10, 1.0, aw=9.0, dur=3.0, ok=False)]  # experimental: left out
+            _obs("c", "c1", "bus", 10, 1.0, aw=0.6, dur=2.0, ok=False, sick=True),  # hand-held: counts (D41)
+            _obs("d", "c1", "bus", 10, 1.0, aw=9.0, dur=3.0, ok=False, sick=False)]  # unknown context: left out
     result = agg.compute(rows)
     bus = next(a for a in result.aggs if a["vehicle_type"] == "bus")
-    expected = math.sqrt((0.2 ** 2 * 1 + 0.4 ** 2 * 3) / 4)
+    expected = math.sqrt((0.2 ** 2 * 1 + 0.4 ** 2 * 3 + 0.6 ** 2 * 2) / 6)
     assert bus["sickness_aw_rms"] == pytest.approx(expected)
     assert bus["msi_1h_pct"] == pytest.approx(expected * 60 / 3)
-    assert bus["sickness_sessions"] == 2
+    assert bus["sickness_sessions"] == 3
     assert {(s["rater_seat"], s["rater_posture"]) for s in result.sickness} == {("front", "seated"), ("rear", "standing")}
 
 

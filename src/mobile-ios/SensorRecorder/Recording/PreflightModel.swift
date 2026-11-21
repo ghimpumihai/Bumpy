@@ -49,7 +49,9 @@ final class PreflightModel {
     }
 
     nonisolated static let minMotionRate = 90.0
-    nonisolated static let stillnessMaxStdG = 0.01
+    // 0.03 g: an idling engine or a stopped bus shakes more than 0.01 g, and a loose mount is far above
+    // either (the spec gave 0.01 only as an example).
+    nonisolated static let stillnessMaxStdG = 0.03
     nonisolated static let gpsMaxAccuracyM = 10.0
     nonisolated static let gpsKeepAccuracyM = 20.0
     nonisolated static let minBattery: Float = 0.5

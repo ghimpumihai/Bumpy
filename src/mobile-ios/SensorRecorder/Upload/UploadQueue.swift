@@ -251,6 +251,10 @@ final class UploadQueue: @unchecked Sendable {
         pendingFiles().filter { Self.parseItem(fileName: $0.lastPathComponent)?.sessionId == sessionId }.count
     }
 
+    func failedCount(sessionId: String) -> Int {
+        failedFiles().filter { Self.parseItem(fileName: $0.lastPathComponent)?.sessionId == sessionId }.count
+    }
+
     /// This session's batches still queued and those the server rejected, for the recap's progress.
     /// Metadata items don't count: they are not part of the recorded data.
     func batchCounts(sessionId: String) -> (pending: Int, failed: Int) {

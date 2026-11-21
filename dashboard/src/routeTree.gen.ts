@@ -12,8 +12,6 @@ import { Route as rootRouteImport } from './routes/__root'
 import { Route as IndexRouteImport } from './routes/index'
 import { Route as LiveRouteImport } from './routes/live'
 import { Route as MapRouteImport } from './routes/map'
-import { Route as MethodRouteImport } from './routes/method'
-import { Route as QualityRouteImport } from './routes/quality'
 import { Route as SessionsIndexRouteImport } from './routes/sessions/index'
 import { Route as SessionsSessionIdRouteImport } from './routes/sessions/$sessionId'
 
@@ -32,16 +30,6 @@ const MapRoute = MapRouteImport.update({
   path: '/map',
   getParentRoute: () => rootRouteImport,
 } as any)
-const MethodRoute = MethodRouteImport.update({
-  id: '/method',
-  path: '/method',
-  getParentRoute: () => rootRouteImport,
-} as any)
-const QualityRoute = QualityRouteImport.update({
-  id: '/quality',
-  path: '/quality',
-  getParentRoute: () => rootRouteImport,
-} as any)
 const SessionsIndexRoute = SessionsIndexRouteImport.update({
   id: '/sessions/',
   path: '/sessions/',
@@ -57,8 +45,6 @@ export interface FileRoutesByFullPath {
   '/': typeof IndexRoute
   '/live': typeof LiveRoute
   '/map': typeof MapRoute
-  '/method': typeof MethodRoute
-  '/quality': typeof QualityRoute
   '/sessions/$sessionId': typeof SessionsSessionIdRoute
   '/sessions/': typeof SessionsIndexRoute
 }
@@ -66,8 +52,6 @@ export interface FileRoutesByTo {
   '/': typeof IndexRoute
   '/live': typeof LiveRoute
   '/map': typeof MapRoute
-  '/method': typeof MethodRoute
-  '/quality': typeof QualityRoute
   '/sessions/$sessionId': typeof SessionsSessionIdRoute
   '/sessions': typeof SessionsIndexRoute
 }
@@ -76,47 +60,22 @@ export interface FileRoutesById {
   '/': typeof IndexRoute
   '/live': typeof LiveRoute
   '/map': typeof MapRoute
-  '/method': typeof MethodRoute
-  '/quality': typeof QualityRoute
   '/sessions/$sessionId': typeof SessionsSessionIdRoute
   '/sessions/': typeof SessionsIndexRoute
 }
 export interface FileRouteTypes {
   fileRoutesByFullPath: FileRoutesByFullPath
-  fullPaths:
-    | '/'
-    | '/live'
-    | '/map'
-    | '/method'
-    | '/quality'
-    | '/sessions/$sessionId'
-    | '/sessions/'
+  fullPaths: '/' | '/live' | '/map' | '/sessions/$sessionId' | '/sessions/'
   fileRoutesByTo: FileRoutesByTo
-  to:
-    | '/'
-    | '/live'
-    | '/map'
-    | '/method'
-    | '/quality'
-    | '/sessions/$sessionId'
-    | '/sessions'
+  to: '/' | '/live' | '/map' | '/sessions/$sessionId' | '/sessions'
   id:
-    | '__root__'
-    | '/'
-    | '/live'
-    | '/map'
-    | '/method'
-    | '/quality'
-    | '/sessions/$sessionId'
-    | '/sessions/'
+    '__root__' | '/' | '/live' | '/map' | '/sessions/$sessionId' | '/sessions/'
   fileRoutesById: FileRoutesById
 }
 export interface RootRouteChildren {
   IndexRoute: typeof IndexRoute
   LiveRoute: typeof LiveRoute
   MapRoute: typeof MapRoute
-  MethodRoute: typeof MethodRoute
-  QualityRoute: typeof QualityRoute
   SessionsSessionIdRoute: typeof SessionsSessionIdRoute
   SessionsIndexRoute: typeof SessionsIndexRoute
 }
@@ -144,20 +103,6 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof MapRouteImport
       parentRoute: typeof rootRouteImport
     }
-    '/method': {
-      id: '/method'
-      path: '/method'
-      fullPath: '/method'
-      preLoaderRoute: typeof MethodRouteImport
-      parentRoute: typeof rootRouteImport
-    }
-    '/quality': {
-      id: '/quality'
-      path: '/quality'
-      fullPath: '/quality'
-      preLoaderRoute: typeof QualityRouteImport
-      parentRoute: typeof rootRouteImport
-    }
     '/sessions/': {
       id: '/sessions/'
       path: '/sessions'
@@ -179,8 +124,6 @@ const rootRouteChildren: RootRouteChildren = {
   IndexRoute: IndexRoute,
   LiveRoute: LiveRoute,
   MapRoute: MapRoute,
-  MethodRoute: MethodRoute,
-  QualityRoute: QualityRoute,
   SessionsSessionIdRoute: SessionsSessionIdRoute,
   SessionsIndexRoute: SessionsIndexRoute,
 }

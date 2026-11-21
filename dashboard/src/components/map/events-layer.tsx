@@ -3,7 +3,7 @@ import { EVENT_DOT } from "@/constants/map";
 import { useThemeColors } from "@/hooks/use-theme-colors";
 import type { RoadEventCollection } from "@/types/sessions";
 
-const COLOR_VARS = ["--event-pothole", "--event-speed-bump", "--event-rail-joint", "--card"] as const;
+const COLOR_VARS = ["--event-pothole", "--event-speed-bump", "--event-rail-joint", "--background"] as const;
 
 interface EventsLayerProps {
   id: string;
@@ -41,7 +41,7 @@ export function EventsLayer({ id, data, beforeId }: EventsLayerProps) {
           colors["--event-speed-bump"],
           colors["--event-rail-joint"],
         ],
-        "circle-stroke-color": colors["--card"],
+        "circle-stroke-color": colors["--background"],
         "circle-stroke-width": EVENT_DOT.strokePx,
         "circle-opacity": ["interpolate", ["linear"], ["get", "confidence"], 0, EVENT_DOT.minOpacity, 1, 1],
       },

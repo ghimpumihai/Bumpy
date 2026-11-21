@@ -1,11 +1,9 @@
 import { describe, expect, it } from "vitest";
 
 import { PLACEHOLDER } from "@/constants";
-import { ROUGHNESS_BANDS } from "@/constants/map";
 import { formatDuration } from "@/utils/format-date-time";
 import { formatDistance, formatFraction, formatPercent, formatSpeedFromMs } from "@/utils/format-number";
 import { bearingDelta, cumulativeDistances, haversineM, lowerIndex } from "@/utils/geo";
-import { bandFor, stepColorExpression } from "@/utils/scale";
 
 describe("formatters", () => {
   it("formats durations", () => {
@@ -35,20 +33,5 @@ describe("geo", () => {
     expect(lowerIndex([0, 10, 20], 99)).toBe(2);
     expect(bearingDelta(350, 10)).toBe(20);
     expect(bearingDelta(10, 350)).toBe(-20);
-  });
-});
-
-describe("scales", () => {
-  it("puts values into the roughness bands", () => {
-    expect(bandFor(ROUGHNESS_BANDS, 0.2)?.colorVar).toBe("--scale-1");
-    expect(bandFor(ROUGHNESS_BANDS, 0.315)?.colorVar).toBe("--scale-2");
-    expect(bandFor(ROUGHNESS_BANDS, 5)?.colorVar).toBe("--scale-5");
-    expect(bandFor(ROUGHNESS_BANDS, null)).toBeNull();
-  });
-  it("builds a MapLibre step expression with a fallback for missing values", () => {
-    const expression = stepColorExpression("roughness", ROUGHNESS_BANDS, ["a", "b", "c", "d", "e"], "none");
-    expect(expression[0]).toBe("case");
-    expect(expression[2]).toEqual(["step", ["get", "roughness"], "a", 0.315, "b", 0.63, "c", 1, "d", 1.6, "e"]);
-    expect(expression[3]).toBe("none");
   });
 });

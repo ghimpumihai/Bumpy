@@ -27,6 +27,10 @@
     --color-event-speed-bump: var(--event-speed-bump);
     --color-event-rail-joint: var(--event-rail-joint);
     --color-track: var(--track);
+    --color-track-casing: var(--track-casing);
+    --color-heat: var(--heat);
+    --color-heat-mid: var(--heat-mid);
+    --color-heat-low: var(--heat-low);
     --color-live: var(--live);
     --color-overlay: var(--overlay);
     --font-heading: var(--font-sans);
@@ -84,18 +88,18 @@
     --secondary-foreground: oklch(0.205 0 0);
     --muted: oklch(0.97 0 0);
     --muted-foreground: oklch(0.5 0 0);
-    --accent: oklch(0.53 0.19 260);
-    --accent-foreground: oklch(0.99 0 0);
+    --accent: oklch(0.985 0 0);
+    --accent-foreground: oklch(0.145 0 0);
     --destructive: oklch(0.5 0.2 27);
     --border: oklch(0.922 0 0);
     --input: oklch(0.922 0 0);
     --ring: oklch(0.708 0 0);
-    --chart-1: oklch(0.55 0.19 260);
+    --chart-1: oklch(0.985 0 0);
     --chart-2: oklch(0.65 0.17 50);
     --chart-3: oklch(0.58 0.14 155);
     --chart-4: oklch(0.55 0.2 310);
     --chart-5: oklch(0.58 0.21 25);
-    --radius: 0.625rem;
+    --radius: 0.375rem;
     --success: oklch(0.46 0.12 150);
     --success-foreground: oklch(0.99 0 0);
     --warning: oklch(0.5 0.12 60);
@@ -106,16 +110,20 @@
     --highlight-foreground: oklch(0.3 0.05 95);
     --background-hover: oklch(0.96 0 0);
     /* Sequential map scale (green = good → red = bad); identical in both themes because the base map is light. */
-    --scale-1: oklch(0.6 0.15 150);
-    --scale-2: oklch(0.78 0.15 130);
-    --scale-3: oklch(0.88 0.13 95);
-    --scale-4: oklch(0.73 0.15 55);
-    --scale-5: oklch(0.58 0.2 28);
+    --scale-1: #9d4dff;
+    --scale-2: #c13fd8;
+    --scale-3: #ff2e93;
+    --scale-4: #ff6a5c;
+    --scale-5: #ff9a3d;
     --scale-none: oklch(0.75 0 0);
-    --event-pothole: oklch(0.45 0.18 20);
-    --event-speed-bump: oklch(0.5 0.15 255);
-    --event-rail-joint: oklch(0.55 0 0);
-    --track: oklch(0.5 0.17 265);
+    --event-pothole: #19f0e0;
+    --event-speed-bump: #c4b5fd;
+    --event-rail-joint: #64748b;
+    --track: oklch(0.145 0 0);
+    --track-casing: oklch(1 0 0);
+    --heat: #ff9a3d;
+    --heat-mid: #ff2e93;
+    --heat-low: #9d4dff;
     --live: oklch(0.6 0.22 25);
     --overlay: oklch(0 0 0 / 10%);
     --sidebar: oklch(0.985 0 0);
@@ -141,13 +149,13 @@
     --secondary-foreground: oklch(0.985 0 0);
     --muted: oklch(0.269 0 0);
     --muted-foreground: oklch(0.708 0 0);
-    --accent: oklch(0.72 0.14 255);
-    --accent-foreground: oklch(0.18 0.03 255);
+    --accent: oklch(0.985 0 0);
+    --accent-foreground: oklch(0.145 0 0);
     --destructive: oklch(0.704 0.191 22.216);
     --border: oklch(1 0 0 / 10%);
     --input: oklch(1 0 0 / 15%);
     --ring: oklch(0.556 0 0);
-    --chart-1: oklch(0.72 0.14 255);
+    --chart-1: oklch(0.985 0 0);
     --chart-2: oklch(0.78 0.15 60);
     --chart-3: oklch(0.75 0.15 155);
     --chart-4: oklch(0.72 0.16 310);
@@ -161,16 +169,20 @@
     --highlight: oklch(0.36 0.06 95);
     --highlight-foreground: oklch(0.95 0.03 95);
     --background-hover: oklch(0.24 0 0);
-    --scale-1: oklch(0.6 0.15 150);
-    --scale-2: oklch(0.78 0.15 130);
-    --scale-3: oklch(0.88 0.13 95);
-    --scale-4: oklch(0.73 0.15 55);
-    --scale-5: oklch(0.58 0.2 28);
+    --scale-1: #9d4dff;
+    --scale-2: #c13fd8;
+    --scale-3: #ff2e93;
+    --scale-4: #ff6a5c;
+    --scale-5: #ff9a3d;
     --scale-none: oklch(0.6 0 0);
-    --event-pothole: oklch(0.45 0.18 20);
-    --event-speed-bump: oklch(0.5 0.15 255);
-    --event-rail-joint: oklch(0.55 0 0);
-    --track: oklch(0.5 0.17 265);
+    --event-pothole: #19f0e0;
+    --event-speed-bump: #c4b5fd;
+    --event-rail-joint: #64748b;
+    --track: oklch(0.145 0 0);
+    --track-casing: oklch(1 0 0);
+    --heat: #ff9a3d;
+    --heat-mid: #ff2e93;
+    --heat-low: #9d4dff;
     --live: oklch(0.65 0.22 25);
     --overlay: oklch(0 0 0 / 45%);
     --sidebar: oklch(0.205 0 0);
@@ -181,6 +193,61 @@
     --sidebar-accent-foreground: oklch(0.985 0 0);
     --sidebar-border: oklch(1 0 0 / 10%);
     --sidebar-ring: oklch(0.556 0 0);
+}
+
+/* The live vehicle: a dot with two slow sonar rings. A DOM marker, so the rings animate on the GPU and the map
+   style isn't rewritten every frame. */
+.vehicle-marker {
+  position: relative;
+  width: 12px;
+  height: 12px;
+}
+.vehicle-marker::before,
+.vehicle-marker::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  border-radius: 9999px;
+  background: var(--heat-low);
+  opacity: 0;
+  animation: vehicle-ring 3.4s cubic-bezier(0.16, 0.6, 0.3, 1) infinite;
+}
+.vehicle-marker::after {
+  animation-delay: -1.7s;
+}
+.vehicle-marker > span {
+  position: absolute;
+  inset: 0;
+  border-radius: 9999px;
+  background: #fff;
+  box-shadow: 0 0 0 2px var(--heat-low);
+}
+.vehicle-marker[data-stale="true"]::before,
+.vehicle-marker[data-stale="true"]::after {
+  animation: none;
+}
+.vehicle-marker[data-stale="true"] > span {
+  background: var(--muted-foreground);
+  box-shadow: 0 0 0 2px var(--background);
+}
+@keyframes vehicle-ring {
+  0% {
+    transform: scale(1);
+    opacity: 0;
+  }
+  8% {
+    opacity: 0.4;
+  }
+  100% {
+    transform: scale(5);
+    opacity: 0;
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .vehicle-marker::before,
+  .vehicle-marker::after {
+    animation: none;
+  }
 }
 
 @layer base {
@@ -202,7 +269,7 @@
     @apply flex flex-col;
   }
   .gradient-bg {
-    background-image: linear-gradient(135deg, var(--accent), var(--info));
+    background-color: var(--accent);
   }
 }
 

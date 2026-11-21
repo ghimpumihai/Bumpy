@@ -1,96 +1,67 @@
 import { Link } from "@tanstack/react-router";
-import { Check, Minus } from "lucide-react";
 
-import { IncompleteBadge, MockBadge, QualityBadge, SourceBadge, StatusBadge } from "@/components/status/session-badges";
-import { VehicleLabel } from "@/components/status/vehicle-label";
+import { IncompleteBadge, QualityBadge } from "@/components/status/session-badges";
 import { Table, TableBody, TableCaption, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
-import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
-import { EXCLUSION_LABELS } from "@/constants/sessions";
+import { QualityStatus } from "@/types/common";
 import type { SessionSummary } from "@/types/sessions";
 import { formatDateTime, formatDuration } from "@/utils/format-date-time";
-import { formatDistance, formatFraction, formatPercent } from "@/utils/format-number";
+import { formatDistance, formatPercent } from "@/utils/format-number";
 
-function AggregationCell({ session }: { session: SessionSummary }) {
-  const reasons = session.exclusionReasons.map((reason) => EXCLUSION_LABELS[reason]);
-  const icon = session.includeInAgg ? (
-    <Check className="size-4 text-success" aria-label="Included in the aggregated map" />
-  ) : (
-    <Minus className="size-4 text-muted-foreground" aria-label="Not included in the aggregated map" />
-  );
-  if (reasons.length === 0) return icon;
-  return (
-    <Tooltip>
-      <TooltipTrigger asChild>
-        <button type="button" className="rounded-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring" aria-label={reasons.join(". ")}>
-          {icon}
-        </button>
-      </TooltipTrigger>
-      <TooltipContent className="max-w-64">{reasons.join(" · ")}</TooltipContent>
-    </Tooltip>
-  );
+/** One status per trip: closed without Stop reads Incomplete, never Good; Bad stays Bad. */
+function TripStatus({ session }: { session: SessionSummary }) {
+  if (session.incomplete && session.qualityStatus !== QualityStatus.BAD) return <IncompleteBadge />;
+  return <QualityBadge status={session.qualityStatus} />;
 }
 
 export function SessionsTable({ sessions }: { sessions: SessionSummary[] }) {
   return (
-    <Table>
-      <TableCaption className="sr-only">Recorded sessions, newest first</TableCaption>
+    <>
+      <ul className="divide-y sm:hidden" aria-label="Every trip and what it found">
+        {sessions.map((session) => (
+          <li key={session.sessionId}>
+            <Link to="/sessions/$sessionId" params={{ sessionId: session.sessionId }} className="vertical gap-1 px-4 py-3 active:bg-muted">
+              <span className="horizontal justify-between gap-3">
+                <span className="font-medium">{formatDateTime(session.startedAt)}</span>
+                <TripStatus session={session} />
+              </span>
+              <span className="text-xs text-muted-foreground tabular-nums">
+                {formatDistance(session.distanceM)} · {formatDuration(session.durationS)} · {session.eventCounts.pothole} potholes · {formatPercent(session.msiPct)} sickness / h
+              </span>
+            </Link>
+          </li>
+        ))}
+      </ul>
+      <Table className="hidden sm:table">
+      <TableCaption className="sr-only">Every trip and what it found</TableCaption>
       <TableHeader>
         <TableRow>
-          <TableHead>Started</TableHead>
-          <TableHead>Vehicle</TableHead>
-          <TableHead>Source</TableHead>
+          <TableHead>Trip</TableHead>
           <TableHead className="text-right">Duration</TableHead>
           <TableHead className="text-right">Distance</TableHead>
-          <TableHead>Quality</TableHead>
-          <TableHead className="text-center">On map</TableHead>
-          <TableHead className="text-right">Sickness</TableHead>
           <TableHead className="text-right">Potholes</TableHead>
+          <TableHead className="text-right">Sickness / h</TableHead>
+          <TableHead>Status</TableHead>
         </TableRow>
       </TableHeader>
       <TableBody>
         {sessions.map((session) => (
-          <TableRow key={session.sessionId}>
-            <TableCell className="whitespace-nowrap">
-              <Link
-                to="/sessions/$sessionId"
-                params={{ sessionId: session.sessionId }}
-                className="font-medium text-accent underline-offset-4 hover:underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
-              >
+          <TableRow key={session.sessionId} className="h-12">
+            <TableCell>
+              <Link to="/sessions/$sessionId" params={{ sessionId: session.sessionId }} className="font-medium text-foreground underline-offset-4 hover:underline">
                 {formatDateTime(session.startedAt)}
               </Link>
             </TableCell>
-            <TableCell>
-              <VehicleLabel type={session.vehicle.type} line={session.vehicle.line} detail={session.vehicle.makeModel} />
-            </TableCell>
-            <TableCell>
-              <span className="horizontal flex-wrap gap-1">
-                <SourceBadge source={session.source} />
-                <StatusBadge status={session.status} />
-                {session.incomplete && <IncompleteBadge />}
-                {session.isMock && <MockBadge />}
-              </span>
-            </TableCell>
-            <TableCell className="text-right tabular-nums">{formatDuration(session.durationS)}</TableCell>
-            <TableCell className="text-right tabular-nums">{formatDistance(session.distanceM)}</TableCell>
-            <TableCell>
-              <span className="horizontal gap-2">
-                <QualityBadge status={session.qualityStatus} />
-                <span className="text-xs tabular-nums text-muted-foreground">{formatFraction(session.validFraction)} valid</span>
-              </span>
-            </TableCell>
-            <TableCell className="text-center">
-              <span className="inline-flex justify-center">
-                <AggregationCell session={session} />
-              </span>
-            </TableCell>
-            <TableCell className="text-right tabular-nums">
-              {formatPercent(session.msiPct)}
-              {session.sicknessExperimental && <span className="text-muted-foreground"> *</span>}
-            </TableCell>
+            <TableCell className="text-right tabular-nums text-muted-foreground">{formatDuration(session.durationS)}</TableCell>
+            <TableCell className="text-right tabular-nums text-muted-foreground">{formatDistance(session.distanceM)}</TableCell>
             <TableCell className="text-right tabular-nums">{session.eventCounts.pothole}</TableCell>
+            <TableCell className="text-right tabular-nums">{formatPercent(session.msiPct)}</TableCell>
+            <TableCell>
+              <TripStatus session={session} />
+            </TableCell>
           </TableRow>
         ))}
       </TableBody>
-    </Table>
+      </Table>
+    </>
   );
 }

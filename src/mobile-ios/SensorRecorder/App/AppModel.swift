@@ -86,11 +86,14 @@ final class AppModel {
 
     enum DeleteSessionError: LocalizedError {
         case batchesNotUploaded(Int)
+        case batchesFailed(Int)
 
         var errorDescription: String? {
             switch self {
             case .batchesNotUploaded(let count):
                 return "\(count) batch(es) of this trip haven't reached the cloud yet. Let the upload finish before deleting."
+            case .batchesFailed(let count):
+                return "\(count) batch(es) of this trip were rejected by the server and are in upload_failed. Export the trip and resolve them before deleting."
             }
         }
     }
@@ -110,6 +113,8 @@ final class AppModel {
             if let sessionId {
                 let pending = queue.pendingCount(sessionId: sessionId)
                 if pending > 0 { throw DeleteSessionError.batchesNotUploaded(pending) }
+                let failed = queue.failedCount(sessionId: sessionId)
+                if failed > 0 { throw DeleteSessionError.batchesFailed(failed) }
             }
             try store.deleteSession(folder)
         }.value
@@ -194,6 +199,10 @@ enum SetupDefaults {
               let s = try? JSONDecoder().decode(Stored.self, from: data) else { return SessionSetup() }
         var setup = SessionSetup(vehicle: s.vehicle, mount: s.mount, people: s.people, conditions: s.conditions)
         setup.mount.photoFile = nil
+        // Mount quality decides whether a trip counts for the road map, so it is set for every trip,
+        // never carried over from the last one.
+        setup.mount.rigid = true
+        setup.mount.handheld = false
         return setup
     }
 

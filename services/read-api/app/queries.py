@@ -548,8 +548,7 @@ ORDER BY ls.device_id
 
 
 def live(conn: Connection, now: dt.datetime) -> dict:
-    """Devices heard from in the last minute, with the last ~2 min of their track, including a trip
-    that has just ended (D40: no start/end privacy rule)."""
+    """Devices heard from in the last minute, with the last ~2 min of their track (D40: no start/end privacy rule)."""
     rows = _rows(conn, LIVE_SQL, _params(since=now - dt.timedelta(seconds=LIVE_WINDOW_S), track_s=LIVE_TRACK_S))
     devices = []
     for r in rows:
@@ -647,6 +646,42 @@ def segments(conn: Connection, vehicle: str | None) -> dict:
         """, (vehicle or "all",))
     return {"type": "FeatureCollection", "features": [
         {"type": "Feature", "geometry": json.loads(r["boundary"]), "properties": _aggregate(r)} for r in rows]}
+
+
+# Where the aggregated trips drove, for the heat map: one line per trip, cut wherever the GPS went quiet, so the
+# dashboard can count how many trips cover each pixel (the way Strava's heatmap does).
+HEAT_SQL = f"""
+SELECT p.session_id, ST_X(p.geom::geometry), ST_Y(p.geom::geometry), p.t
+FROM track_points p JOIN sessions s USING (session_id)
+WHERE s.include_in_agg AND {_accurate("p")}
+ORDER BY p.session_id, p.t
+"""
+HEAT_GAP_S = 10  # a longer silence ends the line: no straight line across a dead zone
+HEAT_GAP_DEG = 0.002  # about 200 m
+HEAT_STEP_DEG = 0.00004  # about 4 m: closer fixes add nothing to a heat line
+
+
+def heat(conn: Connection) -> dict:
+    trips: dict[str, list[list[list[float]]]] = {}
+    prev_sid = prev_t = prev_point = kept = None
+    for sid, lon, lat, t in conn.execute(HEAT_SQL, _params()).fetchall():
+        lines = trips.setdefault(sid, [])
+        point = [round(lon, 5), round(lat, 5)]
+        starts_line = (
+            sid != prev_sid
+            or (t - prev_t).total_seconds() > HEAT_GAP_S
+            or abs(point[0] - prev_point[0]) + abs(point[1] - prev_point[1]) > HEAT_GAP_DEG
+        )
+        if starts_line:
+            lines.append([point])
+            kept = point
+        elif abs(point[0] - kept[0]) + abs(point[1] - kept[1]) >= HEAT_STEP_DEG:
+            lines[-1].append(point)
+            kept = point
+        prev_sid, prev_t, prev_point = sid, t, point
+    return {"type": "FeatureCollection", "features": [
+        {"type": "Feature", "geometry": {"type": "MultiLineString", "coordinates": [ln for ln in lines if len(ln) > 1]}, "properties": {}}
+        for lines in trips.values() if any(len(ln) > 1 for ln in lines)]}
 
 
 # Every pass is returned, including ones finalized before D40 with the old `in_privacy_zone` flag.

@@ -23,7 +23,7 @@ General rules:
 - **Aggregation rules** (plan §10): only finalized trips count: replays never, and a live trip only once it is finalized
   (until then its exclusion reason is `live_only`); sessions with
   `quality_status = 'bad'` are excluded; hand-held / non-rigid mounts are excluded from roughness and
-  potholes, and their sickness numbers are flagged experimental.
+  potholes; their sickness numbers count on the map (D41) and are flagged experimental on the trip page.
 
 ## Routes
 
@@ -36,7 +36,8 @@ General rules:
 | `GET /api/sessions/{id}/track` | `SessionTrack` (sessions) | GeoJSON `Feature<LineString>`, 1 Hz, `properties.times` (epoch ms) and `speeds` (m/s) parallel to the coordinates |
 | `GET /api/sessions/{id}/events` | `RoadEventCollection` (sessions) | GeoJSON points: potholes, speed bumps, rail joints |
 | `GET /api/sessions/{id}/labels` | `SessionLabelsResponse` (sessions) | Rows of the app's `labels.csv` |
-| `GET /api/segments?vehicle=all\|car\|bus\|tram` | `SegmentCollection` (segments) | One H3 hexagon polygon per segment with its `segment_agg` row for that vehicle filter |
+| `GET /api/segments?vehicle=all\|car\|bus\|tram` | `SegmentCollection` (segments) | One H3 cell polygon per segment with its `segment_agg` row for that vehicle filter. The cell is the backend's key; the dashboard draws only its centre |
+| `GET /api/heat` | `HeatCollection` (segments) | One GeoJSON `MultiLineString` per aggregated trip (GPS fixes about 4 m apart, cut at gaps longer than 10 s). The dashboard counts how many trips cover each pixel and colours the map from that (Strava-style heat map) |
 | `GET /api/segments/{h3}` | `SegmentDetail` (segments) | Per-vehicle aggregates, sickness split by seat/posture, every pass |
 | `GET /api/events?vehicle=all\|car\|bus\|tram&type=` | `RoadEventCollection` (sessions) | Detected events of aggregated sessions only; `vehicle` takes the same values as `/api/segments` (the dashboard always sends it), `type` is optional (`pothole\|speed_bump\|rail_joint`) |
 | `GET /api/live` | `LiveResponse` (live) | `live_state` of devices the ingest function heard from in the last 60 s, with the last ~2 min of track, `receivedAt` (arrival of the newest processed batch), and `sessionStatus` (`live`, or `processing`/`complete` for a trip that ended within the last 60 s). Since D40 a device is listed from its first position, and stays listed for up to 60 s after its trip ends. Polled every 2 s; `serverTime` lets the dashboard measure ages on the server's clock |

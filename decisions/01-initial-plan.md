@@ -358,7 +358,7 @@ Everything here is **additive**: the §6 keys keep their names, types and units,
 | Barometer available | `CMAltimeter.isRelativeAltitudeAvailable()` |
 | **GPS fix** | `horizontalAccuracy ≤ 10 m` (live value shown) |
 | **Measured motion rate** | ≥ 90 Hz for each motion stream over a 3 s test |
-| **Mount stillness test** | 5 s with vehicle stopped: accel std-dev below threshold (e.g. < 0.01 g). Also stores the gravity vector |
+| **Mount stillness test** | 5 s with vehicle stopped: accel std-dev below 0.03 g (an idling engine exceeds 0.01 g). Also stores the gravity vector |
 | Low Power Mode | **off** |
 | Battery | ≥ 50 % or charging |
 | Thermal | nominal or fair |

@@ -371,6 +371,16 @@ def test_finalize_from_the_archive_alone_and_with_a_missing_batch(db, batch, ses
 
 
 @requires_db
+def test_tram_potholes_are_labelled_rail_joints(db, batch, session_meta, tmp_path):
+    sid = "trip-tram"
+    batches, metas = _trip(batch, session_meta, sid, vehicle=dict(session_meta["vehicle"], type="tram"))
+    _write_archive(tmp_path, sid, batches, metas)
+    fz.handle(db, fz.DirArchive(tmp_path), json.dumps({"sessionId": sid}).encode())
+    types = {t for (t,) in db.execute("SELECT type FROM events").fetchall()}
+    assert "pothole" not in types and "rail_joint" in types
+
+
+@requires_db
 def test_replay_is_finalized_but_never_aggregated(db, batch, session_meta, tmp_path):
     sid = "trip-replay"
     batches, metas = _trip(batch, session_meta, sid, replayOf="orig", source="replay")

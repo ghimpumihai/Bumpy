@@ -18,7 +18,8 @@ const STATUS_TEXT: Record<StreamStatus, string> = {
 };
 
 export function StreamQualityTable({ streams }: { streams: Record<string, StreamQuality> }) {
-  const entries = Object.entries(streams);
+  // The app no longer records audio: a leftover audio stream is not shown.
+  const entries = Object.entries(streams).filter(([name]) => name !== "audio_level");
   if (entries.length === 0) {
     return <p className="px-1 text-sm text-muted-foreground">No per-stream counts for this trip yet.</p>;
   }

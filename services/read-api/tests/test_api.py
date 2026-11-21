@@ -156,7 +156,7 @@ def test_device_shown_from_the_start(client, seed, fixture_batch):
 
 
 def test_silent_device_drops_off_live_view(client, seed, fixture_batch):
-    old = dt.datetime.now(UTC) - dt.timedelta(minutes=5)
+    old = dt.datetime.now(UTC) - dt.timedelta(minutes=10)
     seed(batches=_trip(fixture_batch, 20, start=old), received_at=old)
     assert _ok(client, "/api/live")["devices"] == []
 

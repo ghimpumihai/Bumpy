@@ -50,8 +50,8 @@ async function bootstrap() {
       <HelmetProvider>
         <ThemeProvider
           attribute="class"
-          defaultTheme="system"
-          enableSystem
+          defaultTheme="dark"
+          forcedTheme="dark"
           disableTransitionOnChange
           // The anti-flash script only matters for server rendering; in this SPA React would warn about it.
           scriptProps={{ type: "application/json" }}

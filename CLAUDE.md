@@ -18,7 +18,7 @@ Additive fields may land one side at a time; a breaking change updates every sid
 
 ## Data safety
 Losing trip data is the worst bug: it can't be collected again.
-- A batch is identified by `(session_id, batch_seq)` (primary key of `ingest_batches`) and blob names derive from the message, so a retry overwrites instead of duplicating. Keep every new write path repeatable the same way.
+- A batch is identified by `(session_id, batch_seq)` (primary key of `ingest_batches`) and blob names derive from the message, so a retry finds the blob already there (the archive never overwrites) instead of duplicating. Keep every new write path repeatable the same way.
 - During a trip-collection window, don't merge to `main` and don't change the app build or the ingest contract. Nothing is deleted on a phone until its trip is verified in the cloud.
 
 ## Where to spend effort

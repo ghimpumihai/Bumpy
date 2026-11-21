@@ -43,7 +43,9 @@ module "observability" {
   tags                = local.tags
   alert_email         = var.alert_email
   budget_amount       = var.budget_amount
-  budget_start_date   = var.budget_start_date
+  # plantimestamp(), not a fixed date: a budget can't start in a past month. The budget ignores
+  # time_period after creation, so the moving value never shows up as a change.
+  budget_start_date = coalesce(var.budget_start_date, formatdate("YYYY-MM-01'T'00:00:00Z", plantimestamp()))
 }
 
 module "network" {

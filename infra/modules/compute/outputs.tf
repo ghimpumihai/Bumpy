@@ -42,7 +42,13 @@ output "ingest_function_name" {
   value = azurerm_function_app_flex_consumption.ingest.name
 }
 
+# Host only: the iPhone app and tools/replay add /api/ingest themselves.
 output "ingest_base_url" {
+  value = "https://${azurerm_function_app_flex_consumption.ingest.default_hostname}"
+}
+
+# The batch endpoint itself, for curl / Invoke-WebRequest checks.
+output "ingest_batch_url" {
   value = "https://${azurerm_function_app_flex_consumption.ingest.default_hostname}/api/ingest"
 }
 

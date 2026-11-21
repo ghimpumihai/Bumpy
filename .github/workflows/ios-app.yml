@@ -2,7 +2,7 @@ name: iOS app
 
 on:
   push:
-    branches: [main]
+    branches: [main, staging] # staging: the integration branch before main (no deploys)
     paths:
       - "src/mobile-ios/**"
       - "!src/mobile-ios/**/*.md"

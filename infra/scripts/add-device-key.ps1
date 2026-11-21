@@ -20,7 +20,8 @@ param(
 $ErrorActionPreference = 'Stop'
 
 if (-not $VaultName) {
-  $VaultName = (& (Join-Path $PSScriptRoot '..\tf.ps1') output -raw key_vault_name | Select-Object -Last 1)
+  # Split-Path + Join-Path instead of '..\tf.ps1', so the path also works in pwsh on macOS and Linux.
+  $VaultName = (& (Join-Path (Split-Path $PSScriptRoot -Parent) 'tf.ps1') output -raw key_vault_name | Select-Object -Last 1)
 }
 
 $bytes = New-Object byte[] 32

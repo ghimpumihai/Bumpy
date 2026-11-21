@@ -1,4 +1,3 @@
-import AVFoundation
 import CoreLocation
 import CoreMotion
 import Foundation
@@ -81,9 +80,6 @@ final class PreflightModel {
         checks = [
             Check(id: "perm.motion", title: "Motion permission", required: true),
             Check(id: "perm.location", title: "Location: authorized + precise", required: true),
-            // Always required: even with audio recording OFF (bus/tram) the level meter needs the mic;
-            // a denied mic would silently produce −140 dBFS.
-            Check(id: "perm.mic", title: "Microphone permission", required: true),
             Check(id: "avail.motion", title: "Device motion / accel / gyro", required: true),
             Check(id: "avail.baro", title: "Barometer available", required: true),
             Check(id: "gps.fix", title: "GPS fix ≤ 10 m", required: true),
@@ -173,18 +169,6 @@ final class PreflightModel {
         guard !Task.isCancelled else { return }
         updateLocationPermission()
         if app.location.isAuthorized { app.location.startPreview() }
-
-        // Microphone
-        if AudioRecorderService.permissionGranted {
-            set("perm.mic", .pass, "authorized")
-        } else {
-            set("perm.mic", .running, "requesting…")
-            let granted = await withCheckedContinuation { c in AudioRecorderService.requestPermission { c.resume(returning: $0) } }
-            set("perm.mic", granted ? .pass : .fail, granted ? "authorized" : "denied: Settings → Privacy → Microphone")
-        }
-        if !app.setup.audioEnabled, let i = checks.firstIndex(where: { $0.id == "perm.mic" }) {
-            checks[i].detail += " · audio recording OFF (level meter only)"
-        }
     }
 
     private func updateLocationPermission() {

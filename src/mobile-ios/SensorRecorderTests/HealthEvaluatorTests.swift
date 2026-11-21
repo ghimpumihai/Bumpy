@@ -98,13 +98,6 @@ final class HealthEvaluatorTests: XCTestCase {
         XCTAssertNil(level(i, "gps.accuracy"))
     }
 
-    func testAudioNotRecordingIsProblem() {
-        var i = healthy(); i.audioRecording = false
-        XCTAssertEqual(level(i, "audio.off"), .problem)
-        i.audioExpected = false
-        XCTAssertNil(level(i, "audio.off"))
-    }
-
     func testDiskWriteErrorIsProblemForAWhile() {
         var i = healthy(); i.lastWriteErrorUp = 1050; i.lastWriteError = "No space"
         XCTAssertEqual(level(i, "disk.write"), .problem)

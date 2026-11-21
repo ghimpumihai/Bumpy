@@ -66,11 +66,6 @@ struct ActivitySample: Equatable, Sendable {
     }
 }
 
-struct AudioLevelSample: Equatable, Sendable {
-    var t: TimeInterval
-    var avgDbfs: Double, peakDbfs: Double
-}
-
 struct DeviceStatus: Equatable, Sendable {
     var batteryLevel: Float          // 0...1, -1 unknown
     var batteryState: String         // unknown | unplugged | charging | full
@@ -147,28 +142,6 @@ protocol ActivitySource: AnyObject {
     var isAvailable: Bool { get }
     func start(_ handler: @escaping (ActivitySample) -> Void)
     func stop()
-}
-
-struct AudioCallbacks {
-    var level: (AudioLevelSample) -> Void = { _ in }
-    /// (event, file) — e.g. ("start", "audio_000.m4a"); `t` is the uptime of the event.
-    var segmentEvent: (_ t: TimeInterval, _ event: String, _ file: String) -> Void = { _, _, _ in }
-    var log: (LogLevel, String) -> Void = { _, _ in }
-}
-
-protocol AudioSource: AnyObject {
-    /// Starts recording segment files into `folder`. Returns false if recording could not start.
-    @discardableResult
-    func start(folder: URL, _ callbacks: AudioCallbacks) -> Bool
-    func stop()
-    var isRecording: Bool { get }
-    /// Total bytes of all audio files written so far.
-    var bytesWritten: Int64 { get }
-    var latestLevel: AudioLevelSample? { get }
-    var formatDescription: String { get }
-    /// True if this source writes microphone audio to files (S2); false for the level-meter-only
-    /// source used when audio recording is off (public transport).
-    var recordsAudio: Bool { get }
 }
 
 protocol DeviceStatusSource: AnyObject {

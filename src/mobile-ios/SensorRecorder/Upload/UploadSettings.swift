@@ -91,6 +91,14 @@ enum AppSettings {
         UploadConfig(baseURL: UploadConfig.parseBaseURL(baseURLString), deviceKey: deviceKey)
     }
 
+    /// Web dashboard address for the menu and recap links; links are hidden while it is unset.
+    /// Settable with the launch argument `-dashboard.baseURL <url>`.
+    // HACKATHON: hard-code the `dashboard_url` Terraform output here once it is stable.
+    static var dashboardURL: URL? {
+        guard let s = UserDefaults.standard.string(forKey: "dashboard.baseURL"), !s.isEmpty else { return nil }
+        return URL(string: s)
+    }
+
     /// Stable per-install id (identifierForVendor, persisted so it never changes mid-session).
     /// Stable per-install, per-device id. Kept in the Keychain as *ThisDeviceOnly*, so restoring a
     /// backup onto another phone can't give two phones the same id (UserDefaults would be copied).

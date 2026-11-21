@@ -36,9 +36,10 @@ Both are checked in the same order as the ingest function:
        gets 400 with a reason naming the probe, i.e. "reachable, key accepted".
        PUT: a JSON object; sessionId string equal to the path id; deviceId non-empty string;
        startedAtUtc string; startUptimeSec number; endedAtUtc string or null; recovered bool;
-       vehicle, mount, people objects; audioEnabled bool when present; batchCount int >= 0 when
-       present. batchCount present = the Stop copy, which also needs endedAtUtc non-null or
-       recovered true.
+       vehicle, mount, people objects; batchCount int >= 0 when present. batchCount present =
+       the Stop copy, which also needs endedAtUtc non-null or recovered true.
+       Unknown extra keys are accepted and ignored on both routes, e.g. the `audioLevel` block and
+       `audioEnabled` that app builds before D48 (no audio) still send.
        Both: deviceId at most 128 characters, labels[].type at most 64, every other string and
        object key at most 2000; no string may contain NUL or an unpaired surrogate (PostgreSQL
        text/jsonb can't store them).
@@ -76,7 +77,7 @@ SESSIONS_PREFIX = "/api/ingest/sessions/"
 SESSION_ID_RE = re.compile(r"^[A-Za-z0-9_-]{1,128}$")
 
 REQUIRED_KEYS = ["schemaVersion", "sessionId", "deviceId", "batchSeq", "t0Utc", "t0Up", "units",
-                 "deviceMotion", "accelRaw", "gyroRaw", "location", "altimeter", "audioLevel",
+                 "deviceMotion", "accelRaw", "gyroRaw", "location", "altimeter",
                  "labels", "device"]
 EXPECTED_UNITS = {"accel": "g", "gyro": "rad/s", "speed": "m/s", "pressure": "kPa"}
 # Columnar blocks (IngestBatch.swift): required array keys besides "t".
@@ -86,7 +87,6 @@ COLUMNAR = {
     "accelRaw": ["x", "y", "z"],
     "gyroRaw": ["x", "y", "z"],
     "altimeter": ["relAltM", "pressureKpa"],
-    "audioLevel": ["avgDbfs", "peakDbfs"],
 }
 LOCATION_KEYS = ["lat", "lon", "alt", "hAcc", "speed", "speedAcc", "course"]
 # Additive full-dataset blocks (02 D32): optional, validated when present.
@@ -297,8 +297,6 @@ def validate_session_meta(m, path_id):
     for k in ("vehicle", "mount", "people"):
         if not isinstance(m.get(k), dict):
             raise Invalid(f"{k} must be an object")
-    if "audioEnabled" in m and not isinstance(m["audioEnabled"], bool):
-        raise Invalid("audioEnabled must be true/false when present")
     if "batchCount" in m:
         if not is_int(m["batchCount"]) or m["batchCount"] < 0:
             raise Invalid(f"batchCount must be a non-negative integer, got {m['batchCount']!r}")
@@ -315,7 +313,7 @@ def counts(b):
             return len(v.get("t") or [])
         return len(v) if isinstance(v, list) else 0
     return (f"dm={n('deviceMotion')} acc={n('accelRaw')} gyro={n('gyroRaw')} loc={n('location')} "
-            f"alt={n('altimeter')} aud={n('audioLevel')} lab={n('labels')}")
+            f"alt={n('altimeter')} lab={n('labels')}")
 
 
 def _reject_constant(name):

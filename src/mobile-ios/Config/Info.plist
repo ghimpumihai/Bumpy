@@ -41,19 +41,18 @@
 	</dict>
 	<key>NSLocalNetworkUsageDescription</key>
 	<string>Only used when you point the upload URL at a test server on your local network.</string>
-	<key>NSMicrophoneUsageDescription</key>
-	<string>Records road noise to classify road surfaces.</string>
-	<key>NSCameraUsageDescription</key>
-	<string>Takes one photo of the phone in its mount so the phone orientation in the vehicle is documented.</string>
 	<key>NSAppTransportSecurity</key>
 	<dict>
 		<key>NSAllowsLocalNetworking</key>
 		<true/>
 	</dict>
+	<key>UIAppFonts</key>
+	<array>
+		<string>Geist-Variable.ttf</string>
+	</array>
 	<key>UIBackgroundModes</key>
 	<array>
 		<string>location</string>
-		<string>audio</string>
 	</array>
 	<key>UIApplicationSceneManifest</key>
 	<dict>
@@ -67,7 +66,7 @@
 	<key>UIRequiresFullScreen</key>
 	<true/>
 	<key>UIStatusBarStyle</key>
-	<string>UIStatusBarStyleLightContent</string>
+	<string>UIStatusBarStyleDarkContent</string>
 	<key>UISupportedInterfaceOrientations</key>
 	<array>
 		<string>UIInterfaceOrientationPortrait</string>

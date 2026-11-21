@@ -22,7 +22,10 @@ final class IngestBatchTests: XCTestCase {
                                   freeDiskBytes: 1, networkStatus: "satisfied", networkType: "wifi")
         let b = acc.drain(t0Up: 500, t0UtcMs: 1_763_716_532_000, device: device)
         XCTAssertEqual(b.batchSeq, 0)
-        XCTAssertEqual(acc.drain(t0Up: 502, t0UtcMs: 0, device: device).batchSeq, 1)
+        XCTAssertEqual(acc.drain(t0Up: 502, t0UtcMs: 0, device: device).batchSeq, 0, "not queued yet: number not used")
+        acc.markQueued(seq: 0)
+        XCTAssertEqual(acc.drain(t0Up: 504, t0UtcMs: 0, device: device).batchSeq, 1)
+        acc.markQueued(seq: 1)
         XCTAssertEqual(acc.batchesCreated, 2)
 
         let obj = try XCTUnwrap(JSONSerialization.jsonObject(with: b.jsonData()) as? [String: Any])
@@ -385,5 +388,55 @@ final class UploadQueueStallTests: XCTestCase {
         try relaunched.enqueue(gzippedBody: Gzip.compress(Data("{}".utf8)), sessionId: "U", seq: 0, createdUtcMs: 5_000)
         for _ in 0..<5 { _ = await relaunched.processOnce() }
         XCTAssertEqual(keys(t), ["S:meta-start", "S:0", "S:1", "S:meta-stop", "U:0"])
+    }
+}
+
+/// Bug: drain() consumed a batchSeq before the batch was queued, so a failed enqueue left a hole that
+/// the Stop copy's batchCount still counted (spec §6.2: batchCount is exact).
+final class BatchSeqWithoutHolesTests: XCTestCase {
+    func testFailedEnqueueBurnsNoSeqAndLosesNoWindow() throws {
+        let dir = try makeTempDir().appendingPathComponent("upload_queue")
+        let q = UploadQueue(directory: dir, transport: MockTransport(), backgroundTime: nil,
+                            config: { UploadConfig(baseURL: URL(string: "https://fn.test"), deviceKey: "k") })
+        let deps = RecordingSession.Dependencies(
+            motion: SyntheticMotionSource(), location: nil, altimeter: nil, activity: nil, audio: nil,
+            deviceStatus: FakeDeviceStatus(), uploadQueue: q, deviceId: "D", appVersion: "t",
+            deviceInfo: .init(model: "x", name: "x", iosVersion: "x"))
+        let session = try RecordingSession(store: SessionStore(root: try makeTempDir()), setup: SessionSetup(),
+                                           preflight: nil, deps: deps)
+        func setWritable(_ w: Bool) {
+            try? FileManager.default.setAttributes([.posixPermissions: w ? 0o755 : 0o555], ofItemAtPath: dir.path)
+        }
+        defer { setWritable(true) }
+        let e = expectation(description: "run")
+        DispatchQueue.main.async {
+            session.start()
+            // The queue folder can't be written while the 4 s and 6 s batch ticks fire, then recovers;
+            // stop() queues what is still waiting before the Stop copy.
+            DispatchQueue.main.asyncAfter(deadline: .now() + 2.5) { setWritable(false) }
+            DispatchQueue.main.asyncAfter(deadline: .now() + 6.9) { setWritable(true) }
+            DispatchQueue.main.asyncAfter(deadline: .now() + 7.5) { session.stop(); e.fulfill() }
+        }
+        wait(for: [e], timeout: ciTimeout)
+
+        let log = try String(contentsOf: session.folder.appendingPathComponent("app_log.txt"), encoding: .utf8)
+        XCTAssertTrue(log.contains("could not queue upload batch"), "the test really made an enqueue fail")
+        let files = q.pendingFiles()
+        let batches = files.filter { UploadQueue.parse(fileName: $0.lastPathComponent) != nil }
+        var seqs: [Int] = []
+        var totalDM = 0
+        for f in batches {
+            let json = try XCTUnwrap(JSONSerialization.jsonObject(with: Gzip.decompress(Data(contentsOf: f))) as? [String: Any])
+            seqs.append(try XCTUnwrap(json["batchSeq"] as? Int))
+            totalDM += try XCTUnwrap((json["deviceMotion"] as? [String: [Double]])?["t"]).count
+        }
+        XCTAssertEqual(seqs, Array(0..<batches.count), "no hole where the enqueue failed")
+        XCTAssertEqual(session.metadata.stats?.uploadBatchesCreated, batches.count)
+        let stop = try XCTUnwrap(files.last)
+        XCTAssertEqual(UploadQueue.parseItem(fileName: stop.lastPathComponent)?.item, .sessionMeta(phase: .stop))
+        let stopMeta = try XCTUnwrap(JSONSerialization.jsonObject(with: Gzip.decompress(Data(contentsOf: stop))) as? [String: Any])
+        XCTAssertEqual(stopMeta["batchCount"] as? Int, batches.count, "batchCount = batches actually queued")
+        XCTAssertEqual(Int64(totalDM), session.metadata.stats?.streams["deviceMotion"]?.samples,
+                       "the window that failed to queue was retried, not dropped")
     }
 }

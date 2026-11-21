@@ -9,6 +9,8 @@ struct SessionSetupView: View {
     @State private var libraryItem: PhotosPickerItem?
     /// Decoded once per photo (a 12 MP JPEG must not be decoded on every re-render while typing).
     @State private var thumbnail: UIImage?
+    /// JPEG encoding of the picked photo runs off the main thread (12 MP: hundreds of ms).
+    @State private var photoTask: Task<Void, Never>?
 
     private let vehicleTypes = ["car", "bus", "tram", "bike", "boat"]
     private let mountPresets = ["taped flat on center console", "clamped in cup holder mount", "dashboard suction mount",
@@ -102,30 +104,45 @@ struct SessionSetupView: View {
             }
             .buttonStyle(.borderedProminent)
             .foregroundStyle(Theme.onBright) // contrast on accent blue
+            .disabled(photoTask != nil) // the photo must be in the setup before the session is created
             .padding()
             .background(.ultraThinMaterial)
             .accessibilityIdentifier("setupContinue")
         }
         .sheet(isPresented: $showCamera) {
             CameraPicker { image in
-                model.setup.mountPhotoJPEG = image.jpegData(compressionQuality: 0.8)
+                setMountPhoto { image.jpegData(compressionQuality: Self.jpegQuality) }
             }
             .ignoresSafeArea()
         }
         .onChange(of: model.setup.vehicle.type) { _, _ in
             model.setup.applyVehicleTypeDefaults()
         }
-        .onChange(of: model.setup.mountPhotoJPEG) { _, data in
-            thumbnail = Self.makeThumbnail(data)
+        // Runs on appear and whenever the photo changes; cancelled if it changes again meanwhile.
+        .task(id: model.setup.mountPhotoJPEG) {
+            let data = model.setup.mountPhotoJPEG
+            let thumb = await Task.detached(priority: .userInitiated) { Self.makeThumbnail(data) }.value
+            if !Task.isCancelled { thumbnail = thumb }
         }
-        .onAppear { thumbnail = Self.makeThumbnail(model.setup.mountPhotoJPEG) }
         .onChange(of: libraryItem) { _, item in
             guard let item else { return }
-            Task {
-                if let data = try? await item.loadTransferable(type: Data.self), let img = UIImage(data: data) {
-                    model.setup.mountPhotoJPEG = img.jpegData(compressionQuality: 0.8)
-                }
+            setMountPhoto {
+                guard let data = try? await item.loadTransferable(type: Data.self) else { return nil }
+                return UIImage(data: data)?.jpegData(compressionQuality: Self.jpegQuality)
             }
+        }
+    }
+
+    nonisolated private static let jpegQuality: CGFloat = 0.8
+
+    /// Decodes/encodes the photo on a background task; the newest pick wins if the user picks again.
+    private func setMountPhoto(_ produce: @escaping @Sendable () async -> Data?) {
+        photoTask?.cancel()
+        photoTask = Task {
+            let jpeg = await Task.detached(priority: .userInitiated) { await produce() }.value
+            guard !Task.isCancelled else { return }
+            if let jpeg { model.setup.mountPhotoJPEG = jpeg }
+            photoTask = nil
         }
     }
 
@@ -139,6 +156,7 @@ struct SessionSetupView: View {
                 Text("Mount photo (recommended)").foregroundStyle(.secondary)
             }
             Spacer()
+            if photoTask != nil { ProgressView().accessibilityLabel("Processing photo") }
             if UIImagePickerController.isSourceTypeAvailable(.camera) {
                 Button(model.setup.mountPhotoJPEG == nil ? "Take" : "Retake") { showCamera = true }
                     .buttonStyle(.bordered)
@@ -149,7 +167,8 @@ struct SessionSetupView: View {
         }
     }
 
-    static func makeThumbnail(_ data: Data?) -> UIImage? {
+    /// Nonisolated: runs on a background task (a 12 MP decode must not block the main thread).
+    nonisolated static func makeThumbnail(_ data: Data?) -> UIImage? {
         guard let data, let img = UIImage(data: data) else { return nil }
         return img.preparingThumbnail(of: CGSize(width: 168, height: 168)) ?? img
     }

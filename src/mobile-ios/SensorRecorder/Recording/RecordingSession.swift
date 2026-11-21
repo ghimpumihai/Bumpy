@@ -631,13 +631,19 @@ final class RecordingSession: @unchecked Sendable {
 
     // MARK: - Lifecycle
 
+    /// Records real background/foreground transitions only. The scene also turns inactive → active
+    /// without ever being backgrounded (Control Center, Notification Center, system alerts, call
+    /// banners): those must not log a WARN, add a `foreground` clock row or show the banner.
     func noteLifecycle(background: Bool) {
         guard isRunning else { return }
         let now = timeBase.uptimeNow()
-        latestBox.withLock {
-            $0.inBackground = background
-            if !background { $0.returnedFromBackgroundUp = now }
+        let changed = latestBox.withLock { l -> Bool in
+            guard l.inBackground != background else { return false }
+            l.inBackground = background
+            if !background { l.returnedFromBackgroundUp = now }
+            return true
         }
+        guard changed else { return }
         writer.log(.warn, background ? "app went to background (recording continues)" : "app returned to foreground")
         writeClockRow(timeBase.refreshAnchor(), source: background ? "background" : "foreground")
     }

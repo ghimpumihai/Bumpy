@@ -303,6 +303,7 @@ x-device-key: <device key>
 ```
 
   - `t` arrays are **seconds relative to `t0Up`** (columnar to keep payloads small).
+  - `audioLevel` (and `audioEnabled` in §6.1) are no longer required or read by the backend (D48); the app stops sending them in its own change.
   - Size: about 30 KB raw / ~10 KB gzipped per batch, roughly 20 MB/hour of mobile data.
 - **Queue on disk** (`Documents/upload_queue/`): write each batch as a `.json.gz` file, upload oldest first, **1 request at a time**, exponential backoff (1 s → 30 s max). Delete on HTTP 2xx. **Treat 409 (duplicate) as success.** Other 4xx: log, move to `upload_failed/`, continue.
 - Idempotency key = `sessionId + batchSeq`.

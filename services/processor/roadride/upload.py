@@ -53,7 +53,6 @@ EXTRA_STREAMS = {
     "mag_raw": ("mag_raw.csv", 50.0),
     "altimeter": ("altimeter.csv", 1.0),  # CMAltimeter: about once a second, as in the read API and the mock
     "abs_altitude": ("abs_altitude.csv", None),
-    "audioLevel": ("audio_level.csv", 10.0),
 }
 
 

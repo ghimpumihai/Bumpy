@@ -43,7 +43,6 @@ STREAMS = {
     "accelRaw": ("accel_raw", 100.0),
     "gyroRaw": ("gyro_raw", 100.0),
     "altimeter": ("altimeter", 1.0),
-    "audioLevel": ("audio_level", 10.0),
     "location": ("location", 1.0),
 }
 MOTION_STREAMS = ("deviceMotion", "accelRaw", "gyroRaw")  # always listed once a trip has batches
@@ -98,7 +97,7 @@ def _summary_sql(where: str) -> str:
 WITH s AS MATERIALIZED (
   SELECT s.session_id, s.source, s.replay_of, s.device_id, s.status, s.incomplete, s.quality_status,
          s.include_in_agg, s.exclusion_reasons, s.context_known, s.vehicle_type, s.vehicle_make_model,
-         s.vehicle_line, s.mount, s.people, s.audio_enabled, s.synthetic_sensors,
+         s.vehicle_line, s.mount, s.people, s.synthetic_sensors,
          COALESCE(s.started_at, s.created_at) AS started_at, s.ended_at,
          s.late_batches, s.duplicate_batches, s.msdv_z, s.updated_at AS version_at,
          s.valid_fraction, s.quality AS stored_quality, s.finalized_at, s.distance_m AS stored_distance_m,
@@ -317,7 +316,8 @@ def _session_streams(conn: Connection, cache: TripStatsCache | None, rows: list[
         stored = _stored_quality(r).get("streams")
         merged = dict(live.get(sid, {}))
         if isinstance(stored, dict):
-            merged.update({STREAMS.get(k, (k,))[0]: v for k, v in stored.items()})
+            # Trips finalized before D48 may still store an audioLevel stream; it is no longer shown.
+            merged.update({STREAMS.get(k, (k,))[0]: v for k, v in stored.items() if k != "audioLevel"})
         out[sid] = merged
     return out
 
@@ -344,7 +344,6 @@ def _summary(r: dict) -> dict:
                     "line": r["vehicle_line"]},
         "mount": mount,
         "people": _merge(PEOPLE_DEFAULTS, r["people"]),
-        "audioEnabled": bool(r["audio_enabled"]),
         "startedAt": iso(r["started_at"]),
         "endedAt": iso(r["ended_at"]),
         "durationS": max(0.0, round((end - r["started_at"]).total_seconds(), 3)),

@@ -76,8 +76,8 @@ The replay is a separate trip from the original:
   is ever in the future (the backend keeps the newest position per device), so a fast replay looks
   like a phone catching up after a dead zone.
 - Batches are rebuilt from the CSV files: `device_motion`, `accel_raw`, `gyro_raw`, `altimeter`,
-  `audio_level`, `location`, `labels`, and `device` for battery and thermal state. Samples are
-  windowed by `t_up` from `startUptimeSec`. Raw audio is never sent, same as the app. A torn last
+  `location`, `labels`, and `device` for battery and thermal state. Samples are windowed by `t_up`
+  from `startUptimeSec`. Audio files in older session folders are ignored (D48). A torn last
   line from a crash is skipped.
 
 ## Tests

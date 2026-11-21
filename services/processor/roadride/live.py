@@ -12,7 +12,7 @@ from dataclasses import dataclass, field
 
 UTC = dt.timezone.utc
 
-COLUMNAR_BLOCKS = ("deviceMotion", "accelRaw", "gyroRaw", "altimeter", "audioLevel")
+COLUMNAR_BLOCKS = ("deviceMotion", "accelRaw", "gyroRaw", "altimeter")
 VEHICLE_TYPES = {"car", "bus", "tram", "bike", "boat"}
 SOURCES = {"live", "upload", "replay"}
 
@@ -142,7 +142,6 @@ class SessionFacts:
     mount: dict
     people: dict
     conditions: dict | None
-    audio_enabled: bool | None
     synthetic_sensors: bool
     recovered: bool
     started_at: dt.datetime | None
@@ -166,7 +165,6 @@ def parse_session(m: dict) -> SessionFacts:
         mount=m.get("mount") or {},
         people=m.get("people") or {},
         conditions=m.get("conditions") if isinstance(m.get("conditions"), dict) else None,
-        audio_enabled=m.get("audioEnabled") if isinstance(m.get("audioEnabled"), bool) else None,
         synthetic_sensors=m.get("syntheticSensors") is True,
         recovered=m.get("recovered") is True,
         started_at=parse_iso(m.get("startedAtUtc")),

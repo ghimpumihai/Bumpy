@@ -1,7 +1,8 @@
 """The ingest contract: body decoding and schema checks.
 
 Ported from src/mobile-ios/tools/mock_ingest_server.py, the server the iPhone app was built and tested
-against. Keep the two in step: tests/test_parity.py runs the same cases through both.
+against. Keep the two in step: tests/test_parity.py runs the same cases through both. One exception
+until the app drops audio (D48): this side no longer requires or checks `audioLevel` / `audioEnabled`.
 
 Pure standard library, so it is testable without Azure.
 """
@@ -34,8 +35,10 @@ _BAD_CHARS = re.compile(r"[\x00\ud800-\udfff]")
 SESSION_ID_RE = re.compile(r"^[A-Za-z0-9_-]{1,128}$")
 
 REQUIRED_KEYS = ["schemaVersion", "sessionId", "deviceId", "batchSeq", "t0Utc", "t0Up", "units",
-                 "deviceMotion", "accelRaw", "gyroRaw", "location", "altimeter", "audioLevel",
+                 "deviceMotion", "accelRaw", "gyroRaw", "location", "altimeter",
                  "labels", "device"]
+# App builds before D48 still send `audioLevel` (batch) and `audioEnabled` (session.json): accepted
+# like any other extra key and never read, so those phones keep uploading.
 EXPECTED_UNITS = {"accel": "g", "gyro": "rad/s", "speed": "m/s", "pressure": "kPa"}
 COLUMNAR = {
     "deviceMotion": ["ua_x", "ua_y", "ua_z", "g_x", "g_y", "g_z", "rr_x", "rr_y", "rr_z",
@@ -43,7 +46,6 @@ COLUMNAR = {
     "accelRaw": ["x", "y", "z"],
     "gyroRaw": ["x", "y", "z"],
     "altimeter": ["relAltM", "pressureKpa"],
-    "audioLevel": ["avgDbfs", "peakDbfs"],
 }
 LOCATION_KEYS = ["lat", "lon", "alt", "hAcc", "speed", "speedAcc", "course"]
 # Additive full-dataset blocks (02 D32): optional, validated when present.
@@ -334,8 +336,6 @@ def validate_session_meta(m, path_id: str) -> str:
     for k in ("vehicle", "mount", "people"):
         if not isinstance(m.get(k), dict):
             raise Invalid(f"{k} must be an object")
-    if "audioEnabled" in m and not isinstance(m["audioEnabled"], bool):
-        raise Invalid("audioEnabled must be true/false when present")
     if "batchCount" in m:
         if not is_int(m["batchCount"]) or m["batchCount"] < 0:
             raise Invalid(f"batchCount must be a non-negative integer, got {m['batchCount']!r}")

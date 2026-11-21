@@ -16,7 +16,7 @@ pytestmark = requires_db
 ISO = re.compile(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$")
 
 SUMMARY_KEYS = {
-    "sessionId", "source", "isMock", "replayOf", "deviceId", "vehicle", "mount", "people", "audioEnabled",
+    "sessionId", "source", "isMock", "replayOf", "deviceId", "vehicle", "mount", "people",
     "startedAt", "endedAt", "durationS", "distanceM", "status", "incomplete", "qualityStatus",
     "validFraction", "includeInAgg", "exclusionReasons", "roughnessEligible", "sicknessExperimental",
     "msdvZ", "msiPct", "eventCounts", "ratingsCount",
@@ -305,7 +305,7 @@ def test_finalized_trip_reaches_the_map(client, seed, dbname, fixture_batch, tmp
     assert streams["device_motion"]["rows"] == 30 * 200  # every sample of the archive, not batch counts
     # The streams finalize can't recompute from the archive keep their live numbers instead of vanishing.
     assert set(streams) == set(live_streams) == {"device_motion", "accel_raw", "gyro_raw", "altimeter",
-                                                  "audio_level", "location"}
+                                                  "location"}
     assert streams["accel_raw"] == live_streams["accel_raw"]
 
     fc = _ok(client, "/api/segments", vehicle="all")
@@ -421,7 +421,7 @@ def test_stream_quality_from_live_batches(client, seed, fixture_batch):
     seed(meta=[session_meta(SID)], batches=batches)
 
     streams = _ok(client, f"/api/sessions/{SID}")["quality"]["streams"]
-    assert set(streams) == {"device_motion", "accel_raw", "gyro_raw", "altimeter", "audio_level", "location"}
+    assert set(streams) == {"device_motion", "accel_raw", "gyro_raw", "altimeter", "location"}
     for s in streams.values():
         assert set(s) == {"rows", "rateHz", "expectedHz", "maxGapS", "gapsOver1s"}
     dm = streams["device_motion"]

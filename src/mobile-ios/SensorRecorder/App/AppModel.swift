@@ -95,7 +95,19 @@ final class AppModel {
         }
     }
 
-    /// Deletes a recorded session and its queued upload batches. Refuses the session being recorded.
+    enum DeleteSessionError: LocalizedError {
+        case batchesNotUploaded(Int)
+
+        var errorDescription: String? {
+            switch self {
+            case .batchesNotUploaded(let count):
+                return "\(count) batch(es) of this trip haven't reached the cloud yet. Let the upload finish before deleting."
+            }
+        }
+    }
+
+    /// Deletes a recorded session. Refuses the session being recorded, and a session whose batches are
+    /// still queued: a trip is deleted from the phone only once it reached the cloud.
     func deleteSession(folder: URL, sessionId: String?) async throws {
         if let active = recording?.session.folder, active.standardizedFileURL == folder.standardizedFileURL,
            recording?.isFinished == false {
@@ -103,8 +115,11 @@ final class AppModel {
         }
         let store = self.store, queue = uploadQueue
         try await Task.detached(priority: .userInitiated) {
+            if let sessionId {
+                let pending = queue.pendingCount(sessionId: sessionId)
+                if pending > 0 { throw DeleteSessionError.batchesNotUploaded(pending) }
+            }
             try store.deleteSession(folder)
-            if let sessionId { queue.clearPending(sessionId: sessionId) }
         }.value
         refreshSessions()
     }

@@ -319,6 +319,7 @@ def session_copies(plan: Plan, batch_count: int, end_utc_ms: float, start_utc_ms
     for k in ("vehicle", "mount", "people"):
         if not isinstance(start.get(k), dict):
             start[k] = {}
+    start["people"].pop("raterName", None)  # personal data stays on the phone, like the app (§6.1)
     stop = copy.deepcopy(start)
     stop.update(endedAtUtc=iso_ms(end_utc_ms), batchCount=batch_count)
     return start, stop

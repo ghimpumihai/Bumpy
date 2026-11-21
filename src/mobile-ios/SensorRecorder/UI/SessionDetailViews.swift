@@ -86,7 +86,7 @@ struct SessionDetailView: View {
                     .accessibilityIdentifier("deleteSession")
                 if let deleteError { Text(deleteError).font(.footnote).foregroundStyle(Theme.problem) }
             } footer: {
-                Text("Deletes all files of this session from the phone (CSV, audio, photo) and its queued upload batches. Export first.")
+                Text("Deletes all files of this session from the phone (CSV, audio, photo). Refused while batches are still waiting to upload. Export first.")
             }
         }
         .confirmationDialog("Delete this session permanently? This cannot be undone. Make sure it is exported.",
@@ -248,6 +248,7 @@ struct ExportSection: View {
             } label: {
                 Label("Show folder in Files app", systemImage: "folder")
             }
+            .accessibilityIdentifier("showInFiles")
 
             if let sessionId {
                 Button {
@@ -258,6 +259,7 @@ struct ExportSection: View {
                           systemImage: "icloud.and.arrow.up")
                 }
                 .disabled(!AppSettings.uploadConfig.isEnabled)
+                .accessibilityIdentifier("uploadFullSession")
             }
             if let lastExport {
                 Label("Ready: \(lastExport.name) · \(ByteFormat.string(lastExport.bytes))", systemImage: "checkmark.seal.fill")

@@ -1,8 +1,9 @@
 import { overviewApi } from "@/api/overview";
 import { ErrorAlert } from "@/components/error-alert";
 import { Skeleton } from "@/components/ui/skeleton";
+import { METERS_PER_KM } from "@/constants/units";
 import { formatDateTime } from "@/utils/format-date-time";
-import { formatNumber } from "@/utils/format-number";
+import { formatDistance, formatNumber } from "@/utils/format-number";
 
 /** Headline numbers of the aggregated dataset. */
 export function OverviewStrip() {
@@ -11,7 +12,7 @@ export function OverviewStrip() {
   if (isPending) return <Skeleton className="h-14 w-72" />;
   const items = [
     { label: "Sessions on the map", value: `${data.sessions.includedInAgg} / ${data.sessions.total}` },
-    { label: "Distance", value: `${formatNumber(data.distanceKm, 1)} km` },
+    { label: "Distance", value: formatDistance(data.distanceKm * METERS_PER_KM) },
     { label: "Road segments", value: formatNumber(data.segments) },
     { label: "Confirmed potholes", value: formatNumber(data.confirmedPotholes) },
   ];

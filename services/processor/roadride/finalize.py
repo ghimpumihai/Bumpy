@@ -138,6 +138,8 @@ class TripSignal:
     events: list[Event] = field(default_factory=list)
     msdv: float = 0.0
     resets: int = 0
+    state: dict | None = None  # the pipeline after the last batch, for batches that arrive later
+    last_batch_seq: int | None = None
 
 
 def run_pipeline(batches: list[BatchFacts]) -> TripSignal:
@@ -165,6 +167,8 @@ def run_pipeline(batches: list[BatchFacts]) -> TripSignal:
         out.resets += int(res.reset)
         prev = f.batch_seq
     out.msdv = math.sqrt(pipe.dose)
+    out.state = pipe.to_state()
+    out.last_batch_seq = prev
     return out
 
 
@@ -369,8 +373,21 @@ def finalize_session(conn: Connection, archive: Archive, session_id: str) -> dic
                 [(session_id, lab.t, lab.type, lab.value, lab.note) for f in trip.batches for lab in f.labels],
             )
 
-            for table in ("session_series", "events", "segment_observations", "signal_state"):
+            for table in ("session_series", "events", "segment_observations"):
                 conn.execute(f"DELETE FROM {table} WHERE session_id = %s", (session_id,))
+            # Keep the trip's pipeline state, now the one-pass result: a backlog batch that reopens
+            # the trip continues the dose instead of restarting it at 0.
+            if sig.last_batch_seq is not None:
+                conn.execute(
+                    """
+                    INSERT INTO signal_state (session_id, state, last_batch_seq, gaps, updated_at)
+                    VALUES (%s, %s, %s, %s, now())
+                    ON CONFLICT (session_id) DO UPDATE SET
+                      state = EXCLUDED.state, last_batch_seq = EXCLUDED.last_batch_seq,
+                      gaps = EXCLUDED.gaps, updated_at = now()
+                    """,
+                    (session_id, Jsonb(sig.state), sig.last_batch_seq, sig.resets),
+                )
             cur.executemany(
                 "INSERT INTO session_series (session_id, t, a_vert, a_lat, a_lon, speed_ms, msdv) "
                 "VALUES (%s, %s, %s, %s, %s, %s, %s) ON CONFLICT (session_id, t) DO NOTHING",

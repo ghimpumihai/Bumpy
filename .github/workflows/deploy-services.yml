@@ -102,9 +102,10 @@ jobs:
           az containerapp ingress update -n "$READ_API_APP" -g "$RG" --target-port "$READ_API_PORT" --output none
           az containerapp update -n "$READ_API_APP" -g "$RG" --image "$IMAGE" --output none
           fqdn=$(az containerapp show -n "$READ_API_APP" -g "$RG" --query properties.configuration.ingress.fqdn -o tsv)
-          # Wait for the new revision, then require every database-backed route to answer 200. Together
-          # they read every table and PostGIS function, and PostgreSQL checks the `reader` role's
-          # grants even when the tables are empty, so this proves the API can serve every page.
+          # Wait for the new revision, then require the main database-backed routes to answer 200.
+          # PostgreSQL checks the `reader` role's grants even when the tables are empty, so this proves
+          # the login and grants work. It doesn't read every table: session_series, segment_observations
+          # and segment_sickness are only covered because the grants are schema-wide.
           for i in $(seq 1 30); do
             code=$(curl -s -o /dev/null -w '%{http_code}' "https://$fqdn/api/overview" || true)
             echo "GET /api/overview -> $code"

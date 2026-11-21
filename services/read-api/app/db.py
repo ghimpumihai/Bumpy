@@ -4,6 +4,10 @@ Connection settings come from the libpq variables set by Terraform (PGHOST, PGDA
 PGSSLMODE). On Azure (AZURE_CLIENT_ID set) the password is a Microsoft Entra token. Tokens expire after
 about an hour, so the token is fetched for EVERY new connection (TokenConnection.connect), never once
 for the pool. Locally and in CI, PGPASSWORD is used instead.
+
+Sizing (env, all optional): READ_API_POOL_MAX_SIZE (default 5 connections), READ_API_POOL_TIMEOUT_S
+(default 10 s to wait for a free connection, then 503), READ_API_STATEMENT_TIMEOUT_MS (default 10000:
+the server cancels a slower statement, so one bad query can't hold a connection for long).
 """
 
 from __future__ import annotations
@@ -35,8 +39,21 @@ class TokenConnection(psycopg.Connection):
         return super().connect(conninfo, **kwargs)
 
 
+def _env_number(name: str, default: float) -> float:
+    raw = os.environ.get(name, "").strip()
+    if not raw:
+        return default
+    value = float(raw)
+    if value <= 0:
+        raise ValueError(f"{name} must be positive, got {raw!r}")
+    return value
+
+
 def make_pool(dbname: str | None = None) -> ConnectionPool:
-    kwargs: dict = {"autocommit": True, "application_name": "roadride-read-api"}
+    statement_timeout_ms = int(_env_number("READ_API_STATEMENT_TIMEOUT_MS", 10_000))
+    kwargs: dict = {"autocommit": True, "application_name": "roadride-read-api",
+                    # Sent in the startup packet: applies to every statement on the connection.
+                    "options": f"-c statement_timeout={statement_timeout_ms}"}
     if dbname:
         kwargs["dbname"] = dbname
     return ConnectionPool(
@@ -44,7 +61,8 @@ def make_pool(dbname: str | None = None) -> ConnectionPool:
         connection_class=TokenConnection,
         kwargs=kwargs,
         min_size=1,
-        max_size=5,
+        max_size=int(_env_number("READ_API_POOL_MAX_SIZE", 5)),
+        timeout=_env_number("READ_API_POOL_TIMEOUT_S", 10.0),
         max_lifetime=50 * 60,  # recycle before tokens would matter for anything but opening
         check=ConnectionPool.check_connection,  # drop connections the server closed
         open=False,

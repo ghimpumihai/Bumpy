@@ -111,7 +111,7 @@ resource "azurerm_role_assignment" "tfstate_admins" {
   principal_id         = each.value
 }
 
-# --- Team group (D38) -----------------------------------------------------------------
+# --- Team group (D39) -----------------------------------------------------------------
 # Owner covers the control plane only; data-plane roles (blobs, Event Hubs, Key Vault secrets) come from
 # putting this group's object ID into TF_VAR_admin_object_ids for the main stack.
 

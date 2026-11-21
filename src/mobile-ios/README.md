@@ -157,8 +157,9 @@ in the repo.
   recording is OFF by default (level meter only).
 - GPS traces and `people.raterName` are personal data. Use pseudonyms such as "R1" for raters.
   Sessions live in Documents: they are visible in the Files app and included in device backups.
-- **Delete session** (session detail) removes the folder and its queued upload batches. The
-  device ID is per phone (Keychain, this-device-only).
+- **Delete session** (session detail) removes the folder. It is refused while any of the
+  session's batches are still queued for upload, so a trip leaves the phone only once it
+  reached the cloud. The device ID is per phone (Keychain, this-device-only).
 
 ## Robustness
 

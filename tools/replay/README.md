@@ -16,11 +16,16 @@ Python 3, standard library only.
 ## Run it
 
 1. Export the session from the app (Session detail → Export), and AirDrop or copy the folder or `.zip` to the laptop.
-2. Use any device key, or create one just for replays. Keys aren't tied to a device ID:
+2. Create a key just for replays (once):
 
    ```powershell
    .\infra\scripts\add-device-key.ps1 -DeviceId replay
    ```
+
+   Each key may only send as the device it was stored under. The replay key (stored as `replay` or
+   `replay-<anything>`) may send any `replay-…` device ID, never a phone's. A phone's own key also
+   works for replaying that phone's trips (`replay-<its device ID>`, the default). Anything else
+   gets `403` and the replay stops.
 
 3. Replay:
 

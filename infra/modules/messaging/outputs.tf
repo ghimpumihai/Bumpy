@@ -29,3 +29,11 @@ output "queue_name" {
 output "queue_id" {
   value = azurerm_servicebus_queue.session_ready.id
 }
+
+output "eventhub_namespace_id" {
+  value = azurerm_eventhub_namespace.this.id
+}
+
+output "servicebus_namespace_id" {
+  value = azurerm_servicebus_namespace.this.id
+}

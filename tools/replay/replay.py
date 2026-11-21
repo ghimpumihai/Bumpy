@@ -18,7 +18,7 @@ trip after a change to the signal processing (e.g. tuning the pothole threshold)
 
 Python 3 standard library only.
 
-    $env:REPLAY_DEVICE_KEY = "<key from add-device-key.ps1>"
+    $env:REPLAY_DEVICE_KEY = "<key from add-device-key.ps1 -DeviceId replay>"
     python tools/replay/replay.py <session folder or .zip> --url https://<func>.azurewebsites.net
     python tools/replay/replay.py <folder> --url ... --speed 4 --from 600 --duration 300
     python tools/replay/replay.py <folder> --dry-run out/      # write the batches, send nothing
@@ -319,6 +319,7 @@ def session_copies(plan: Plan, batch_count: int, end_utc_ms: float, start_utc_ms
     for k in ("vehicle", "mount", "people"):
         if not isinstance(start.get(k), dict):
             start[k] = {}
+    start["people"].pop("raterName", None)  # personal data stays on the phone, like the app (§6.1)
     stop = copy.deepcopy(start)
     stop.update(endedAtUtc=iso_ms(end_utc_ms), batchCount=batch_count)
     return start, stop
@@ -403,8 +404,11 @@ class Sender:
                 status, text = 0, str(getattr(e, "reason", e))
             if 200 <= status < 300 or status == 409:
                 return
-            if status in (401, 403):
-                raise ReplayError(f"{status}: device key rejected ({text.strip()[:200]})")
+            if status == 401:
+                raise ReplayError(f"401: device key rejected ({text.strip()[:200]})")
+            if status == 403:  # a valid key that may not send as this deviceId
+                raise ReplayError(f"403: {text.strip()[:300]} - use the replay key "
+                                  "(add-device-key.ps1 -DeviceId replay) or --device-id replay-<this key's device ID>")
             if status == 404:
                 raise ReplayError(f"404 for {self.base_url + path}: wrong --url?")
             if status not in (0, 429) and status < 500:
@@ -431,7 +435,7 @@ def run(folder: Path, plan: Plan, *, sender: Sender | None, dry_run: Path | None
     began = clock()
     status_every = max(1, round(30 / BATCH_SEC))
 
-    def emit(kind: str, name: str, method: str, path: str, body: bytes, idem: str) -> None:
+    def emit(name: str, method: str, path: str, body: bytes, idem: str) -> None:
         if len(body) > MAX_INFLATED:
             raise ReplayError(f"{name} is {len(body)} bytes, over the {MAX_INFLATED} byte limit")
         if dry_run is not None:
@@ -439,13 +443,18 @@ def run(folder: Path, plan: Plan, *, sender: Sender | None, dry_run: Path | None
         else:
             sender.send(method, path, body, idem)
 
+    def emit_stop() -> None:
+        _, stop = session_copies(plan, sent, end_ms, start_ms)
+        emit(f"{plan.session_id}_meta-stop", "PUT", f"/api/ingest/sessions/{plan.session_id}",
+             encode(stop), f"{plan.session_id}:meta-stop")
+
     try:
         for b in builder.batches():
             seq = b["batchSeq"]
             if start_ms is None:
                 start_ms = b["t0UtcMs"]
                 start, _ = session_copies(plan, 0, start_ms, start_ms)
-                emit("meta", f"{plan.session_id}_meta-start", "PUT",
+                emit(f"{plan.session_id}_meta-start", "PUT",
                      f"/api/ingest/sessions/{plan.session_id}", encode(start),
                      f"{plan.session_id}:meta-start")
             # The phone sends a batch when its window closes.
@@ -454,7 +463,7 @@ def run(folder: Path, plan: Plan, *, sender: Sender | None, dry_run: Path | None
                 wait = due - clock()
                 if wait > 0:
                     sleep(wait)
-            emit("batch", f"{plan.session_id}_{seq:08d}", "POST", "/api/ingest", encode(b),
+            emit(f"{plan.session_id}_{seq:08d}", "POST", "/api/ingest", encode(b),
                  f"{plan.session_id}:{seq}")
             sent += 1
             end_ms = b["t0UtcMs"] + BATCH_SEC * 1000.0
@@ -468,18 +477,12 @@ def run(folder: Path, plan: Plan, *, sender: Sender | None, dry_run: Path | None
         # Close the trip with what was sent, so an aborted rehearsal doesn't stay "recording".
         if send_stop and end_ms is not None:
             log(f"stopped after {sent} batches: sending the Stop metadata (Ctrl+C again to skip)")
-            _, stop = session_copies(plan, sent, end_ms, start_ms)
-            emit("meta", f"{plan.session_id}_meta-stop", "PUT",
-                 f"/api/ingest/sessions/{plan.session_id}", encode(stop),
-                 f"{plan.session_id}:meta-stop")
+            emit_stop()
         raise
     finally:
         builder.close()
     if send_stop:
-        _, stop = session_copies(plan, sent, end_ms, start_ms)
-        emit("meta", f"{plan.session_id}_meta-stop", "PUT",
-             f"/api/ingest/sessions/{plan.session_id}", encode(stop),
-             f"{plan.session_id}:meta-stop")
+        emit_stop()
     return sent
 
 

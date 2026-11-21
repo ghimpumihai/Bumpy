@@ -8,6 +8,7 @@ enum Theme {
     static let neutral = Color(white: 0.55)
     static let panel = Color(white: 0.11)
     static let panelHigh = Color(white: 0.18)
+    static let holdTrack = Color(white: 0.25)
     static let background = Color.black
     static let accent = Color(red: 0.25, green: 0.60, blue: 1.0)
 

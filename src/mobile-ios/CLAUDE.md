@@ -18,7 +18,7 @@ Requirements: `decisions/01-initial-plan.md`. Losing data is the worst possible 
 - The Xcode project uses file-system-synchronized groups (`objectVersion 77`): new files in `SensorRecorder/`, `SensorRecorderTests/`, `SensorRecorderUITests/` are picked up automatically. Never add per-file entries to `project.pbxproj`.
 
 ## Layers
-- `UI → Recording → (Core, Sensors, Upload)`; `Sensors` and `Upload` may use `Core`. `Core` never imports SwiftUI/UIKit or hardware frameworks.
+- `UI → Recording → (Core, Sensors, Upload)`; `Sensors` and `Upload` may use `Core`; `Upload` may also use the sample value types in `Sensors/SensorTypes.swift`. `Core` never imports SwiftUI/UIKit or hardware frameworks.
 - `RecordingSession` is the only place that wires sensor callbacks to writers, monitors and the batch accumulator.
 - All network access in `Upload/`, through `HTTPTransport`.
 - The on-disk schema lives only in `StreamFile` (`SessionFiles.swift`).
@@ -34,7 +34,7 @@ Requirements: `decisions/01-initial-plan.md`. Losing data is the worst possible 
 ## Files on disk
 - Append-only, flushed every ≤ 1 s (`SessionWriter`); `session.json` written atomically. Unfinished sessions are recovered on launch.
 - Native iOS units, no conversions. Every sensor CSV starts with `t_up` (seconds since boot, 6 decimals) and `t_utc_ms` (from `TimeBase` anchors); lat/lon 8 decimals.
-- Format output only through the `CSV` helpers, `ISO8601`, `ByteFormat`, `DurationFormat`; no ad-hoc `String(format:)`.
+- Format CSV data columns only through the `CSV` helpers (locale-independent), dates through `ISO8601`; no ad-hoc `String(format:)` for them.
 - Never rename or reorder columns; only append. A schema change updates spec/README, `quick_check.py` and the tests in the same change.
 - `tools/fixtures/` (ingest batch + `csv_headers.json`) is the cross-language contract: tests compare, never rewrite. Regenerate only on purpose: `TEST_RUNNER_REGENERATE_FIXTURES=1 xcodebuild … test`.
 - `session.json` must stay decodable across app versions: new keys use `decodeIfPresent` with defaults, and a test decodes an old-format file.

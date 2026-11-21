@@ -519,7 +519,7 @@ struct HoldToStopButton: View {
 
     var body: some View {
         ZStack(alignment: .leading) {
-            RoundedRectangle(cornerRadius: 10).fill(Color(white: 0.25))
+            RoundedRectangle(cornerRadius: 10).fill(Theme.holdTrack)
             GeometryReader { g in
                 RoundedRectangle(cornerRadius: 10).fill(Theme.problem)
                     .frame(width: g.size.width * progress)

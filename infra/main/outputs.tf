@@ -2,9 +2,15 @@ output "resource_group" {
   value = local.rg
 }
 
-# Base URL for the iPhone app's upload settings and for tools/replay.
+# What goes in the iPhone app's upload settings and in REPLAY_API_URL: https://<host>, no path
+# (the app appends api/ingest itself, UploadSettings.swift).
 output "ingest_base_url" {
   value = module.compute.ingest_base_url
+}
+
+# https://<host>/api/ingest: the POST endpoint, for manual checks.
+output "ingest_batch_url" {
+  value = module.compute.ingest_batch_url
 }
 
 # Written into dashboard/public/config.json as {"apiBase": ...} by the dashboard deploy.

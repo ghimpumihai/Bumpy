@@ -5,8 +5,8 @@ import { GeoJsonLayer, type SourceLayer } from "@/components/map/geojson-layer";
 import { MapCanvas } from "@/components/map/map-canvas";
 import { MapLegend } from "@/components/map/map-legend";
 import { useThemeColors } from "@/hooks/use-theme-colors";
-import type { ProcessingStatus } from "@/types/common";
 import type { Position } from "@/types/common";
+import type { SessionSummary } from "@/types/sessions";
 import { boundsOf } from "@/utils/geo";
 import { stepColorExpression } from "@/utils/scale";
 
@@ -16,13 +16,12 @@ import { trackPieces } from "../utils/track";
 const COLOR_VARS = ["--scale-1", "--scale-2", "--scale-3", "--scale-4", "--scale-5", "--scale-none"] as const;
 
 interface TrackMapProps {
-  sessionId: string;
-  status: ProcessingStatus;
+  session: SessionSummary;
 }
 
-export function TrackMap({ sessionId, status }: TrackMapProps) {
-  const track = sessionsApi.useSessionTrack(sessionId, status);
-  const events = sessionsApi.useSessionEvents(sessionId, status);
+export function TrackMap({ session }: TrackMapProps) {
+  const track = sessionsApi.useSessionTrack(session);
+  const events = sessionsApi.useSessionEvents(session);
   const colors = useThemeColors(COLOR_VARS);
   const bounds = track.data ? boundsOf(track.data.geometry.coordinates as Position[]) : null;
   const layers: SourceLayer[] = [
@@ -43,7 +42,7 @@ export function TrackMap({ sessionId, status }: TrackMapProps) {
   ];
   return (
     <div className="relative h-96 overflow-hidden rounded-lg border">
-      <MapCanvas ariaLabel="Map of this trip coloured by speed, with detected events" className="absolute inset-0" bounds={bounds} boundsKey={bounds ? sessionId : undefined}>
+      <MapCanvas ariaLabel="Map of this trip coloured by speed, with detected events" className="absolute inset-0" bounds={bounds} boundsKey={bounds ? session.sessionId : undefined}>
         {track.data && (
           <GeoJsonLayer id={TRACK_SOURCE_ID} data={trackPieces(track.data)} layers={layers} beforeId={eventsCircleLayerId(TRACK_EVENTS_SOURCE_ID)} />
         )}

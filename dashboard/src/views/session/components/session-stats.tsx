@@ -1,6 +1,7 @@
 import { StatCard } from "@/components/stat-card";
 import type { SessionDetail } from "@/types/sessions";
 import { formatDuration } from "@/utils/format-date-time";
+import { sicknessCaveat } from "@/utils/session-caveats";
 import { formatDistance, formatFraction, formatMsdv, formatPercent } from "@/utils/format-number";
 
 export function SessionStats({ session }: { session: SessionDetail }) {
@@ -12,7 +13,7 @@ export function SessionStats({ session }: { session: SessionDetail }) {
       <StatCard
         label="May vomit"
         value={formatPercent(session.msiPct)}
-        hint={session.sicknessExperimental ? "Experimental: mount not rigid" : "Predicted, ≈ MSDV / 3"}
+        hint={sicknessCaveat(session) ?? "Predicted, ≈ MSDV / 3"}
       />
       <StatCard label="Valid data" value={formatFraction(session.validFraction)} />
       <StatCard

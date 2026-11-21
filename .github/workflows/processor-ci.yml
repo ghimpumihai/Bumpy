@@ -9,11 +9,18 @@ on:
       - "tools/upload/**"
       - "tools/replay/**"
       - ".github/workflows/processor-ci.yml"
+      - "!**/*.md"
   push:
-    branches: [main]
+    branches: [main, staging] # staging: the integration branch before main (no deploys)
     paths:
       - "services/processor/**"
       - "db/**"
+      - "tools/upload/**"
+      - "tools/replay/**"
+      - "!**/*.md"
+
+  # deploy-services runs this first and deploys only if it passes.
+  workflow_call:
 
 permissions:
   contents: read
@@ -25,7 +32,8 @@ jobs:
       postgis:
         image: postgis/postgis:17-3.5 # same PostgreSQL major as Azure
         env:
-          POSTGRES_PASSWORD: ${{ secrets.POSTGRES_PASSWORD }}
+          # Throwaway container: no password at all, so CI needs no secret (fork and Dependabot PRs too).
+          POSTGRES_HOST_AUTH_METHOD: trust
         ports: ["5432:5432"]
         options: >-
           --health-cmd "pg_isready -U postgres"
@@ -34,7 +42,8 @@ jobs:
       PGHOST: localhost
       PGPORT: "5432"
       PGUSER: postgres
-      PGPASSWORD: ${{ secrets.POSTGRES_PASSWORD }} # repo secret; not passed to PRs from forks
+      # Ignored under trust auth; the tests only check that it is set (tests/conftest.py _have_db).
+      PGPASSWORD: ${{ github.run_id }}
     defaults:
       run:
         working-directory: services/processor
@@ -53,11 +62,67 @@ jobs:
       - name: Tests (unit + PostGIS integration)
         run: pytest -q -rs tests
 
-      - name: Migrate job runs end to end on an empty database
+      # On Azure the migrate job logs in as the Entra admin `migrator`: not a superuser, a member of
+      # azure_pg_admin, in a database Terraform created (owned by azure_pg_admin, so on PostgreSQL 15+
+      # migrator may create in `public` only through that membership). PostGIS is allow-listed
+      # (azure.extensions) so migrator can create it, and the writer/reader roles come from
+      # pgaadauth_create_principal_with_oid. Mirror all of that here instead of running as `postgres`:
+      # marking PostGIS trusted stands in for the allow-list, and a SECURITY DEFINER function stands in
+      # for pgaadauth (it creates a plain role where Azure maps the object ID).
+      - name: Set up a database like the Azure one
         env:
-          PGDATABASE: postgres
+          PG_CONTAINER: ${{ job.services.postgis.id }}
+        run: |
+          docker exec "$PG_CONTAINER" sh -c 'echo "trusted = true" >> /usr/share/postgresql/17/extension/postgis.control'
+          docker exec -i "$PG_CONTAINER" psql -v ON_ERROR_STOP=1 -U postgres -d postgres <<'SQL'
+          CREATE ROLE azure_pg_admin NOLOGIN;
+          CREATE ROLE migrator LOGIN NOSUPERUSER CREATEDB CREATEROLE IN ROLE azure_pg_admin;
+          CREATE DATABASE roadride OWNER azure_pg_admin;
+          CREATE FUNCTION pgaadauth_create_principal_with_oid(role_name text, object_id text, object_type text,
+                                                              is_admin boolean, is_mfa boolean)
+          RETURNS text LANGUAGE plpgsql SECURITY DEFINER SET search_path = pg_catalog AS $$
+          BEGIN
+            EXECUTE format('CREATE ROLE %I LOGIN', role_name);
+            RETURN format('Created role for "%s"', role_name);
+          END $$;
+          SQL
+
+      - name: Migrate job runs end to end as migrator (twice, so it is idempotent)
+        env:
+          PGUSER: migrator
+          PGDATABASE: roadride
           RUN_MODE: migrate
+          WRITER_OBJECT_ID: 00000000-0000-0000-0000-00000000000a
+          READER_OBJECT_ID: 00000000-0000-0000-0000-00000000000b
         run: python -m roadride && python -m roadride
+
+      - name: writer and reader have the right rights on every table
+        env:
+          PG_CONTAINER: ${{ job.services.postgis.id }}
+        run: |
+          docker exec -i "$PG_CONTAINER" psql -v ON_ERROR_STOP=1 -U postgres -d roadride <<'SQL'
+          DO $$
+          DECLARE missing text;
+          BEGIN
+            SELECT string_agg(format('%I', c.relname), ', ') INTO missing
+            FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
+            WHERE n.nspname = 'public' AND c.relkind IN ('r', 'p')
+              AND NOT EXISTS (SELECT 1 FROM pg_depend d WHERE d.objid = c.oid AND d.deptype = 'e')
+              AND NOT (has_table_privilege('reader', c.oid, 'SELECT')
+                       AND NOT has_table_privilege('reader', c.oid, 'INSERT')
+                       AND has_table_privilege('writer', c.oid, 'SELECT')
+                       AND has_table_privilege('writer', c.oid, 'INSERT')
+                       AND has_table_privilege('writer', c.oid, 'UPDATE')
+                       AND has_table_privilege('writer', c.oid, 'DELETE'));
+            IF missing IS NOT NULL THEN
+              RAISE EXCEPTION 'wrong writer/reader rights on: %', missing;
+            END IF;
+            IF (SELECT rolsuper FROM pg_roles WHERE rolname = 'migrator') THEN
+              RAISE EXCEPTION 'migrator must not be a superuser';
+            END IF;
+          END $$;
+          SELECT count(*) AS tables_checked FROM pg_tables WHERE schemaname = 'public';
+          SQL
 
   image:
     runs-on: ubuntu-latest

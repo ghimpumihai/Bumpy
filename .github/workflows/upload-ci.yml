@@ -5,10 +5,12 @@ on:
     paths:
       - "tools/upload/**"
       - ".github/workflows/upload-ci.yml"
+      - "!**/*.md"
   push:
-    branches: [main]
+    branches: [main, staging] # staging: the integration branch before main (no deploys)
     paths:
       - "tools/upload/**"
+      - "!**/*.md"
 
 permissions:
   contents: read

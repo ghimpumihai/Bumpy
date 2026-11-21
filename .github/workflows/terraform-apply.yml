@@ -1,0 +1,140 @@
+name: terraform-apply
+
+# Applies infra/main from GitHub instead of a laptop (plan 02 §13). Manual only (Actions → terraform-apply
+# → Run workflow): the plan's "apply on merge, after approval in the protected prod environment" needs
+# required reviewers on `prod`, and `prod` has none, since the code deploys use it unattended. Running it
+# by hand is the approval. Read the PR's terraform-plan comment first.
+#
+# Same settings as terraform-plan.yml (repo variables + the TF_VAR_ALERT_EMAIL secret, infra/README.md
+# "CI for Terraform"), but logs in as the deploy identity (Contributor + RBAC Administrator on the stack).
+# It refuses to delete or replace a resource that holds data unless allow_data_loss is ticked, and after
+# the apply removes the provider-written AzureWebJobsStorage setting (infra/README.md "Function host storage").
+#
+# Teardown stays on a laptop (`./infra/tf.ps1 destroy`): purging the soft-deleted Key Vault needs
+# subscription-level rights the deploy identity doesn't have.
+
+on:
+  workflow_dispatch:
+    inputs:
+      allow_data_loss:
+        description: "Allow deleting or replacing the database, storage, Event Hubs, Service Bus, Key Vault or registry"
+        type: boolean
+        default: false
+
+permissions:
+  id-token: write
+  contents: read
+
+concurrency:
+  group: terraform-apply
+  cancel-in-progress: false
+
+env:
+  TF_VERSION: "1.13.4"
+  TF_IN_AUTOMATION: "true"
+  TF_INPUT: "false"
+
+jobs:
+  apply:
+    # Like the deploys: production changes only from main, never from staging or a feature branch.
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    environment: prod
+    env:
+      ARM_USE_OIDC: "true"
+      ARM_CLIENT_ID: ${{ vars.AZURE_CLIENT_ID_DEPLOY }}
+      ARM_TENANT_ID: ${{ vars.AZURE_TENANT_ID }}
+      ARM_SUBSCRIPTION_ID: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: ${{ env.TF_VERSION }}
+          terraform_wrapper: false
+
+      # For the az clean-up after the apply; Terraform logs in by itself (ARM_USE_OIDC).
+      - uses: azure/login@v2
+        with:
+          client-id: ${{ vars.AZURE_CLIENT_ID_DEPLOY }}
+          tenant-id: ${{ vars.AZURE_TENANT_ID }}
+          subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Settings from repo variables
+        env:
+          ALERT_EMAIL: ${{ secrets.TF_VAR_ALERT_EMAIL }}
+          ADMIN_OBJECT_IDS: ${{ vars.TF_VAR_ADMIN_OBJECT_IDS }}
+          NAT: ${{ vars.TF_VAR_PSQL_NAT_GATEWAY_ENABLED }}
+          EH_LOCAL_AUTH: ${{ vars.TF_VAR_EVENTHUB_LOCAL_AUTH_ENABLED }}
+          BUDGET: ${{ vars.TF_VAR_BUDGET_AMOUNT }}
+          STATE_RG: ${{ vars.TFSTATE_RESOURCE_GROUP }}
+          STATE_ACCOUNT: ${{ vars.TFSTATE_STORAGE_ACCOUNT }}
+        run: |
+          missing=""
+          for v in ARM_CLIENT_ID ARM_TENANT_ID ARM_SUBSCRIPTION_ID ALERT_EMAIL ADMIN_OBJECT_IDS STATE_RG STATE_ACCOUNT; do
+            if [ -z "${!v}" ]; then missing="$missing $v"; fi
+          done
+          if [ -n "$missing" ]; then
+            echo "::error::Not set:$missing. See infra/README.md \"CI for Terraform\"."
+            exit 1
+          fi
+          put() { if [ -n "$2" ]; then echo "$1=$2" >> "$GITHUB_ENV"; fi; }
+          put TF_VAR_alert_email "$ALERT_EMAIL"
+          put TF_VAR_admin_object_ids "$ADMIN_OBJECT_IDS"
+          put TF_VAR_psql_nat_gateway_enabled "$NAT"
+          put TF_VAR_eventhub_local_auth_enabled "$EH_LOCAL_AUTH"
+          put TF_VAR_budget_amount "$BUDGET"
+
+      - name: init
+        env:
+          STATE_RG: ${{ vars.TFSTATE_RESOURCE_GROUP }}
+          STATE_ACCOUNT: ${{ vars.TFSTATE_STORAGE_ACCOUNT }}
+          STATE_CONTAINER: ${{ vars.TFSTATE_CONTAINER || 'tfstate' }}
+          STATE_KEY: ${{ vars.TFSTATE_KEY || 'main.tfstate' }}
+        run: |
+          terraform -chdir=infra/main init -input=false -no-color \
+            -backend-config="resource_group_name=$STATE_RG" \
+            -backend-config="storage_account_name=$STATE_ACCOUNT" \
+            -backend-config="container_name=$STATE_CONTAINER" \
+            -backend-config="key=$STATE_KEY"
+
+      - name: plan
+        run: |
+          terraform -chdir=infra/main plan -input=false -no-color -out=tfplan
+          terraform -chdir=infra/main show -json tfplan > "$RUNNER_TEMP/plan.json"
+
+      - name: No data-holding resource is deleted or replaced
+        env:
+          ALLOW: ${{ inputs.allow_data_loss }}
+        run: |
+          jq -r '
+            (.resource_changes // [])[]
+            | select(.change.actions | index("delete"))
+            | select(.type | IN(
+                "azurerm_postgresql_flexible_server", "azurerm_postgresql_flexible_server_database",
+                "azurerm_storage_account", "azurerm_storage_container",
+                "azurerm_eventhub_namespace", "azurerm_eventhub",
+                "azurerm_servicebus_namespace", "azurerm_servicebus_queue",
+                "azurerm_key_vault", "azurerm_container_registry"))
+            | "\(.address) (\(.change.actions | join("/")))"' "$RUNNER_TEMP/plan.json" > "$RUNNER_TEMP/stateful.txt"
+          if [ -s "$RUNNER_TEMP/stateful.txt" ]; then
+            while read -r line; do echo "::error::This plan deletes or replaces $line"; done < "$RUNNER_TEMP/stateful.txt"
+            if [ "$ALLOW" != "true" ]; then
+              echo "::error::Not applied. Re-run with allow_data_loss only if losing that data is intended."
+              exit 1
+            fi
+          fi
+
+      - name: apply
+        run: terraform -chdir=infra/main apply -input=false -no-color tfplan
+
+      - name: Host storage uses the managed identity only
+        run: |
+          app=$(terraform -chdir=infra/main output -raw ingest_function_name)
+          rg=$(terraform -chdir=infra/main output -raw resource_group)
+          names=$(az functionapp config appsettings list -n "$app" -g "$rg" --query '[].name' -o tsv)
+          if printf '%s\n' "$names" | grep -qx 'AzureWebJobsStorage'; then
+            echo "Removing the key-based AzureWebJobsStorage setting (provider bug, infra/README.md)"
+            az functionapp config appsettings delete -n "$app" -g "$rg" --setting-names AzureWebJobsStorage --output none
+          fi
+          echo "$app: identity-based host storage only"

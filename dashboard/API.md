@@ -39,7 +39,7 @@ General rules:
 | `GET /api/segments?vehicle=all\|car\|bus\|tram` | `SegmentCollection` (segments) | One H3 hexagon polygon per segment with its `segment_agg` row for that vehicle filter |
 | `GET /api/segments/{h3}` | `SegmentDetail` (segments) | Per-vehicle aggregates, sickness split by seat/posture, every pass |
 | `GET /api/events?vehicle=all\|car\|bus\|tram&type=` | `RoadEventCollection` (sessions) | Detected events of aggregated sessions only; `vehicle` takes the same values as `/api/segments` (the dashboard always sends it), `type` is optional (`pothole\|speed_bump\|rail_joint`) |
-| `GET /api/live` | `LiveResponse` (live) | `live_state` of devices the ingest function heard from in the last 60 s, with the last ~2 min of track, `receivedAt` (arrival of the newest processed batch), `sessionStatus` (`live` while recording; a trip that just ended keeps its device listed for up to 60 s with its new status) and the latest MISC rating. **Privacy:** a device is left out while its trip is within the first (or, once ended, last) 200 m. Polled every 2 s; `serverTime` lets the dashboard measure ages on the server's clock |
+| `GET /api/live` | `LiveResponse` (live) | `live_state` of devices the ingest function heard from in the last 60 s, with the last ~2 min of track, `receivedAt` (arrival of the newest processed batch), `sessionStatus` (always `live`: a device is dropped as soon as its trip ends, because the last 200 m of a trip can only be hidden once it is known to be the end) and the latest MISC rating. **Privacy:** a device is left out while its trip is within 200 m of where it started, and as soon as the trip ends. Polled every 2 s; `serverTime` lets the dashboard measure ages on the server's clock |
 | `GET /api/quality` | `QualityListResponse` (sessions) | The data-quality panel for every session |
 
 The ingest routes (`POST /api/ingest`, and `PUT /api/ingest/sessions/{id}` from spec §6.1) belong to the ingest
@@ -66,8 +66,8 @@ it from roughness only).
 
 For each live device the dashboard derives, on the server's clock:
 - data age = now − `updatedAt` (sample time): the end-to-end delay to the screen (target < 10 s);
-- silence = now − `receivedAt`: amber after 10 s, red after 30 s (a dead zone) — unless `sessionStatus`
-  says the trip ended, which is shown as "trip ended";
+- silence = now − `receivedAt`: amber after 10 s, red after 30 s (a dead zone). A trip that ends leaves
+  the view at once (above), so silence on a listed device always means the phone stopped sending;
 - transport delay = `receivedAt` − `updatedAt`: above 10 s while batches are arriving, the phone is
   sending a backlog after a dead zone, shown as **catching up** rather than live.
 

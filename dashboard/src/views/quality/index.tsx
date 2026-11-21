@@ -19,7 +19,7 @@ export function QualityView() {
         <StatCard label="Good" value={count(QualityStatus.OK)} hint="No problems found" />
         <StatCard label="Degraded" value={count(QualityStatus.DEGRADED)} hint="Counted, invalid windows skipped" />
         <StatCard label="Bad" value={count(QualityStatus.BAD)} hint="Kept out of the map automatically" />
-        <StatCard label="Excluded from roughness" value={query.data ? rows.filter((row) => !row.roughnessEligible).length : PLACEHOLDER} hint="Hand-held or loose mount" />
+        <StatCard label="Excluded from roughness" value={query.data ? rows.filter((row) => !row.roughnessEligible).length : PLACEHOLDER} hint="Hand-held, loose or unknown mount" />
       </div>
       <Card className="py-0">
         <CardContent className="p-0">

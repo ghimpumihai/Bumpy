@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { dataSourceFormSchema } from "@/features/data-source-settings/schema";
+import { dataSourceFormSchema, isBlockedMixedContent } from "@/features/data-source-settings/schema";
 
 describe("dataSourceFormSchema", () => {
   it("accepts mock mode whatever is left in the hidden URL field", () => {
@@ -18,5 +18,15 @@ describe("dataSourceFormSchema", () => {
   it("only accepts http(s) URLs", () => {
     expect(dataSourceFormSchema.safeParse({ mode: "api", apiBase: "javascript:alert(1)" }).success).toBe(false);
     expect(dataSourceFormSchema.safeParse({ mode: "auto", apiBase: "ftp://example.com" }).success).toBe(false);
+  });
+});
+
+describe("isBlockedMixedContent", () => {
+  it("rejects a plain-http API only when the site itself is served over HTTPS", () => {
+    expect(isBlockedMixedContent("http://localhost:8000", "https:")).toBe(true);
+    expect(isBlockedMixedContent("HTTP://read-api.example.com", "https:")).toBe(true);
+    expect(isBlockedMixedContent("https://read-api.example.com", "https:")).toBe(false);
+    expect(isBlockedMixedContent("http://localhost:8000", "http:")).toBe(false);
+    expect(isBlockedMixedContent("http://localhost:8000", undefined)).toBe(false);
   });
 });

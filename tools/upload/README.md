@@ -9,12 +9,12 @@ Python 3 standard library only. It logs in with your Azure CLI login, so no keys
 1. Export the session from the app (Sessions → the trip → Export), or copy its folder from the Files app.
 2. Log in and upload:
 
-```powershell
+```sh
 az login
-python tools/upload/upload.py <session folder or .zip> --account <storage_account_name>
+python3 tools/upload/upload.py <session folder or .zip> --account <storage_account_name>
 ```
 
-`storage_account_name` is a Terraform output (`cd infra; .\tf.ps1 output storage_account_name`). Your login needs **Storage Blob Data Contributor** on the `sessions` container. Terraform gives that to everyone in `admin_object_ids`. You can also pass `--endpoint https://<account>.blob.core.windows.net`, or put a token in `$env:UPLOAD_ACCESS_TOKEN` instead of using `az`.
+`storage_account_name` is a Terraform output (`./infra/tf.ps1 output`, in `pwsh` on macOS or in Windows PowerShell). On Windows the command is `python` instead of `python3`. Your login needs **Storage Blob Data Contributor** on the `sessions` container. Terraform gives that to everyone in `admin_object_ids`. You can also pass `--endpoint https://<account>.blob.core.windows.net`, or put a token in `UPLOAD_ACCESS_TOKEN` instead of using `az`.
 
 `--dry-run out/` writes what would be uploaded to `out/<sessionId>/` and sends nothing. Point the finalize job's `UPLOAD_DIR` at `out/` to run it locally.
 
@@ -46,7 +46,7 @@ Required in `files`: `session.json`, `device_motion.csv` and `location.csv`. The
 
 ## Tests
 
-```powershell
-python -m pytest -q tools/upload                       # the tool against a fake Blob Storage
-cd services/processor; python -m pytest -q tests/test_upload.py   # the finalize side, same folders
+```sh
+python3 -m pytest -q tools/upload                       # the tool against a fake Blob Storage
+cd services/processor && python3 -m pytest -q tests/test_upload.py   # the finalize side, same folders
 ```

@@ -6,6 +6,7 @@ import { StrictMode } from "react";
 import { createRoot } from "react-dom/client";
 import { HelmetProvider } from "react-helmet-async";
 
+import { RouteError } from "@/components/route-error";
 import { StartupError } from "@/components/startup-error";
 import { Toaster } from "@/components/ui/sonner";
 import { TooltipProvider } from "@/components/ui/tooltip";
@@ -21,6 +22,7 @@ function createAppRouter(queryClient: QueryClient, dataSource: Awaited<ReturnTyp
     routeTree,
     context: { queryClient, dataSource },
     defaultPreload: "intent",
+    defaultErrorComponent: RouteError,
     scrollRestoration: true,
   });
 }

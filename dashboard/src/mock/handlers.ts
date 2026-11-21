@@ -221,7 +221,9 @@ function live(): LiveResponse {
   const devices: LiveDevice[] = [...getDataset().sims.values()]
     .filter((sim) => sim.spec.live)
     .flatMap((sim) => {
-      // A finished live trip disappears from the live view a minute after its last batch.
+      // Like the read API: a device leaves the live view as soon as its trip ends (privacy — the end of a
+      // trip is often someone's home, and the last 200 m can't be known to be the last until then).
+      if (processingStatus(sim, now) !== "live") return [];
       const last = lastSampleIndex(sim, now);
       // Devices the ingest function heard from in the last minute (a dead zone keeps them listed, stale).
       const receivedAt = receivedAtMs(sim, now);
@@ -243,7 +245,7 @@ function live(): LiveResponse {
           deviceId: sim.spec.deviceId,
           sessionId: sim.spec.sessionId,
           source: sim.spec.source,
-          sessionStatus: processingStatus(sim, now),
+          sessionStatus: "live",
           vehicleType: sim.spec.vehicle.type,
           updatedAt: new Date(sim.t[last]).toISOString(),
           receivedAt: new Date(receivedAt).toISOString(),

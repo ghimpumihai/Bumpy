@@ -2,9 +2,16 @@ name: iOS app
 
 on:
   push:
-    paths: ["src/mobile-ios/**", ".github/workflows/ios-app.yml"]
+    branches: [main]
+    paths:
+      - "src/mobile-ios/**"
+      - "!src/mobile-ios/**/*.md"
+      - ".github/workflows/ios-app.yml"
   pull_request:
-    paths: ["src/mobile-ios/**", ".github/workflows/ios-app.yml"]
+    paths:
+      - "src/mobile-ios/**"
+      - "!src/mobile-ios/**/*.md"
+      - ".github/workflows/ios-app.yml"
   workflow_dispatch:
 
 permissions:

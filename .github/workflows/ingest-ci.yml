@@ -7,11 +7,13 @@ on:
       - "src/mobile-ios/tools/mock_ingest_server.py"
       - "src/mobile-ios/tools/fixtures/**"
       - ".github/workflows/ingest-ci.yml"
+      - "!**/*.md"
   push:
     branches: [main]
     paths:
       - "services/ingest/**"
       - "src/mobile-ios/tools/mock_ingest_server.py"
+      - "!**/*.md"
 
 permissions:
   contents: read

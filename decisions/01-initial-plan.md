@@ -209,7 +209,7 @@ Documents/sessions/2026-11-21T09-12-03Z_<shortId>/
 ├── altimeter.csv         # B1 (+B2 columns or abs_altitude.csv)
 ├── activity.csv          # A1
 ├── audio_000.m4a, …      # S2, 5-minute segments (crash-safe; see the app README)
-├── audio_segments.csv    # start/stop/interrupted per audio file
+├── audio_segments.csv    # start/stop/interrupted/reset per audio file; blocked_background = gap until the app is opened
 ├── abs_altitude.csv      # B2
 ├── audio_level.csv       # S1
 ├── device.csv            # D1–D5
@@ -333,8 +333,8 @@ Everything here is **additive**: the §6 keys keep their names, types and units,
 - **Hackathon payload rule** ("device ID, event type, value, unit, UTC timestamp"): `eventType: "sensor_batch"`, `source: "live"`, `t0UtcMs` (sample UTC = `t0UtcMs + t[i]·1000`), `fieldUnits` (the unit of every field). Accelerations stay in **g** as the iPhone delivers them (`1 g = 9.80665 m/s²`); invalid speed/course/accuracies are **−1** as in iOS.
 - **Headers:** `x-idempotency-key: <sessionId>:<batchSeq>` for batches, `<sessionId>:meta-start|meta-stop` for §6.1.
 - **§6.1 body:** `session.json` plus `source: "live"` (the replay tool rewrites it) and, in the Stop copy, `batchCount`. `people.raterName` is removed from the cloud copy (personal data stays on the phone).
-- **Queue:** files `<createdMs>_<sessionId>_<batchSeq>.json.gz` and `<createdMs>_<sessionId>_meta-start|stop.json.gz`; lexical order is send order. `batchSeq` counts only batches actually queued (windows recorded while the URL was empty are not queued and use no number), so `batchCount` is exact. Recovered (crashed) sessions send no Stop copy; the 15-minute close applies.
-- **Statuses:** 2xx/409 done; 401/403/404 (batches) and 408/429/5xx/network retried with backoff 1→30 s; for session metadata 404/405 means "no PUT route yet": it is set aside in `upload_failed/` and never blocks the batches; other 4xx go to `upload_failed/`; redirects are never followed; a batch that fails 5× on the server moves to the back of the queue (metadata is never re-ordered: it is set aside instead). Plain `http://` is accepted only for local test servers.
+- **Queue:** files `<createdMs>_<sessionId>_<batchSeq>.json.gz` and `<createdMs>_<sessionId>_meta-start|stop.json.gz`; lexical order is send order. `createdMs` is strictly increasing per queue (a wall clock that steps back can't sort the Stop copy before the last batch), and files are never re-ordered. `batchSeq` counts only batches actually queued: windows recorded while the URL was empty use no number, and a batch whose enqueue failed (full disk) keeps no number and is retried at the next tick (up to 30 s of windows), so `batchCount` is exact with no holes. A `.json.gz` file whose name the app didn't write (e.g. a Files-app copy) or that can't be read is moved to `upload_failed/`, never left blocking the queue. After the Stop copy is queued the app asks iOS for background time until the queue is empty. Recovered (crashed) sessions send no Stop copy; the 15-minute close applies.
+- **Statuses:** 2xx/409 done; 401/403/404 (batches) and 408/429/5xx/network retried in place with backoff 1→30 s, however long it takes (the ingest function answers 503 only for its own outages, never for a bad payload, so an outage never parks or re-orders anything); for session metadata 404/405 means "no PUT route yet" (or a redeploy in progress): it is retried 8 times (about 2 min) and then set aside in `upload_failed/`, so it never blocks the batches for good; other 4xx go to `upload_failed/`; redirects are never followed. A file that was sent but can't be deleted is not sent again. Plain `http://` is accepted only for local test servers, and a pasted base URL ending in `/api/ingest` is reduced to its base.
 - **Size:** a 2 s batch is about 45 KB of JSON (about 16 KB gzipped); the app logs a warning above 180 KB (the function's limit is 200 KB decompressed).
 
 ---

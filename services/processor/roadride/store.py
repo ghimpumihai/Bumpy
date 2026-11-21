@@ -4,13 +4,21 @@ so the rows and the stream checkpoint commit together."""
 from __future__ import annotations
 
 import datetime as dt
+import logging
+from typing import Callable, TypeVar
 
 import numpy as np
 from psycopg import Connection
 from psycopg.types.json import Jsonb
 
+from .db import is_connection_loss, is_retryable_conflict
 from .dsp import Pipeline
 from .live import BatchFacts, SessionFacts, exclusion_reasons
+
+log = logging.getLogger(__name__)
+
+T = TypeVar("T")
+
 
 
 def from_epoch(seconds: float) -> dt.datetime:
@@ -21,6 +29,22 @@ class Store:
     def __init__(self, conn: Connection):
         self.conn = conn
         self.ended: list[str] = []  # trips this store moved to `processing` (ready.py sends for them)
+        # Optional parts of a batch dropped because they failed (labels, signal, live_state).
+        self.dropped: dict[str, int] = {}
+
+    def _optional(self, part: str, session_id: str, fn: Callable[[], T]) -> tuple[bool, T | None]:
+        """Runs an optional part of a batch in its own savepoint. If it fails, only that part is
+        lost: the batch itself (ingest_batches row, track) still counts, so the trip can complete.
+        Connection loss and deadlocks are re-raised: the caller retries those."""
+        try:
+            with self.conn.transaction():
+                return True, fn()
+        except Exception as exc:  # noqa: BLE001
+            if is_connection_loss(exc, self.conn) or is_retryable_conflict(exc):
+                raise
+            log.warning("dropping %s of a batch of session %s", part, session_id, exc_info=True)
+            self.dropped[part] = self.dropped.get(part, 0) + 1
+            return False, None
 
     # --- checkpoints ---------------------------------------------------------------------
 
@@ -31,6 +55,16 @@ class Store:
             (eventhub, consumer_group),
         ).fetchall()
         return {pid: seq for pid, seq in rows}
+
+    def load_checkpoint_rows(self, eventhub: str, consumer_group: str
+                             ) -> dict[str, tuple[int, dt.datetime]]:
+        """partition_id -> (sequence number, when it was saved)."""
+        rows = self.conn.execute(
+            "SELECT partition_id, sequence_number, updated_at FROM stream_checkpoints "
+            "WHERE eventhub = %s AND consumer_group = %s",
+            (eventhub, consumer_group),
+        ).fetchall()
+        return {pid: (seq, updated) for pid, seq, updated in rows}
 
     def save_checkpoint(self, eventhub: str, consumer_group: str, partition_id: str,
                         sequence_number: int, enqueued_at: dt.datetime | None) -> None:
@@ -105,7 +139,12 @@ class Store:
     # --- batches -------------------------------------------------------------------------
 
     def apply_batch(self, f: BatchFacts, received_at: dt.datetime) -> str:
-        """Returns "new", "late" (older than a batch already processed) or "duplicate"."""
+        """Returns "new", "late" (older than a batch already processed), "duplicate" (the phone sent
+        it again) or "replayed" (the same Event Hubs event read a second time by the processor).
+
+        The batch itself (ingest_batches row, session counters, track) is all or nothing; labels,
+        the signal processing and the live state are optional parts in their own savepoints, so a
+        bad value in one of them can't lose the batch."""
         self._touch_device(f.device_id)
         self.conn.execute(
             """
@@ -135,6 +174,15 @@ class Store:
              Jsonb(f.sample_counts)),
         ).fetchone()
         if inserted is None:
+            # A phone retry went through the ingest function again, so it has a new receivedAtUtc.
+            # The same received time means the processor read the same event twice (a replay after
+            # a restart or a lost partition): not the phone's doing, so not counted.
+            first_received = self.conn.execute(
+                "SELECT received_at FROM ingest_batches WHERE session_id = %s AND batch_seq = %s",
+                (f.session_id, f.batch_seq),
+            ).fetchone()[0]
+            if first_received == received_at:
+                return "replayed"
             self.conn.execute(
                 "UPDATE sessions SET duplicate_batches = duplicate_batches + 1, updated_at = now() "
                 "WHERE session_id = %s",
@@ -155,14 +203,6 @@ class Store:
                     [(f.session_id, x.t, x.lon, x.lat, x.speed_ms, x.course_deg, x.h_acc_m)
                      for x in f.fixes],
                 )
-        if f.labels:
-            with self.conn.cursor() as cur:
-                cur.executemany(
-                    "INSERT INTO labels (session_id, t, type, value, note) VALUES (%s, %s, %s, %s, %s) "
-                    "ON CONFLICT (session_id, t, type) DO NOTHING",
-                    [(f.session_id, lab.t, lab.type, lab.value, lab.note) for lab in f.labels],
-                )
-
         self.conn.execute(
             """
             UPDATE sessions SET
@@ -176,6 +216,8 @@ class Store:
             (int(late), f.batch_seq, received_at, received_at, f.session_id),
         )
 
+        if f.labels:
+            self._optional("labels", f.session_id, lambda: self._insert_labels(f))
         if status == "complete":
             # Already finalized (e.g. closed after 15 silent minutes, then the phone's backlog came):
             # the trip was reopened above, and the finalize job recomputes it whole from the archive.
@@ -183,11 +225,27 @@ class Store:
         elif not late:
             # Late batches skip the signal processing: the filters have moved past them. The
             # finalize job recomputes the whole trip in one pass.
-            roughness_now, msdv = self._process_signal(f)
-            self._update_live_state(f, received_at, roughness_now, msdv)
+            ok, result = self._optional("signal", f.session_id, lambda: self._process_signal(f))
+            if ok:
+                roughness_now, msdv = result
+            else:
+                # signal_state wasn't advanced, so the next batch restarts the filters (a gap).
+                roughness_now = None
+                msdv = self.conn.execute("SELECT msdv_z FROM sessions WHERE session_id = %s",
+                                         (f.session_id,)).fetchone()[0]
+            self._optional("live_state", f.session_id,
+                           lambda: self._update_live_state(f, received_at, roughness_now, msdv))
         self._mark_processing_when_complete(f.session_id)
         self._refresh_exclusions(f.session_id)
         return "late" if late else "new"
+
+    def _insert_labels(self, f: BatchFacts) -> None:
+        with self.conn.cursor() as cur:
+            cur.executemany(
+                "INSERT INTO labels (session_id, t, type, value, note) VALUES (%s, %s, %s, %s, %s) "
+                "ON CONFLICT (session_id, t, type) DO NOTHING",
+                [(f.session_id, lab.t, lab.type, lab.value, lab.note) for lab in f.labels],
+            )
 
     def _process_signal(self, f: BatchFacts) -> tuple[float | None, float]:
         """Runs one batch through the trip's pipeline and saves its results and state."""
@@ -207,6 +265,7 @@ class Store:
             np.asarray(f.motion_g, dtype=float).reshape(-1, 3),
             [(x.t.timestamp() - off, x.speed_ms) for x in f.fixes],
             reset=reset,
+            rr=np.asarray(f.motion_rr, dtype=float).reshape(-1, 3),
         )
         if out.series:
             with self.conn.cursor() as cur:

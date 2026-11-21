@@ -11,8 +11,8 @@ import { buildChartData } from "../utils/series";
 
 /** The road band, the sickness band and their context on one synchronized time axis. */
 export function SessionCharts({ session }: { session: SessionDetail }) {
-  const series = sessionsApi.useSessionSeries(session.sessionId, session.status);
-  const events = sessionsApi.useSessionEvents(session.sessionId, session.status);
+  const series = sessionsApi.useSessionSeries(session);
+  const events = sessionsApi.useSessionEvents(session);
   const data = series.data ? buildChartData(series.data, events.data, session.sickness.ratings) : null;
   const syncKey = `session-${session.sessionId}`;
 

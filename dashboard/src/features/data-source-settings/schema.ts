@@ -5,6 +5,14 @@ import { DataSourceMode } from "@/types/config";
 const httpUrl = z.url({ protocol: /^https?$/ });
 
 /**
+ * A page served over HTTPS can't call a plain-http API: the browser blocks it as mixed content (and the
+ * deployed CSP allows only `https:`), which would surface as "could not be reached" on every page.
+ */
+export function isBlockedMixedContent(apiBase: string, pageProtocol: string | undefined): boolean {
+  return pageProtocol === "https:" && /^http:/i.test(apiBase);
+}
+
+/**
  * The API URL is only validated when it is used: in mock mode a half-typed URL must not block saving.
  * The field stays registered while hidden (no `shouldUnregister`), so the schema always sees a string.
  */
@@ -26,6 +34,12 @@ export const dataSourceFormSchema = z
         code: "custom",
         path: ["apiBase"],
         message: "Enter a full http(s) URL, e.g. https://read-api.example.com",
+      });
+    } else if (isBlockedMixedContent(value.apiBase, globalThis.location?.protocol)) {
+      ctx.addIssue({
+        code: "custom",
+        path: ["apiBase"],
+        message: "This site is served over HTTPS, so the browser blocks a plain http:// API. Use an https:// URL.",
       });
     }
   })

@@ -306,13 +306,13 @@ final class SessionMetadataUploadTests: XCTestCase {
                             config: { UploadConfig(baseURL: URL(string: "https://fn.test"), deviceKey: "k") })
         try q.enqueueSessionMetadata(json: Data("{}".utf8), sessionId: "S", phase: .start, createdUtcMs: 1)
         try q.enqueue(gzippedBody: Gzip.compress(Data("{}".utf8)), sessionId: "S", seq: 0, createdUtcMs: 2)
-        t.enqueue(500, 500, 500, 500, 500)
-        for _ in 0..<5 { _ = await q.processOnce() }
-        // 02 D33: context first — a failing Start copy is set aside, not moved behind batch 0.
-        XCTAssertEqual(q.failedFiles().compactMap { UploadQueue.parseItem(fileName: $0.lastPathComponent)?.item },
-                       [.sessionMeta(phase: .start)])
+        for _ in 0..<20 { t.enqueue(503) }
+        for _ in 0..<20 { _ = await q.processOnce() }
+        // 02 D33: context first. An outage (503) neither moves the Start copy behind batch 0 nor parks it.
+        XCTAssertTrue(q.failedFiles().isEmpty, "an outage must not park session metadata")
         XCTAssertEqual(q.pendingFiles().compactMap { UploadQueue.parseItem(fileName: $0.lastPathComponent)?.item },
-                       [.batch(seq: 0)])
+                       [.sessionMeta(phase: .start), .batch(seq: 0)])
+        XCTAssertEqual(Set(t.requests.map(\.httpMethod)), ["PUT"], "batch 0 never overtakes the Start copy")
     }
 
     /// Spec §6.1 "Until this exists, the backend creates the trip from its first batch": a backend
@@ -324,13 +324,22 @@ final class SessionMetadataUploadTests: XCTestCase {
                                 config: { UploadConfig(baseURL: URL(string: "https://fn.test"), deviceKey: "k") })
             try q.enqueueSessionMetadata(json: Data("{}".utf8), sessionId: "S", phase: .start, createdUtcMs: 1)
             try q.enqueue(gzippedBody: Gzip.compress(Data("{}".utf8)), sessionId: "S", seq: 0, createdUtcMs: 2)
-            t.enqueue(code, 201)
-            let first = await q.processOnce()
-            XCTAssertEqual(first, .permanentFailure(status: code))
-            let second = await q.processOnce()
-            XCTAssertEqual(second, .uploaded(status: 201), "batch 0 still goes out")
-            XCTAssertEqual(t.requests.map(\.httpMethod), ["PUT", "POST"])
+            let grace = UploadQueue.maxMetadataNotFoundAttempts
+            for _ in 0..<grace { t.enqueue(code) }
+            t.enqueue(201)
+            // A redeploy (transient 404) or a URL fixed later must not lose the copy: retried first…
+            for _ in 0..<(grace - 1) {
+                guard case .retry = await q.processOnce() else { return XCTFail("metadata \(code) is retried first") }
+            }
+            XCTAssertTrue(q.failedFiles().isEmpty)
+            // …then set aside, so a backend without the PUT route doesn't block the batches for good.
+            let parked = await q.processOnce()
+            XCTAssertEqual(parked, .permanentFailure(status: code))
+            let next = await q.processOnce()
+            XCTAssertEqual(next, .uploaded(status: 201), "batch 0 still goes out")
+            XCTAssertEqual(t.requests.map(\.httpMethod), Array(repeating: "PUT", count: grace) + ["POST"])
             XCTAssertTrue(q.pendingFiles().isEmpty)
+            XCTAssertEqual(q.failedFiles().count, 1)
         }
         // …while a batch 404 (wrong API URL) is still retried, never dumped:
         let t = MockTransport()

@@ -137,6 +137,47 @@ def test_gap_resets_filters_but_keeps_the_dose():
     assert out.reset and p.dose > dose
 
 
+def _with_hole(seconds, start, length, **kw):
+    """synth() with the samples of [start, start + length) s removed (a CoreMotion stall)."""
+    t, ua, grav, fixes = synth(seconds, **kw)
+    m = ~((t >= T0 + start) & (t < T0 + start + length))
+    return t[m], ua[m], grav[m], fixes
+
+
+def test_hole_inside_a_batch_resets_and_is_not_bridged():
+    hole = (3.0, 0.6)  # a 0.6 s stall in the middle of one feed
+    t, ua, grav, fixes = _with_hole(6, *hole, vert=lambda t: np.sin(2 * np.pi * 5 * t))
+    out, p = run_whole(t, ua, grav, fixes)
+    assert out.reset
+    lo, hi = T0 + hole[0], T0 + hole[0] + hole[1]
+    # The 5 Hz series lands on grid points: none of them may lie inside the hole (interpolated).
+    times = [s.t for s in out.series]
+    assert times and not any(lo < x < hi for x in times)
+    assert all(b > a for a, b in zip(times, times[1:]))
+
+
+def test_hole_inside_a_batch_equals_a_hole_between_batches():
+    t, ua, grav, fixes = _with_hole(8, 3.0, 0.6, vert=lambda t: np.sin(2 * np.pi * 5 * t))
+    whole, _ = run_whole(t, ua, grav, fixes)
+
+    cut = int(np.searchsorted(t, T0 + 3.0))  # the first sample after the hole starts a new batch
+    p = dsp.Pipeline()
+    a = p.feed(t[:cut], ua[:cut], grav[:cut], [f for f in fixes if f[0] < t[cut]])
+    p = dsp.Pipeline(json.loads(json.dumps(p.to_state())))
+    b = p.feed(t[cut:], ua[cut:], grav[cut:], [f for f in fixes if f[0] >= t[cut]])
+    assert b.reset
+    split = a.series + b.series
+    assert [round(s.t, 9) for s in split] == [round(s.t, 9) for s in whole.series]
+    assert [s.a_vert for s in split] == pytest.approx([s.a_vert for s in whole.series], abs=1e-9)
+    assert b.msdv == pytest.approx(whole.msdv, rel=1e-9)
+
+
+def test_jitter_below_the_gap_threshold_does_not_reset():
+    t, ua, grav, fixes = _with_hole(4, 2.0, dsp.MAX_GAP_S / 2)
+    out, _ = run_whole(t, ua, grav, fixes)
+    assert not out.reset
+
+
 def test_forward_axis_learned_from_speed_changes():
     # Accelerate and brake every 10 s: dv/dt and the longitudinal acceleration agree.
     lon = lambda t: 1.5 * np.sign(np.sin(2 * np.pi * t / 20))  # noqa: E731
@@ -230,3 +271,136 @@ def test_state_is_json():
     p = dsp.Pipeline()
     p.feed(t, ua, grav, fixes)
     assert json.loads(json.dumps(p.to_state())) == p.to_state()
+
+
+# --- Speed bumps ----------------------------------------------------------------------------
+
+def _pulse(at, amp, width=0.08):
+    return lambda t: amp * np.exp(-((t - at) / width) ** 2)
+
+
+def synth_bumps(seconds, bumps, *, speed=15 / 3.6 + 0.2, wheelbase=2.7, rate_amp=0.4, vert_amp=15.0,
+                extra_vert=None, seed=2):
+    """synth() plus a rotation rate: each bump at time b pitches the nose up (front axle climbing) and,
+    one wheelbase later, down (rear axle), with a vertical jolt at both axles."""
+    t, ua, grav, fixes = synth(seconds, speed=lambda t: 0 * t + speed, seed=seed)
+    rel = t - T0
+    pitch_up = np.zeros_like(rel)
+    vert = np.zeros_like(rel) if extra_vert is None else extra_vert(rel)
+    for b in bumps:
+        rear = b + wheelbase / speed
+        pitch_up += _pulse(b, rate_amp)(rel) - _pulse(rear, rate_amp)(rel)
+        vert += _pulse(b, vert_amp, 0.01)(rel) + _pulse(rear, vert_amp, 0.01)(rel)
+    r = _phone_frame()
+    ua = ua + (np.column_stack([0 * rel, 0 * rel, vert]) @ r.T) / dsp.G
+    # Nose up is a negative rotation about the vehicle's left (+y) axis.
+    rr = np.column_stack([0 * rel, -pitch_up, 0 * rel]) @ r.T
+    return t, ua, grav, fixes, rr
+
+
+def _forward_known_state():
+    fwd = _phone_frame() @ np.array([1.0, 0.0, 0.0])
+    return {"forward_sum": (fwd * dsp.FWD_MIN_EVIDENCE * 2).tolist(), "forward_n": dsp.FWD_MIN_EVIDENCE * 2}
+
+
+def _feed_bumps(t, ua, grav, fixes, rr, state=None):
+    p = dsp.Pipeline(state if state is not None else _forward_known_state())
+    out = p.feed(t, ua, grav, fixes, rr=rr)
+    return out, p
+
+
+def test_pitch_rate_sign_and_axis():
+    p = dsp.Pipeline(_forward_known_state())
+    r = _phone_frame()
+    down = np.tile(np.array([0, 0, -1.0]) @ r.T, (3, 1))
+    rr = np.array([[0, -0.3, 0], [0.3, 0, 0], [0, 0, 0.3]]) @ r.T  # nose up, roll, yaw
+    assert p._pitch_up(down, rr) == pytest.approx([0.3, 0.0, 0.0], abs=1e-9)
+    assert dsp.Pipeline()._pitch_up(down, rr) == pytest.approx([0, 0, 0])  # forward axis unknown
+
+
+def test_speed_bump_detected_and_its_jolts_are_not_potholes():
+    t, ua, grav, fixes, rr = synth_bumps(12, [5.0])
+    out, _ = _feed_bumps(t, ua, grav, fixes, rr)
+    (ev,) = out.events
+    assert ev.type == "speed_bump" and abs(ev.t - (T0 + 5.0)) < 0.1
+    assert ev.magnitude > dsp.POTHOLE_THRESHOLD_MS2 and 0 < ev.confidence <= 1
+    assert ev.speed == pytest.approx(15 / 3.6 + 0.2)
+
+
+@pytest.mark.parametrize("wheelbase", [2.2, 3.0, 6.0])
+def test_speed_bump_for_car_and_bus_wheelbases(wheelbase):
+    t, ua, grav, fixes, rr = synth_bumps(14, [5.0], speed=6.0, wheelbase=wheelbase)
+    out, _ = _feed_bumps(t, ua, grav, fixes, rr)
+    assert [e.type for e in out.events] == ["speed_bump"]
+
+
+def test_no_speed_bump_without_the_forward_axis():
+    t, ua, grav, fixes, rr = synth_bumps(12, [5.0])
+    out, _ = _feed_bumps(t, ua, grav, fixes, rr, state={})
+    # As before speed bumps existed: the jolts are potholes (one, since the second is within 1 s).
+    assert [e.type for e in out.events] == ["pothole"]
+
+
+def test_peaks_too_far_apart_for_an_axle_pair_are_not_a_bump():
+    t, ua, grav, fixes, rr = synth_bumps(14, [5.0], wheelbase=15.0)
+    out, _ = _feed_bumps(t, ua, grav, fixes, rr)
+    assert [e.type for e in out.events] == ["pothole", "pothole"]
+
+
+def test_no_speed_bump_when_fast_or_from_one_pitch_peak():
+    t, ua, grav, fixes, rr = synth_bumps(12, [5.0], speed=60 / 3.6, vert_amp=0.0)
+    assert _feed_bumps(t, ua, grav, fixes, rr)[0].events == []
+    t, ua, grav, fixes, _ = synth_bumps(12, [], vert_amp=0.0)
+    rr = np.column_stack([0 * t, -_pulse(5.0, 0.4)(t - T0), 0 * t]) @ _phone_frame().T  # a crest
+    assert _feed_bumps(t, ua, grav, fixes, rr)[0].events == []
+
+
+def test_potholes_are_held_back_and_flushed_at_the_end():
+    t, ua, grav, fixes = synth(10, vert=_spike(8.5), speed=lambda t: 0 * t + 10.0)
+    out, p = run_whole(t, ua, grav, fixes)
+    assert out.events == []  # still within POTHOLE_HOLD_S of the end
+    (ev,) = p.flush()
+    assert ev.type == "pothole" and abs(ev.t - (T0 + 8.5)) < 0.05
+    assert p.flush() == [] and p.to_state()["held"] == []
+
+
+def test_speed_bumps_chunked_equal_one_pass():
+    rng = np.random.default_rng(4)
+    noise = rng.normal(0, 0.3, 200 * 100 + 10)
+    extra = lambda rel: noise[np.clip((rel * 100).astype(int), 0, len(noise) - 1)] + _spike(150.0)(rel)  # noqa: E731
+    t, ua, grav, fixes, rr = synth_bumps(200, [20.0, 61.3, 120.7, 181.0], speed=5.5, extra_vert=extra)
+    whole, p = _feed_bumps(t, ua, grav, fixes, rr)
+    whole_events = whole.events + p.flush()
+
+    rng = np.random.default_rng(9)
+    events, state, start = [], _forward_known_state(), t[0]
+    while start <= t[-1]:
+        end = start + rng.uniform(1.0, 3.0)
+        m = (t >= start) & (t < end)
+        q = dsp.Pipeline(json.loads(json.dumps(state)))
+        events += q.feed(t[m], ua[m], grav[m], [x for x in fixes if start <= x[0] < end], rr=rr[m]).events
+        state = q.to_state()
+        start = end
+    events += dsp.Pipeline(state).flush()
+
+    key = lambda es: [(e.type, round(e.t, 6), e.magnitude) for e in es]  # noqa: E731
+    assert key(events) == key(whole_events)
+    assert [e.type for e in whole_events].count("speed_bump") == 4
+    assert [e.type for e in whole_events].count("pothole") == 1
+
+
+def test_a_trip_saved_before_rotation_rate_continues():
+    """State written by the previous version (no rotation channel, pitch filter, held potholes)."""
+    t, ua, grav, fixes = synth(8, vert=_spike(6.0), speed=lambda t: 0 * t + 10.0)
+    half = len(t) // 2
+    p = dsp.Pipeline()
+    p.feed(t[:half], ua[:half], grav[:half], [f for f in fixes if f[0] < t[half]])
+    old = json.loads(json.dumps(p.to_state()))
+    for k in ("held", "last_bump_t"):
+        old.pop(k)
+    for k in ("zi_pitch", "bump"):
+        old["grid"].pop(k)
+    old["grid"]["prev"] = old["grid"]["prev"][:7]
+    q = dsp.Pipeline(old)
+    out = q.feed(t[half:], ua[half:], grav[half:], [f for f in fixes if f[0] >= t[half]])
+    assert not out.reset and [e.type for e in out.events + q.flush()] == ["pothole"]

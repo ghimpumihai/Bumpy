@@ -49,6 +49,12 @@ npm run check      # typecheck + oxlint + depcruise (no import cycles) + unit te
 npm run test:e2e   # Playwright against the production build, under the production CSP:
                    # mock mode + API mode over real HTTP (scripts/contract-api-server.mjs),
                    # smoke tests on every route, axe-core WCAG 2.1 AA in light and dark mode
+
+# Against the real read API (services/read-api) on a local PostGIS, seeded through the processor:
+docker run -d --rm --name pg-e2e -e POSTGRES_HOST_AUTH_METHOD=trust -e POSTGRES_DB=roadride_e2e -p 55440:5432 postgis/postgis:17-3.5
+python3.12 -m venv /tmp/rr-e2e && /tmp/rr-e2e/bin/pip install -r ../services/read-api/requirements.txt -r ../services/processor/requirements.txt
+PGHOST=localhost PGPORT=55440 PGUSER=postgres PGDATABASE=roadride_e2e \
+  REAL_API_PYTHON=/tmp/rr-e2e/bin/python npx playwright test --project real-api
 ```
 
 Conventions are in [CLAUDE.md](CLAUDE.md).

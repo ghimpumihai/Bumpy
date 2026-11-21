@@ -48,7 +48,7 @@ export function SessionsView() {
           </QueryState>
         </CardContent>
       </Card>
-      <p className="text-xs text-muted-foreground">* Mount not rigid or hand-held: sickness numbers are experimental (plan §10).</p>
+      <p className="text-xs text-muted-foreground">* Mount not rigid, hand-held or unknown: sickness numbers are experimental (plan §10).</p>
     </div>
   );
 }

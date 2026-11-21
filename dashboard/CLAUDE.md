@@ -7,7 +7,7 @@ scope: This rule applies ONLY to `dashboard/` in the DataInfrastructure_Chuds re
 
 # Dashboard rules
 
-The dashboard reads only the read API. Its contract is [API.md](API.md), with types in `src/types/` and a mock backend in `src/mock/` that implements the same routes. When the contract changes, change `API.md`, `src/types/`, `src/mock/` and `services/read-api/` together; every response is checked by `expectShape` (`src/utils/api-shape.ts`).
+The dashboard reads only the read API. Its contract is [API.md](API.md), with types in `src/types/` and a mock backend in `src/mock/` that implements the same routes; every response is checked by `expectShape` (`src/utils/api-shape.ts`). Contract changes follow the root `CLAUDE.md`.
 
 ## Structure
 - `src/mock/` is reachable only through `configureApiClient` (dynamic import); depcruise enforces it.

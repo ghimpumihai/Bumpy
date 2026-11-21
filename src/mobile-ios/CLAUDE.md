@@ -58,7 +58,7 @@ Requirements: `decisions/01-initial-plan.md`. Losing data is the worst possible 
 The app ships real sensors only: no mock or demo mode. Fakes live in the test target. The Simulator has no motion/barometer hardware: those streams show "n/a" and preflight needs the recorded override.
 
 ## Testing
-- Tests are required where data can be lost: `Upload/`, the on-disk schema (`StreamFile`, `SessionWriter`), `session.json` and the contract types. Elsewhere, only if cheap.
+- Tests are required where data can be lost: `Upload/`, the on-disk schema (`StreamFile`, `SessionWriter`), `session.json` and the contract types. Elsewhere, skip them.
 - Launch arguments: `-uiTesting`, `-uiTestingReset`, `-sicknessInterval <s>`, `-sicknessTimeout <s>`, `-upload.baseURL <url>`.
 
 ```bash

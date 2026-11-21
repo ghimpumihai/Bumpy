@@ -60,6 +60,7 @@ class CatchErrors:
 
 def create_app(pool: ConnectionPool | None = None) -> FastAPI:
     pool = pool or make_pool()
+    stats_cache = q.TripStatsCache()  # per app, so per database
 
     @asynccontextmanager
     async def lifespan(_: FastAPI):
@@ -127,12 +128,12 @@ def create_app(pool: ConnectionPool | None = None) -> FastAPI:
         source = q.enum_param(source, "source", q.SOURCES)
         vehicle = q.enum_param(vehicle, "vehicle", q.VEHICLE_TYPES)
         with pool.connection() as conn:
-            return q.session_list(conn, source, vehicle)
+            return q.session_list(conn, source, vehicle, stats_cache)
 
     @app.get("/api/sessions/{session_id}")
     def session(session_id: str):
         with pool.connection() as conn:
-            return q.session_detail(conn, session_id)
+            return q.session_detail(conn, session_id, stats_cache)
 
     @app.get("/api/sessions/{session_id}/series")
     def series(session_id: str):
@@ -182,7 +183,7 @@ def create_app(pool: ConnectionPool | None = None) -> FastAPI:
     @app.get("/api/quality")
     def quality():
         with pool.connection() as conn:
-            return q.quality_list(conn)
+            return q.quality_list(conn, stats_cache)
 
     return app
 

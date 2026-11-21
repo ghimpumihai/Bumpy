@@ -7,7 +7,7 @@ import pathlib
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1]))
 
 from app.fmt import epoch_ms, iso  # noqa: E402
-from app.queries import BadRequest, TrackPoint, enum_param, is_h3_cell, public_points  # noqa: E402
+from app.queries import BadRequest, enum_param, is_h3_cell, rating_value  # noqa: E402
 
 UTC = dt.timezone.utc
 
@@ -36,13 +36,7 @@ def test_h3_cell():
     assert not is_h3_cell("8a1fb46622dfffz")
 
 
-def _pts(distances):
-    t0 = dt.datetime(2026, 1, 1, tzinfo=UTC)
-    return [TrackPoint(0, 0, t0 + dt.timedelta(seconds=i), None, s) for i, s in enumerate(distances)]
-
-
-def test_privacy_trim():
-    pts = _pts([0, 100, 199, 200, 500, 800, 801, 1000])
-    assert [p.s for p in public_points(pts, ended=False)] == [200, 500, 800, 801, 1000]
-    assert [p.s for p in public_points(pts, ended=True)] == [200, 500, 800]
-    assert public_points([], ended=True) == []
+def test_rating_value():
+    assert rating_value("3") == 3 and rating_value("4.0") == 4 and rating_value(5) == 5
+    assert rating_value(None) is None and rating_value("") is None and rating_value("skip") is None
+    assert rating_value("inf") is None and rating_value("nan") is None

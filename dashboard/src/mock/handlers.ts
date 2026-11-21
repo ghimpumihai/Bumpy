@@ -229,7 +229,7 @@ function live(): LiveResponse {
     .filter((sim) => sim.spec.live)
     .flatMap((sim) => {
       const last = lastSampleIndex(sim, now);
-      // Recording devices heard from in the last 5 min (a dead zone keeps them listed, stale); ended trips for 1 min.
+      // Devices the ingest function heard from in the last minute (a dead zone keeps them listed, stale).
       const receivedAt = receivedAtMs(sim, now);
       if (now - receivedAt > LIVE_WINDOW_S * MS_PER_SECOND) return [];
       const window = ROUGHNESS_NOW_WINDOW_S * SERIES_HZ;

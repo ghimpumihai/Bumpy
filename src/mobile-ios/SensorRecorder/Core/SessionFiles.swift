@@ -12,6 +12,7 @@ enum StreamFile: String, CaseIterable, Sendable {
     case altimeter
     case absAltitude = "abs_altitude"
     case activity
+    /// Not written since D48 (no audio). Kept so the header fixture and older sessions still parse.
     case audioLevel = "audio_level"
     case audioSegments = "audio_segments"
     case device
@@ -19,6 +20,9 @@ enum StreamFile: String, CaseIterable, Sendable {
     case clock
 
     var fileName: String { rawValue + ".csv" }
+
+    /// The files a new recording writes.
+    static let recorded = allCases.filter { $0 != .audioLevel && $0 != .audioSegments }
 
     static let commonColumns = ["t_up", "t_utc_ms"]
 
@@ -64,7 +68,6 @@ enum SessionFileName {
     static let metadata = "session.json"
     static let appLog = "app_log.txt"
     static let mountPhoto = "mount.jpg"
-    static func audioSegment(_ index: Int) -> String { String(format: "audio_%03d.m4a", index) }
 }
 
 /// Where a `BufferedFileWriter` puts bytes. Production: the file; tests inject failures

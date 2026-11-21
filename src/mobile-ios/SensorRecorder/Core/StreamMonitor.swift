@@ -2,7 +2,7 @@ import Foundation
 
 /// Logical data streams shown on the dashboard.
 enum StreamID: String, CaseIterable, Sendable, Codable {
-    case deviceMotion, accel, gyro, mag, gps, heading, barometer, absAltitude, activity, audioLevel, device
+    case deviceMotion, accel, gyro, mag, gps, heading, barometer, absAltitude, activity, device
 
     var displayName: String {
         switch self {
@@ -15,7 +15,6 @@ enum StreamID: String, CaseIterable, Sendable, Codable {
         case .barometer: return "Barometer"
         case .absAltitude: return "Abs. altitude"
         case .activity: return "Activity"
-        case .audioLevel: return "Audio level"
         case .device: return "Device health"
         }
     }
@@ -26,7 +25,6 @@ enum StreamID: String, CaseIterable, Sendable, Codable {
         case .deviceMotion, .accel, .gyro: return 100
         case .mag: return 50
         case .gps: return 1
-        case .audioLevel: return 10
         case .device: return 0.2
         case .heading, .barometer, .absAltitude, .activity: return nil
         }
@@ -38,7 +36,7 @@ enum StreamID: String, CaseIterable, Sendable, Codable {
     /// every gap is ~1 s, so it uses 3 s; event-driven / slow streams never count as gaps.
     var significantGap: TimeInterval {
         switch self {
-        case .deviceMotion, .accel, .gyro, .mag, .audioLevel: return 1
+        case .deviceMotion, .accel, .gyro, .mag: return 1
         case .gps: return 3
         case .device: return 3 / (StreamID.device.expectedHz ?? 0.2) // 3 missed polls
         case .heading, .barometer, .absAltitude, .activity: return .infinity
@@ -46,7 +44,7 @@ enum StreamID: String, CaseIterable, Sendable, Codable {
     }
 
     /// Window over which the "current" rate is measured (spec: 2 s for motion).
-    var rateWindow: TimeInterval { isMotion || self == .audioLevel ? 2 : 10 }
+    var rateWindow: TimeInterval { isMotion ? 2 : 10 }
 
     var file: StreamFile {
         switch self {
@@ -59,7 +57,6 @@ enum StreamID: String, CaseIterable, Sendable, Codable {
         case .barometer: return .altimeter
         case .absAltitude: return .absAltitude
         case .activity: return .activity
-        case .audioLevel: return .audioLevel
         case .device: return .device
         }
     }
@@ -185,7 +182,6 @@ enum SessionAnalyzer {
         var streams: [StreamID: GapTracker] = [:]
         var labelsCount = 0
         var fileSizes: [String: Int64] = [:]
-        var audioFiles: [String] = []
         var totalBytes: Int64 = 0
 
         /// Latest sample timestamp (t_up) over all streams.
@@ -213,36 +209,6 @@ enum SessionAnalyzer {
         }
     }
 
-    /// MP4/M4A files whose top-level boxes contain no `moov` (index). AVAudioRecorder writes it on
-    /// stop(), so the segment being recorded when the app died is unplayable. Pure Foundation.
-    static func unplayableAudioFiles(in folder: URL) -> [String] {
-        let fm = FileManager.default
-        let names = ((try? fm.contentsOfDirectory(atPath: folder.path)) ?? []).filter { $0.hasSuffix(".m4a") }.sorted()
-        return names.filter { !hasMoovBox(folder.appendingPathComponent($0)) }
-    }
-
-    static func hasMoovBox(_ url: URL) -> Bool {
-        guard let h = try? FileHandle(forReadingFrom: url) else { return false }
-        defer { try? h.close() }
-        guard let end = try? h.seekToEnd() else { return false }
-        var offset: UInt64 = 0
-        while offset + 8 <= end {
-            guard (try? h.seek(toOffset: offset)) != nil, let hdr = try? h.read(upToCount: 16), hdr.count >= 8 else { return false }
-            let b = [UInt8](hdr)
-            var size = UInt64(b[0]) << 24 | UInt64(b[1]) << 16 | UInt64(b[2]) << 8 | UInt64(b[3])
-            let type = String(decoding: b[4..<8], as: UTF8.self)
-            if type == "moov" { return true }
-            if size == 1, b.count >= 16 { // 64-bit largesize
-                size = b[8..<16].reduce(0) { $0 << 8 | UInt64($1) }
-            } else if size == 0 { // box extends to end of file
-                return false
-            }
-            guard size >= 8 else { return false }
-            offset += size
-        }
-        return false
-    }
-
     static func analyze(folder: URL) -> Result {
         var r = Result()
         let fm = FileManager.default
@@ -251,9 +217,7 @@ enum SessionAnalyzer {
                 let size = fm.fileSize(f)
                 r.fileSizes[f.lastPathComponent] = size
                 r.totalBytes += size
-                if f.pathExtension == "m4a" { r.audioFiles.append(f.lastPathComponent) }
             }
-            r.audioFiles.sort()
         }
         for id in StreamID.allCases {
             let url = folder.appendingPathComponent(id.file.fileName)

@@ -274,6 +274,7 @@ class Store:
             [(x.t.timestamp() - off, x.speed_ms) for x in f.fixes],
             reset=reset,
             rr=np.asarray(f.motion_rr, dtype=float).reshape(-1, 3),
+            moved=f.phone_moved_up,
         )
         if out.series:
             with self.conn.cursor() as cur:

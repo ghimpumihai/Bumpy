@@ -241,6 +241,24 @@ def _one(db, sql, *args):
 
 
 @requires_db
+def test_a_phone_moved_tap_restarts_the_forward_axis_live_and_in_finalize(db, batch, session_meta):
+    """Both paths hand the operator's tap to the pipeline, on the same clock as the fixes."""
+    from roadride.dsp import FWD_SETTLE_S
+
+    sid = "trip-tap"
+    batches, metas = _trip(batch, session_meta, sid, n=10)
+    _label(batches[4], 1.0, "phone_moved")
+    facts = [parse_batch(b) for b in batches]
+    tap_up = facts[4].motion_t[0] + 1.0  # deviceMotion t starts at the batch's t0Up
+    assert facts[4].phone_moved_up == [pytest.approx(tap_up, abs=1e-6)]
+    _stream(db, batches, metas)
+    live = _one(db, "SELECT state FROM signal_state WHERE session_id = %s", sid)[0]
+    final = fz.run_pipeline(facts).state
+    assert live["fwd_settle_until"] == pytest.approx(tap_up + FWD_SETTLE_S, abs=1e-6)
+    assert final["fwd_settle_until"] == pytest.approx(live["fwd_settle_until"], abs=1e-9)
+
+
+@requires_db
 def test_finalize_reproduces_a_clean_live_trip_and_aggregates_it(db, batch, session_meta, tmp_path):
     sid = "trip-clean"
     batches, metas = _trip(batch, session_meta, sid)

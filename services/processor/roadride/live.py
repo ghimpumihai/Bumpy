@@ -76,6 +76,11 @@ class BatchFacts:
     def last_fix(self) -> Fix | None:
         return max(self.fixes, key=lambda f: f.t) if self.fixes else None
 
+    @property
+    def phone_moved_up(self) -> list[float]:
+        """The operator's phone_moved taps on the uptime clock, like the fixes fed to dsp.Pipeline."""
+        return [lab.t.timestamp() - self.clock_offset for lab in self.labels if lab.type == "phone_moved"]
+
 
 def parse_batch(b: dict) -> BatchFacts:
     """`b` has already passed the ingest function's schema check."""

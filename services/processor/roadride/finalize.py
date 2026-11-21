@@ -207,6 +207,7 @@ def run_pipeline(batches: list[BatchFacts]) -> TripSignal:
             fixes,
             reset=prev is not None and f.batch_seq != prev + 1,
             rr=np.asarray(f.motion_rr, dtype=float).reshape(-1, 3),
+            moved=f.phone_moved_up,
         )
         for p in res.series:
             p.t += off

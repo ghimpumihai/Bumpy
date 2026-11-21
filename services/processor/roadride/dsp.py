@@ -29,8 +29,18 @@ has the right sign and timing but no jolt of its own. A speed bump also shakes t
 so potholes are held back while a speed bump could still turn out to cover them, and dropped if one
 does; `flush()` releases the ones still held at the end of a trip.
 
-Thresholds for potholes, speed bumps (including BUMP_MIN_REAR_JOLT) and the forward-axis estimate are
-PROVISIONAL: they haven't seen a real drive.
+The forward axis starts over when the phone was moved in its mount: at an operator's `phone_moved`
+tap (evidence from the next FWD_SETTLE_S, while the phone is still being handled, is ignored), when
+the gravity direction in the phone frame turns by more than FWD_REMOUNT_TILT_DEG, and when the phone
+turns about the vertical by more than FWD_REMOUNT_YAW_DEG while the vehicle stands still. That last
+case leaves gravity unchanged; standing still (known speed below FWD_STILL_SPEED_MS) the vehicle can't
+yaw faster than about v / 5 m, so only rotation faster than FWD_REMOUNT_RATE counts, which also keeps
+gyro bias out over a long stop. A phone turned about the vertical while driving is only caught by a
+tap: the speed-change evidence is too noisy (turns while braking) to show it in less than hundreds of
+items.
+
+Thresholds for potholes, speed bumps (including BUMP_MIN_REAR_JOLT) and the forward-axis estimate
+(including the re-mount ones) are PROVISIONAL: they haven't seen a real drive.
 """
 
 from __future__ import annotations
@@ -83,6 +93,13 @@ FIX_MAX_HOLD_S = 3.0  # use the last GPS speed for at most this long
 FWD_MIN_DVDT = 0.5  # m/s², only clear speed changes say where "forward" is
 FWD_MIN_DT, FWD_MAX_DT = 0.5, 3.0  # s between the two fixes of a speed change
 FWD_MIN_EVIDENCE = 10  # speed changes before the forward axis is trusted
+FWD_SETTLE_S = 5.0  # after a phone_moved tap; the same span quality.handled marks as handled
+FWD_REMOUNT_TILT_DEG = 20.0  # road grade and banking tilt the phone by a few degrees; more is a re-mount
+FWD_GRAVITY_TAU_S = 2.0  # smoothing of the gravity direction for that comparison
+FWD_STILL_SPEED_MS = 0.5
+FWD_REMOUNT_RATE = 0.15  # rad/s about the vertical
+FWD_REMOUNT_YAW_DEG = 30.0
+MOVED = "phone_moved"  # a phone_moved tap, queued with the fixes so it is taken at its own time
 
 WF = dict(f1=0.08, f2=0.63, f4=0.25, q4=0.86, f5=0.0625, q5=0.80, f6=0.1, q6=0.80)
 
@@ -168,6 +185,14 @@ class FeedResult:
 
 # --- Pipeline -----------------------------------------------------------------------------
 
+def _angle_deg(a, b) -> float:
+    a, b = np.asarray(a, dtype=float), np.asarray(b, dtype=float)
+    na, nb = np.linalg.norm(a), np.linalg.norm(b)
+    if na == 0 or nb == 0:
+        return 0.0
+    return math.degrees(math.acos(max(-1.0, min(1.0, float(a @ b) / (na * nb)))))
+
+
 def _zeros(sos: np.ndarray, channels: int = 1) -> list:
     return np.zeros((channels, sos.shape[0], 2)).tolist()
 
@@ -194,6 +219,11 @@ class Pipeline:
         self.pending_fixes = [tuple(f) for f in s.get("pending_fixes", [])]
         self.held = [list(h) for h in s.get("held", [])]  # potholes [t, peak, speed] a speed bump may still cover
         self.last_bump_t = s.get("last_bump_t")
+        # Forward-axis restarts (module docstring). Absent in a trip saved before them: it carries on.
+        self.still_yaw = float(s.get("still_yaw", 0.0))  # rad turned about the vertical during this stop
+        self.fwd_settle_until = s.get("fwd_settle_until")  # evidence starting before this is ignored
+        self.g_ema = s.get("g_ema")  # smoothed gravity direction, phone frame
+        self.g_ref = s.get("g_ref")  # g_ema when the current forward estimate started
         if self.grid is not None:
             self._upgrade_grid(self.grid)
 
@@ -206,6 +236,8 @@ class Pipeline:
             "rough_ema": self.rough_ema, "grid": self.grid,
             "pending_fixes": [list(f) for f in self.pending_fixes],
             "held": self.held, "last_bump_t": self.last_bump_t,
+            "still_yaw": self.still_yaw, "fwd_settle_until": self.fwd_settle_until,
+            "g_ema": self.g_ema, "g_ref": self.g_ref,
         }
 
     @staticmethod
@@ -272,8 +304,22 @@ class Pipeline:
             return None
         return before[1] if t - before[0] <= FIX_MAX_HOLD_S else None
 
-    def _take_fix(self, t: float, speed: float | None) -> None:
-        if self.prev_fix and self.prev_fix[1] is not None and speed is not None and self.h_n > 0:
+    def _take_fix(self, t: float, speed: float | str | None) -> None:
+        if speed == MOVED:
+            self._restart_axis(t, settle=True)
+            return
+        # Taken here, between two stretches of samples, so a restart never changes the axis mid-stretch.
+        tilted = self.g_ref is not None and self.g_ema is not None \
+            and _angle_deg(self.g_ema, self.g_ref) > FWD_REMOUNT_TILT_DEG
+        if tilted or abs(math.degrees(self.still_yaw)) > FWD_REMOUNT_YAW_DEG:
+            self._restart_axis(t, settle=True)
+        if speed is None or speed >= FWD_STILL_SPEED_MS:
+            self.still_yaw = 0.0  # moving (or unknown): this stop is over
+        if self.g_ref is None and self.g_ema is not None:
+            self.g_ref = list(self.g_ema)
+        settled = self.fwd_settle_until is None \
+            or (self.prev_fix is not None and self.prev_fix[0] >= self.fwd_settle_until)
+        if self.prev_fix and self.prev_fix[1] is not None and speed is not None and self.h_n > 0 and settled:
             dt_fix = t - self.prev_fix[0]
             if FWD_MIN_DT <= dt_fix <= FWD_MAX_DT:
                 dvdt = (speed - self.prev_fix[1]) / dt_fix
@@ -284,15 +330,49 @@ class Pipeline:
         self.h_acc, self.h_n = [0.0, 0.0, 0.0], 0
         self.prev_fix = [t, speed]
 
+    def _smooth_gravity(self, down: np.ndarray) -> None:
+        """g_ema over these samples. It is only read when a fix is taken, between two stretches."""
+        if not len(down):
+            return
+        if self.g_ema is None:
+            self.g_ema, down = down[0].tolist(), down[1:]
+            if not len(down):
+                return
+        a = DT / FWD_GRAVITY_TAU_S
+        self.g_ema = [float(signal.lfilter([a], [1.0, a - 1.0], down[:, c], zi=[(1.0 - a) * g])[0][-1])
+                      for c, g in enumerate(self.g_ema)]
+
+    def _still_rotation(self, gt: np.ndarray, down: np.ndarray, rr: np.ndarray) -> None:
+        """Adds this stretch's fast rotation about the vertical to still_yaw while standing still. The
+        speed is the same over a stretch (no fix is taken inside it) except for FIX_MAX_HOLD_S running
+        out, which the per-sample check handles."""
+        if not len(gt):
+            return
+        v = self.prev_fix[1] if self.prev_fix else None
+        if v is None or v >= FWD_STILL_SPEED_MS:
+            return
+        yaw = -np.einsum("ij,ij->i", rr, down)  # about up = -down
+        still = (gt - self.prev_fix[0] <= FIX_MAX_HOLD_S) & (np.abs(yaw) > FWD_REMOUNT_RATE)
+        self.still_yaw += float(yaw[still].sum()) * DT
+
+    def _restart_axis(self, t: float, *, settle: bool) -> None:
+        self.forward_sum, self.forward_n, self.still_yaw = [0.0, 0.0, 0.0], 0, 0.0
+        self.h_acc, self.h_n = [0.0, 0.0, 0.0], 0
+        self.g_ref = None if self.g_ema is None else list(self.g_ema)
+        if settle:
+            self.fwd_settle_until = t + FWD_SETTLE_S
+
     # -- main entry --
 
     def feed(self, t: np.ndarray, ua: np.ndarray, grav: np.ndarray,
              fixes: list[tuple[float, float | None]], *, reset: bool = False,
-             rr: np.ndarray | None = None) -> FeedResult:
+             rr: np.ndarray | None = None, moved: list[float] | None = None) -> FeedResult:
         """t: epoch seconds (n,), ua (CoreMotion's userAcceleration) and grav: (n, 3) in g, rr: (n, 3)
-        rad/s (None = no rotation, so no speed bumps), all in the phone frame. fixes: (epoch s, speed m/s)."""
+        rad/s (None = no rotation, so no speed bumps), all in the phone frame. fixes: (epoch s, speed m/s).
+        moved: epoch s of phone_moved taps, on the fixes' clock; they restart the forward axis."""
         out = FeedResult()
-        fixes = sorted(set(self.pending_fixes) | {(float(ft), fv) for ft, fv in fixes},
+        fixes = sorted(set(self.pending_fixes) | {(float(ft), fv) for ft, fv in fixes}
+                       | {(float(mt), MOVED) for mt in (moved or [])},
                        key=lambda f: f[0])
         self.pending_fixes = []
         order = np.argsort(t, kind="stable")
@@ -398,6 +478,8 @@ class Pipeline:
             # filtered per stretch up to the next fix: the same whatever the batch boundaries are.
             j = int(np.searchsorted(gt, fixes[fix_i][0], side="left")) if fix_i < len(fixes) else n
             pitch, zp = signal.sosfilt(SOS_PITCH, self._pitch_up(down[i:j], grid[i:j, 6:9]), zi=zp)
+            self._smooth_gravity(down[i:j])
+            self._still_rotation(gt[i:j], down[i:j], grid[i:j, 6:9])
             for k in range(i, j):
                 tt = float(gt[k])
                 b = float(band[k])

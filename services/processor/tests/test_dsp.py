@@ -210,6 +210,145 @@ def test_forward_axis_learned_from_speed_changes():
     assert corr > 0.9
 
 
+def _square_lon(t):
+    return 1.5 * np.sign(np.sin(2 * np.pi * t / 20))
+
+
+def _square_speed(s):
+    phase = s % 20  # the integral of _square_lon: a triangle between 10 and 25 m/s
+    return 10 + (1.5 * phase if phase < 10 else 1.5 * (20 - phase))
+
+
+def _rotation(axis, deg):
+    a = math.radians(deg)
+    k = np.asarray(axis, dtype=float) / np.linalg.norm(axis)
+    kx = np.array([[0, -k[2], k[1]], [k[2], 0, -k[0]], [-k[1], k[0], 0]])
+    return np.eye(3) + math.sin(a) * kx + (1 - math.cos(a)) * kx @ kx
+
+
+def _remounted(seconds, at, rot):
+    """synth() with speed changes, and the phone turned in its mount by `rot` (vehicle frame) at `at`.
+    Returns the samples, the fixes and the true forward axis in the phone frame after the turn."""
+    t, ua, grav, _ = synth(seconds, lon=_square_lon)
+    fixes = [(T0 + s + 0.3, _square_speed(s + 0.3)) for s in range(seconds)]
+    r = _phone_frame()
+    m = r @ rot.T @ r.T  # old phone frame → new phone frame
+    after = t - T0 >= at
+    ua, grav = ua.copy(), grav.copy()
+    ua[after], grav[after] = ua[after] @ m.T, grav[after] @ m.T
+    return t, ua, grav, fixes, r @ rot.T @ np.array([1.0, 0.0, 0.0])
+
+
+def _axis_cos(p, fwd):
+    f = np.array(p.forward_sum)
+    return float(f @ fwd / np.linalg.norm(f))
+
+
+def test_phone_moved_tap_restarts_the_forward_axis():
+    t, ua, grav, fixes = synth(240, lon=_square_lon)
+    fixes = [(T0 + s + 0.3, _square_speed(s + 0.3)) for s in range(240)]
+    tap = T0 + 120.0
+    p = dsp.Pipeline()
+    p.feed(t[t < tap + 2], ua[t < tap + 2], grav[t < tap + 2], [f for f in fixes if f[0] < tap + 2], moved=[tap])
+    assert not p.forward_known  # forgotten at the tap, and the handled phone's next seconds don't count
+    p.feed(t[t >= tap + 2], ua[t >= tap + 2], grav[t >= tap + 2], [f for f in fixes if f[0] >= tap + 2])
+    assert p.forward_known and _axis_cos(p, _phone_frame() @ np.array([1.0, 0.0, 0.0])) > 0.99
+
+
+def test_a_tilting_remount_restarts_the_forward_axis():
+    # Rolled 30° and turned 45° in the mount: gravity moves in the phone frame, so the axis starts over.
+    t, ua, grav, fixes, fwd = _remounted(480, 240, _rotation((1, 0, 0), 30) @ _rotation((0, 0, 1), 45))
+    p = dsp.Pipeline()
+    p.feed(t[t < T0 + 250], ua[t < T0 + 250], grav[t < T0 + 250], [f for f in fixes if f[0] < T0 + 250])
+    assert p.forward_n < dsp.FWD_MIN_EVIDENCE  # restarted within the first seconds after the turn
+    p.feed(t[t >= T0 + 250], ua[t >= T0 + 250], grav[t >= T0 + 250], [f for f in fixes if f[0] >= T0 + 250])
+    assert _axis_cos(p, fwd) > 0.99
+
+
+def test_remount_handling_is_the_same_chunked():
+    t, ua, grav, fixes, _ = _remounted(400, 150, _rotation((0, 0, 1), 90))
+    taps = [T0 + 300.5]
+    whole = dsp.Pipeline()
+    ref = whole.feed(t, ua, grav, fixes, moved=taps)
+    rng = np.random.default_rng(3)
+    state, series, start = None, [], t[0]
+    while start <= t[-1]:
+        end = start + rng.uniform(1.0, 3.0)
+        m = (t >= start) & (t < end)
+        p = dsp.Pipeline(json.loads(json.dumps(state)) if state else None)
+        out = p.feed(t[m], ua[m], grav[m], [f for f in fixes if start <= f[0] < end],
+                     moved=[x for x in taps if start <= x < end])
+        series += out.series
+        state, start = p.to_state(), end
+    assert [s.a_lon for s in series] == pytest.approx([s.a_lon for s in ref.series], abs=1e-9)
+    assert state["forward_sum"] == pytest.approx(whole.forward_sum, abs=1e-9)
+    assert state["forward_n"] == whole.forward_n
+
+
+def _stop_and_go(brake_at=180, stop_s=50.0, turn=None, yaw_rate=None, seconds=420):
+    """Square-wave driving, braking at `brake_at` (a multiple of 20 s, where the triangle is at 10 m/s)
+    to a stop of `stop_s`, then back to 10 m/s and the square wave; 1.5 m/s² both ways. Optionally the
+    optionally the phone turned about the vertical during the stop: turn = (start s, end s, degrees).
+    yaw_rate(t) adds the vehicle's own rotation about the vertical (rad/s). Returns synth()'s samples
+    with a rotation rate, the fixes and the true forward axis at the end, in the phone frame."""
+    grid = np.arange(0, seconds + 1, 0.01)
+    stop = (brake_at + 20 / 3, brake_at + 20 / 3 + stop_s)
+    lon = _square_lon(grid)
+    lon[(grid >= brake_at) & (grid < stop[0])] = -1.5
+    lon[(grid >= stop[0]) & (grid < stop[1])] = 0.0
+    lon[(grid >= stop[1]) & (grid < stop[1] + 20 / 3)] = 1.5
+    resume = grid >= stop[1] + 20 / 3
+    lon[resume] = _square_lon(grid[resume] - (stop[1] + 20 / 3))
+    speed = np.maximum(0.0, 10 + np.cumsum(lon) * 0.01)
+    t, ua, grav, _ = synth(seconds, lon=lambda x: np.interp(x, grid, lon))
+    fixes = [(T0 + s + 0.3, float(np.interp(s + 0.3, grid, speed))) for s in range(seconds)]
+    rel = t - T0
+    wz = np.zeros_like(rel) if yaw_rate is None else yaw_rate(rel)
+    r, fwd = _phone_frame(), _phone_frame() @ np.array([1.0, 0.0, 0.0])
+    if turn is not None:
+        a, b, deg = turn
+        during = (rel >= a) & (rel < b)
+        wz[during] += math.radians(deg) / (b - a)
+        m = r @ _rotation((0, 0, 1), deg).T @ r.T
+        after = rel >= b
+        ua, grav = ua.copy(), grav.copy()
+        ua[after], grav[after] = ua[after] @ m.T, grav[after] @ m.T
+        fwd = m @ fwd
+    rr = np.column_stack([0 * rel, 0 * rel, wz]) @ r.T
+    return t, ua, grav, fixes, rr, fwd
+
+
+def test_a_phone_turned_in_its_mount_at_a_stop_restarts_the_axis():
+    t, ua, grav, fixes, rr, fwd = _stop_and_go(turn=(205.0, 207.0, 90.0))
+    p = dsp.Pipeline()
+    p.feed(t[t < T0 + 210], ua[t < T0 + 210], grav[t < T0 + 210], [f for f in fixes if f[0] < T0 + 210],
+           rr=rr[t < T0 + 210])
+    assert p.forward_n == 0  # gravity didn't move: only the rotation during the stop shows it
+    p.feed(t[t >= T0 + 210], ua[t >= T0 + 210], grav[t >= T0 + 210], [f for f in fixes if f[0] >= T0 + 210],
+           rr=rr[t >= T0 + 210])
+    assert _axis_cos(p, fwd) > 0.99
+
+
+def test_gyro_bias_over_a_long_stop_and_a_slow_parking_turn_are_not_a_remount():
+    rng = np.random.default_rng(4)
+    # 5 minutes standing with 0.005 rad/s of bias and 0.02 rad/s of noise (17° of drift in all), then
+    # a parking turn of 90° at 0.08 rad/s: neither is faster than FWD_REMOUNT_RATE.
+    def yaw(rel):
+        w = 0.005 + 0.02 * rng.standard_normal(len(rel))
+        return w + np.where((rel >= 300) & (rel < 300 + math.pi / 2 / 0.08), 0.08, 0.0)
+    t, ua, grav, fixes, rr, fwd = _stop_and_go(brake_at=120, stop_s=240.0, yaw_rate=yaw, seconds=560)
+    p = dsp.Pipeline()
+    p.feed(t, ua, grav, fixes, rr=rr)
+    assert p.forward_n > 200 and _axis_cos(p, fwd) > 0.99  # never restarted
+
+
+def test_a_trip_saved_before_the_remount_checks_carries_on():
+    old = {k: v for k, v in dsp.Pipeline(_forward_known_state()).to_state().items()
+           if k not in ("still_yaw", "fwd_settle_until", "g_ema", "g_ref")}
+    p = dsp.Pipeline(json.loads(json.dumps(old)))
+    assert p.forward_known and p.still_yaw == 0.0 and p.g_ref is None
+
+
 # --- One pipeline: chunked == whole ---------------------------------------------------------
 
 def test_chunked_feed_equals_one_pass():

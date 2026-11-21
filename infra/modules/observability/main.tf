@@ -1,5 +1,5 @@
-# Log Analytics + Application Insights, an email action group and a spending budget (plan §5 "Running and watching it").
-# The workbook comes later; it is first on the cut list (plan §16).
+# Log Analytics + Application Insights, an email action group, a spending budget and the monitoring
+# workbook (workbook.tf) (plan §5 "Running and watching it"). No alert rules yet.
 
 resource "azurerm_log_analytics_workspace" "this" {
   name                = "log-${var.project}-${var.suffix}"

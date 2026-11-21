@@ -33,6 +33,7 @@ struct SessionsListView: View {
             ToolbarItem(placement: .topBarLeading) {
                 NavigationLink(value: Route.help) { Image(systemName: "questionmark.circle") }
                     .accessibilityLabel("Drive protocol help")
+                    .accessibilityIdentifier("openHelp")
             }
             ToolbarItem(placement: .topBarTrailing) {
                 NavigationLink(value: Route.settings) { Image(systemName: "gearshape") }

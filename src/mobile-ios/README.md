@@ -96,10 +96,12 @@ Label `type` values: `pothole`, `speed_bump`, `phone_moved`, `surface_start/surf
   `upload_failed/` (Settings → *Move failed batches back to queue*). A pasted API URL ending in
   `/api/ingest` is reduced to its base (the app appends that path itself).
 - **The upload test is a probe POST**, because the backend has no `/api/health` route.
-  - The app sends `{"probe":true}` (gzipped, with the device key and `x-probe: 1`) to `/api/ingest`.
-  - The ingest function checks the key first, then the schema. 400/422 therefore means
-    "reachable and key accepted", and the probe is rejected, never stored. 401/403 means the key
-    was rejected; 404 means a wrong URL.
+  - The app sends `{"probe":true,"deviceId":"<Device ID>"}` (gzipped, with the device key and
+    `x-probe: 1`) to `/api/ingest`.
+  - The ingest function checks the key, then that the key is stored under this Device ID, then the
+    schema. 400/422 therefore means "reachable and key accepted for this phone", and the probe is
+    rejected, never stored. 401 means an unknown key; 403 means the key is stored under another
+    Device ID (every batch would get 403 too); 404 means a wrong URL.
   - Plain `http://` is accepted only for local test servers (loopback, RFC 1918 IPs, `.local`), and
     redirects are never followed. On Wi-Fi, such a key *is* sniffable, so use a throwaway key for the
     mock server, never the real one. The real backend must be `https://`.
@@ -157,8 +159,9 @@ in the repo.
   recording is OFF by default (level meter only).
 - GPS traces and `people.raterName` are personal data. Use pseudonyms such as "R1" for raters.
   Sessions live in Documents: they are visible in the Files app and included in device backups.
-- **Delete session** (session detail) removes the folder and its queued upload batches. The
-  device ID is per phone (Keychain, this-device-only).
+- **Delete session** (session detail) removes the folder. It is refused while any of the
+  session's batches are still queued for upload, so a trip leaves the phone only once it
+  reached the cloud. The device ID is per phone (Keychain, this-device-only).
 
 ## Robustness
 

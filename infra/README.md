@@ -18,7 +18,7 @@ scripts/     add-device-key.ps1 (device key hashes into Key Vault)
 3. `cp infra/.env.example infra/.env` (Windows: `Copy-Item infra/.env.example infra/.env`) and fill in the first block (the comments say which `az` command prints each value).
 4. In `pwsh` (or Windows PowerShell): `cd infra; ./tf.ps1 bootstrap`. It writes the state settings into `.env` and prints the GitHub repo variables for CI.
 5. `./tf.ps1 plan`, then `./tf.ps1 apply` (about 15 minutes; PostgreSQL is the slow part). The apply ends by removing a storage setting the provider writes by mistake ([Function host storage](#function-host-storage-provider-bug-read-before-applying)).
-6. `./scripts/add-device-key.ps1 -DeviceId <phone-name>` for each phone and for the replay tool, then restart the function app so it reloads the keys: `az functionapp restart -g rg-roadride -n <ingest function>`.
+6. `./scripts/add-device-key.ps1 -DeviceId <Device ID>` for each phone, where the Device ID is the UUID the app shows in Settings (a key only works for the device it is stored under), and `-DeviceId replay` once for the replay tool. An existing entry under another name: add `-RenameFrom <old name>`. The function picks up new and renamed keys by itself within a minute; no restart is needed.
 7. `./tf.ps1 output` prints `ingest_base_url` (`https://<function host>`, no path: paste it into the iPhone app's upload settings and into `REPLAY_API_URL`; both add `/api/ingest` themselves) and `read_api_url`. `ingest_batch_url` is the full `POST` endpoint, for manual checks.
 
 After the hackathon: `./tf.ps1 destroy` (the bootstrap resource groups are deleted by hand).
@@ -130,7 +130,23 @@ Terraform doesn't see the setting (the provider hides it), so deleting it never 
 - The read API's ingress port is set by deploy-services together with the image, and the `AzureWebJobsStorage` setting the provider writes is deleted by `tf.ps1 apply` / the workflows: both are outside Terraform on purpose (`ignore_changes`, provider bug).
 - `TF_VAR_psql_nat_gateway_enabled=true` adds a NAT gateway to the database subnet (~$1/day), for when default outbound access can't reach Entra ID.
 - Bootstrap may not register `microsoft.insights` (Azure lists it in lowercase); if Application Insights fails with `MissingSubscriptionRegistration`, run `az provider register --namespace Microsoft.Insights --wait`.
-- The monitoring workbook and alert rules are not written yet (first on the plan's cut list). The budget and the email action group are.
+- No alert rules yet: the plan wants an email on errors and on processor lag. The email action group and the budget exist.
+
+## Monitoring workbook
+
+`modules/observability/workbook.tf` defines one Azure Monitor workbook, **Road & Ride: live path**. In the portal: Application Insights `appi-roadride-*` → Workbooks. It is free (queries and platform metrics only) and follows the time range picked at the top (4 h by default).
+
+| Section | Shows | From |
+|---|---|---|
+| Ingest function | requests by status code, per route with p95 duration, the latest rejections (4xx/5xx log lines), warnings and exceptions | Application Insights (`AppRequests`, `AppTraces`, `AppExceptions`) |
+| Event Hubs | messages in and out of the `ingest` hub, throttled requests, server and user errors | platform metrics |
+| Stream processor | commit lag (`lag_s`) per partition, events per minute by outcome, the last committed batch per partition, warnings, errors and process starts, replica restarts | the processor's per-batch log lines (`ContainerAppConsoleLogs_CL`), the `RestartCount` metric |
+| | the `roadride.processor.lag` gauge, which keeps rising while the processor is stuck | `AppMetrics`: empty until the processor exports it |
+| Finalize job and queue | trips queued, finalized, failed (retried) and dead-lettered; job executions by state; `session-ready` messages waiting and dead-lettered, sent, completed and abandoned; finalized trips by data quality; the latest finalize lines | job log lines, `Executions` metric, Service Bus metrics |
+| PostgreSQL | CPU and memory %, CPU credits left (B1ms is burstable), storage %, active and failed connections | platform metrics |
+| Read API | requests by status class, average response time, restarts, error lines; platform warnings (crash loops, failed image pulls) for the processor, read API and finalize job | Container Apps metrics, `ContainerAppConsoleLogs_CL`, `ContainerAppSystemLogs_CL` |
+
+The log tiles parse the services' log lines (`<date> <time> LEVEL logger message`, `services/processor/roadride/stream.py` and `finalize.py`); a change to those lines needs the matching change in `workbook.tf`. The read API has no Application Insights SDK, so its requests come from the Container Apps `Requests` metric. A tile shows an error instead of an empty chart until its table has its first row (for example `ContainerAppConsoleLogs_CL` before any app has logged).
 
 ## Known risks to check on the first apply
 

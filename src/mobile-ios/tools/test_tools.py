@@ -557,7 +557,9 @@ class MockServer:
     def ingest(self, batch=None, raw=None, key=KEY, encoding="gzip", idem=True, extra=None):
         if raw is None:
             raw = gzip.compress(json.dumps(batch).encode("utf-8"))
-        h = {"Content-Type": "application/json", "Content-Encoding": encoding}
+        h = {"Content-Type": "application/json"}
+        if encoding is not None:  # None: no Content-Encoding header at all
+            h["Content-Encoding"] = encoding
         if key is not None:
             h["x-device-key"] = key
         if idem and isinstance(batch, dict) and "sessionId" in batch:
@@ -572,7 +574,9 @@ class MockServer:
         sid = session_id or (meta or {}).get("sessionId")
         if raw is None:
             raw = gzip.compress(json.dumps(meta).encode("utf-8"))
-        h = {"Content-Type": "application/json", "Content-Encoding": encoding}
+        h = {"Content-Type": "application/json"}
+        if encoding is not None:  # None: no Content-Encoding header at all
+            h["Content-Encoding"] = encoding
         if key is not None:
             h["x-device-key"] = key
         if idem and isinstance(meta, dict):
@@ -664,10 +668,30 @@ class MockIngestServerTests(unittest.TestCase):
     def test_key_is_checked_before_body(self):
         self.assertStatus(self.srv.ingest(raw=b"not gzip", key="wrong", encoding="br"), 401)
 
-    def test_content_encoding_must_be_exactly_gzip(self):
-        for enc in ("x-gzip", "gzip, br", "GZIP ", "identity"):
-            with self.subTest(enc=enc):
-                self.assertStatus(self.srv.ingest(make_batch(), encoding=enc), 400)
+    def test_gzip_is_decided_by_magic_bytes_not_content_encoding(self):
+        # As the ingest function: the Functions host may inflate the body and drop the header (02 §5).
+        for enc in ("gzip", "x-gzip", "identity", None):
+            with self.subTest(enc=enc, body="gzip"):
+                self.assertStatus(self.srv.ingest(make_batch(), encoding=enc), 201)
+            with self.subTest(enc=enc, body="already inflated"):
+                b = make_batch()
+                self.assertStatus(self.srv.ingest(b, raw=json.dumps(b).encode(), encoding=enc), 201)
+        p = self.assertStatus(self.srv.ingest(raw=b"\x8b\x0b\x80brotli?", encoding="br"), 400)
+        self.assertIn("neither gzip", p["error"])
+
+    def test_strings_the_database_cant_store_are_400(self):
+        for name, mutate in (
+                ("label type 4 KB", lambda b: b["labels"].append({"t": 1, "type": "x" * 4096, "value": None, "note": None})),
+                ("note NUL", lambda b: b["labels"].append({"t": 1, "type": "note", "value": None, "note": "a\x00b"})),
+                ("deviceId 129", lambda b: b.update(deviceId="D" * 129)),
+                ("vehicle-like free text over 2000", lambda b: b["device"].update(thermal="t" * 2001))):
+            with self.subTest(name):
+                b = make_batch()
+                mutate(b)
+                self.assertStatus(self.srv.ingest(b), 400)
+        b = make_batch()
+        b["labels"].append({"t": 1, "type": "note", "value": None, "note": "n" * 2000})
+        self.assertStatus(self.srv.ingest(b), 201)
 
     def test_multiple_gzip_members_and_trailing_data_rejected(self):
         body = gzip.compress(json.dumps(make_batch()).encode())
@@ -735,6 +759,9 @@ class MockIngestServerTests(unittest.TestCase):
         self.assertIn("probe", p["error"])
         # ...and 401 when the key is wrong (the app reports "device key rejected")
         self.assertStatus(self.srv.ingest(raw=raw, key="wrong", extra={"x-probe": "1"}), 401)
+        # The app's probe names its deviceId (the real ingest checks the key's binding; the mock has none).
+        named = gzip.compress(b'{"probe":true,"deviceId":"8C3F1A2B-0000-4000-8000-000000000001"}')
+        self.assertIn("probe", self.assertStatus(self.srv.ingest(raw=named, extra={"x-probe": "1"}), 400)["error"])
 
     def test_empty_batch_is_201(self):
         self.assertStatus(self.srv.ingest(make_batch(n=0)), 201)
@@ -807,11 +834,24 @@ class MockIngestServerTests(unittest.TestCase):
         self.assertStatus(self.srv.put_meta(make_meta(), key=None), 401)
         self.assertStatus(self.srv.put_meta(raw=b"junk", session_id="ABC", key="wrong", encoding="br"), 401)
 
-    def test_meta_not_gzip_is_400(self):
+    def test_meta_already_inflated_is_accepted(self):
         m = make_meta()
-        self.assertStatus(self.srv.put_meta(m, raw=json.dumps(m).encode(), encoding="identity"), 400)
-        self.assertStatus(self.srv.put_meta(m, raw=json.dumps(m).encode(), encoding="gzip"), 400)
+        self.assertStatus(self.srv.put_meta(m, raw=json.dumps(m).encode(), encoding=None), 201)
+        m = make_meta()
+        self.assertStatus(self.srv.put_meta(m, raw=json.dumps(m).encode(), encoding="gzip"), 201)
+        self.assertStatus(self.srv.put_meta(m, raw=b"\x00junk", encoding="gzip"), 400)
         self.assertStatus(self.srv.put_meta(m, extra={"Content-Type": "text/plain"}), 400)
+
+    def test_meta_needs_device_id_and_capped_strings(self):
+        m = make_meta()
+        m["deviceId"] = ""
+        self.assertStatus(self.srv.put_meta(m), 400)
+        m = make_meta()
+        m["vehicle"]["notes"] = "v" * 2001
+        self.assertStatus(self.srv.put_meta(m), 400)
+        m = make_meta()
+        m["mount"]["location"] = "nul\x00"
+        self.assertStatus(self.srv.put_meta(m), 400)
 
     def test_meta_nan_rejected(self):
         m = make_meta()
@@ -902,13 +942,13 @@ class MockIngestDupStatusTests(unittest.TestCase):
             self.assertEqual(srv.ingest(b, key=None)[0], 201)
             self.assertEqual(srv.ingest(b, key=None)[0], 409)
             self.assertEqual(srv.ingest(make_batch(seq=2, session_id=b["sessionId"]), key=None)[0], 201)
-            self.assertEqual(srv.ingest(b, key=None, encoding="x-gzip")[0], 400)
+            self.assertEqual(srv.ingest(raw=b"\x1f\x8bbroken", key=None)[0], 400)
         finally:
             out = srv.stop()
         self.assertIn("== mock ingest summary ==", out)
         self.assertIn("unique batches: 2 in 1 session(s); duplicates answered 409: 1", out)
         self.assertIn("1 missing in between", out)
-        self.assertIn("400 content-encoding: 1", out)
+        self.assertIn("400 gzip: 1", out)
 
     def test_meta_repeat_answers_dup_status_409(self):
         srv = MockServer("--dup-status", "409")

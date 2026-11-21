@@ -60,12 +60,14 @@ struct PreflightView: View {
                     Label("Re-run motion test", systemImage: "waveform.path.ecg")
                 }
                 .disabled(model.busy)
+                .accessibilityIdentifier("rerunMotionTest")
                 Button {
                     model.rerun()
                 } label: {
                     Label("Re-run all checks", systemImage: "arrow.clockwise")
                 }
                 .disabled(model.running)
+                .accessibilityIdentifier("rerunAllChecks")
             }
         }
         .safeAreaInset(edge: .bottom) {

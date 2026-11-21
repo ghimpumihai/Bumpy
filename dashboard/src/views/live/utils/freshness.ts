@@ -1,7 +1,7 @@
 import { MS_PER_SECOND } from "@/constants/units";
 import type { LiveDevice, LiveFreshness } from "@/types/live";
 import { formatTime } from "@/utils/format-date-time";
-import { formatNumber, formatSeconds } from "@/utils/format-number";
+import { formatSeconds } from "@/utils/format-number";
 import { StreamStatus } from "@/types/sessions";
 
 import { LIVE_CATCHING_UP_MS, LIVE_STALE_PROBLEM_MS, LIVE_STALE_WARN_MS } from "./constants";
@@ -31,7 +31,7 @@ const seconds = (ms: number) => ms / MS_PER_SECOND;
 export function freshnessLabel(device: LiveDevice, freshness: LiveFreshness, apiUnreachable: boolean): string {
   if (apiUnreachable) return `last data ${formatTime(device.updatedAt)}`;
   if (freshness.ended) return "trip ended";
-  if (freshness.catchingUp) return `catching up · ${formatNumber(seconds(freshness.transportDelayMs))} s behind`;
+  if (freshness.catchingUp) return `catching up · ${formatSeconds(seconds(freshness.transportDelayMs), 0)} behind`;
   if (freshness.status === StreamStatus.OK) return `${formatSeconds(seconds(freshness.dataAgeMs), 1)} behind the phone`;
-  return `no data for ${formatNumber(seconds(freshness.silentForMs))} s`;
+  return `no data for ${formatSeconds(seconds(freshness.silentForMs), 0)}`;
 }

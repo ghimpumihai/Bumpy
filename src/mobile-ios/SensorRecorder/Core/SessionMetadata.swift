@@ -140,6 +140,10 @@ struct SessionMetadata: Codable, Equatable {
         var writeErrors: Int
         /// Batches queued for live upload (0 when upload was off). Key name kept for compatibility.
         var uploadBatchesCreated: Int
+        /// 2 s windows that never entered the upload queue (upload off for part of the trip, a full
+        /// disk): the cloud copy has gaps there, so the trip needs the laptop upload (D56). Omitted when
+        /// 0, and kept out of the Stop copy (local only, no contract change).
+        var uploadWindowsNotQueued: Int? = nil
     }
 
     struct PreflightCheckResult: Codable, Equatable {

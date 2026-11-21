@@ -61,6 +61,8 @@ struct UploadStatus: Equatable, Sendable {
 /// - A file that can't be sent at all (a name we didn't write, e.g. a Files-app copy, or unreadable)
 ///   is moved to `upload_failed/` so it never blocks the queue.
 /// - Idempotency key = `sessionId:batchSeq` (also inside the body).
+/// - Every 2xx/409 is recorded in `upload_acked/<sessionId>.txt` before the queue file is deleted,
+///   so the app knows which parts of a trip reached the cloud (Recap, delete guard; D56).
 final class UploadQueue: Sendable {
     enum Outcome: Equatable {
         case uploaded(status: Int)
@@ -76,6 +78,7 @@ final class UploadQueue: Sendable {
 
     let directory: URL
     let failedDirectory: URL
+    let ackedDirectory: URL
     private let transport: HTTPTransport
     private let configProvider: @Sendable () -> UploadConfig
     private let uptime: @Sendable () -> TimeInterval
@@ -128,6 +131,7 @@ final class UploadQueue: Sendable {
          config: @escaping @Sendable () -> UploadConfig) {
         self.directory = directory
         failedDirectory = directory.deletingLastPathComponent().appendingPathComponent("upload_failed", isDirectory: true)
+        ackedDirectory = directory.deletingLastPathComponent().appendingPathComponent("upload_acked", isDirectory: true)
         self.transport = transport
         self.configProvider = config
         self.uptime = uptime
@@ -135,6 +139,7 @@ final class UploadQueue: Sendable {
         self.writeFile = writeFile
         try? FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
         try? FileManager.default.createDirectory(at: failedDirectory, withIntermediateDirectories: true)
+        try? FileManager.default.createDirectory(at: ackedDirectory, withIntermediateDirectories: true)
         let existing = Self.queueFileNames(in: directory).compactMap { Self.parseItem(fileName: $0)?.createdMs }
         lastNamedMs = Locked(existing.max() ?? 0)
         refreshCounts()
@@ -253,21 +258,8 @@ final class UploadQueue: Sendable {
             .sorted().map { directory.appendingPathComponent($0) }
     }
 
-    func pendingCount(sessionId: String) -> Int {
-        pendingFiles().filter { Self.parseItem(fileName: $0.lastPathComponent)?.sessionId == sessionId }.count
-    }
-
     func failedCount(sessionId: String) -> Int {
         failedFiles().filter { Self.parseItem(fileName: $0.lastPathComponent)?.sessionId == sessionId }.count
-    }
-
-    /// This session's batches still queued and those the server rejected, for the recap's progress.
-    /// Metadata items don't count: they are not part of the recorded data.
-    func batchCounts(sessionId: String) -> (pending: Int, failed: Int) {
-        func count(_ urls: [URL]) -> Int {
-            urls.filter { Self.parse(fileName: $0.lastPathComponent)?.sessionId == sessionId }.count
-        }
-        return (count(pendingFiles()), count(failedFiles()))
     }
 
     /// Trips with anything still queued (batches or metadata), for Settings' "2 trips waiting".
@@ -292,6 +284,84 @@ final class UploadQueue: Sendable {
         }
         refreshCounts()
         kick()
+    }
+
+    // MARK: Acknowledged parts (D56)
+
+    /// Where one trip stands in the upload, from the queue, `upload_failed/` and the ack record.
+    struct TripState: Equatable, Sendable {
+        var pendingBatches = 0
+        var failedBatches = 0
+        var acknowledgedBatches: Set<Int> = []
+        var stopPending = false
+        var stopFailed = false
+        var stopAcknowledged = false
+        /// Anything of this trip still queued or in `upload_failed/` (batches or metadata).
+        var pendingItems = 0
+        var failedItems = 0
+    }
+
+    func tripState(sessionId: String) -> TripState {
+        var s = TripState()
+        for f in pendingFiles() {
+            guard let q = Self.parseItem(fileName: f.lastPathComponent), q.sessionId == sessionId else { continue }
+            s.pendingItems += 1
+            switch q.item {
+            case .batch: s.pendingBatches += 1
+            case .sessionMeta(let phase): if phase == .stop { s.stopPending = true }
+            }
+        }
+        for f in failedFiles() {
+            guard let q = Self.parseItem(fileName: f.lastPathComponent), q.sessionId == sessionId else { continue }
+            s.failedItems += 1
+            switch q.item {
+            case .batch: s.failedBatches += 1
+            case .sessionMeta(let phase): if phase == .stop { s.stopFailed = true }
+            }
+        }
+        let acked = acknowledged(sessionId: sessionId)
+        s.acknowledgedBatches = acked.batches
+        s.stopAcknowledged = acked.stop
+        return s
+    }
+
+    private func ackFile(_ sessionId: String) -> URL {
+        ackedDirectory.appendingPathComponent(sessionId + ".txt")
+    }
+
+    /// One line per acknowledged item (`<batchSeq>` or `meta-start|stop`). Appending the same item
+    /// again (a re-send after a relaunch) is harmless.
+    private func recordAcknowledged(_ file: QueueFile) {
+        let line: String
+        switch file.item {
+        case .batch(let seq): line = "\(seq)\n"
+        case .sessionMeta(let phase): line = "meta-\(phase.rawValue)\n"
+        }
+        let url = ackFile(file.sessionId)
+        do {
+            if !FileManager.default.fileExists(atPath: url.path) {
+                try Data().write(to: url)
+            }
+            let h = try FileHandle(forWritingTo: url)
+            defer { try? h.close() }
+            try h.seekToEnd()
+            try h.write(contentsOf: Data(line.utf8))
+        } catch {
+            // Safe direction: the trip just can't be shown as complete or deleted in the app.
+            onEvent?(.warn, "upload: could not record that \(file.idempotencyKey) was accepted: \(error.localizedDescription)")
+        }
+    }
+
+    func acknowledged(sessionId: String) -> (batches: Set<Int>, stop: Bool) {
+        guard let text = try? String(contentsOf: ackFile(sessionId), encoding: .utf8) else { return ([], false) }
+        var lines = text.split(separator: "\n", omittingEmptySubsequences: false)
+        lines.removeLast() // empty after the final newline, or a line still being written
+        return (Set(lines.compactMap { Int($0) }), lines.contains("meta-stop"))
+    }
+
+    /// After the trip's folder was deleted.
+    func forgetAcknowledged(sessionId: String) {
+        try? FileManager.default.removeItem(at: ackFile(sessionId))
     }
 
     // MARK: Processing
@@ -370,6 +440,7 @@ final class UploadQueue: Sendable {
 
         switch outcome {
         case .uploaded, .duplicate:
+            recordAcknowledged(item)
             do { try FileManager.default.removeItem(at: file) } catch {
                 // Skip it from now on (no hot loop re-sending it) and keep trying to delete it.
                 leftovers.withLock { $0[name] = .delete }

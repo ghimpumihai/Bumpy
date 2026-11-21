@@ -202,6 +202,7 @@ final class RecordingSessionIntegrationTests: XCTestCase {
         XCTAssertGreaterThanOrEqual(stats.durationSec, 3.2 - 0.01, "at least the time we recorded for")
         XCTAssertLessThanOrEqual(stats.durationSec, wallEnd - wallStart + 0.01, "never longer than the test itself")
         XCTAssertGreaterThan(stats.uploadBatchesCreated, 1)
+        XCTAssertNil(stats.uploadWindowsNotQueued, "every window was queued")
 
         // Motion CSVs: ~100 Hz, monotonic t_up, t_utc_ms consistent with the clock anchors
         let clock = try readCSV(folder.appendingPathComponent("clock.csv"))

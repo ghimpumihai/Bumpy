@@ -51,6 +51,8 @@ final class RecordingSession: @unchecked Sendable {
     /// Batches built while upload is ON but not queued yet (enqueue failed: disk full, encode error),
     /// oldest first. Retried at the next batch tick; touched by the batch timer and by stop().
     private let unqueuedBatches = Locked<[IngestBatch]>([])
+    /// Windows dropped from the live upload (`Stats.uploadWindowsNotQueued`); the session files keep them.
+    private let windowsNotQueued = Locked(0)
     private let stateBox = Locked((started: false, stopped: false))
 
 
@@ -163,6 +165,7 @@ final class RecordingSession: @unchecked Sendable {
 
         makeBatch() // last partial window (and any batch that couldn't be queued earlier)
         let notQueued = unqueuedBatches.withLock { w -> Int in defer { w.removeAll() }; return w.count }
+        windowsNotQueued.withLock { $0 += notQueued }
         if notQueued > 0 {
             // batchCount below counts only queued batches, so the backend doesn't wait for these.
             writer.log(.warn, "\(notQueued) upload batch window(s) could not be queued before Stop (the session files keep the data)")
@@ -398,7 +401,8 @@ final class RecordingSession: @unchecked Sendable {
         // consuming a batchSeq. Upload ON: build, check size, queue.
         guard let q = deps.uploadQueue, q.isEnabled else {
             accumulator.discard()
-            unqueuedBatches.withLock { $0.removeAll() }
+            let dropped = unqueuedBatches.withLock { w -> Int in defer { w.removeAll() }; return w.count }
+            windowsNotQueued.withLock { $0 += 1 + dropped }
             return
         }
         let batch = accumulator.drain(t0Up: start, t0UtcMs: timeBase.utcMs(fromUptime: start), device: latestBox.current.device)
@@ -410,6 +414,7 @@ final class RecordingSession: @unchecked Sendable {
         if waiting.count > Self.maxUnqueuedBatches {
             let dropped = waiting.count - Self.maxUnqueuedBatches
             waiting.removeFirst(dropped)
+            windowsNotQueued.withLock { $0 += dropped }
             writer.log(.warn, "\(dropped) upload batch window(s) could not be queued and were dropped from the live upload (the session files keep the data)")
         }
         // Oldest first; each batch gets its batchSeq only when it is actually queued (no holes).
@@ -445,6 +450,10 @@ final class RecordingSession: @unchecked Sendable {
             obj["people"] = people
         }
         obj["source"] = "live"
+        if var stats = obj["stats"] as? [String: Any] {
+            stats.removeValue(forKey: "uploadWindowsNotQueued") // local only (D56): not part of §6.1
+            obj["stats"] = stats
+        }
         if let batchCount { obj["batchCount"] = batchCount }
         return try JSONSerialization.data(withJSONObject: obj, options: [.sortedKeys, .withoutEscapingSlashes])
     }
@@ -542,6 +551,7 @@ final class RecordingSession: @unchecked Sendable {
         // No labels since D51; labels.csv keeps its header and the key stays in session.json.
         return .init(durationSec: endUp - startUp, streams: streams, labelsCount: 0,
                      fileSizes: sizes, totalBytes: total,
-                     writeErrors: writer.writeErrors.count, uploadBatchesCreated: accumulator.batchesCreated)
+                     writeErrors: writer.writeErrors.count, uploadBatchesCreated: accumulator.batchesCreated,
+                     uploadWindowsNotQueued: windowsNotQueued.current > 0 ? windowsNotQueued.current : nil)
     }
 }

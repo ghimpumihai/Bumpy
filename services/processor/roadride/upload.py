@@ -340,7 +340,7 @@ def build_batches(session_id: str, meta: dict, dm: dict, loc: dict, lab: dict,
             utc = utc if math.isfinite(utc) else loc["t_up"][i] * 1000.0 + offset_ms
             fixes.append(Fix(t=from_ms(round(utc)), lat=float(lat), lon=float(lon),
                              speed_ms=_non_negative(loc["speed"][i]), course_deg=_non_negative(loc["course"][i]),
-                             h_acc_m=_non_negative(loc["h_acc"][i])))
+                             h_acc_m=_non_negative(loc["h_acc"][i]), t_up=float(loc["t_up"][i])))
         labels = []
         for i in range(sb.start, sb.stop):
             if not lab["type"][i]:

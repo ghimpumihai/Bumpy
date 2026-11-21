@@ -32,14 +32,14 @@ import pathlib
 import re
 import time
 from concurrent.futures import ThreadPoolExecutor
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Protocol
 
 import numpy as np
 from psycopg import Connection
 from psycopg.types.json import Jsonb
 
-from . import aggregate, quality, upload
+from . import aggregate, clock, quality, upload
 from .dsp import Event, Pipeline, SeriesPoint
 from .live import BatchFacts, parse_batch, parse_session
 from .store import Store, from_epoch
@@ -179,7 +179,7 @@ def run_pipeline(batches: list[BatchFacts]) -> TripSignal:
             np.asarray(f.motion_t, dtype=float),
             np.asarray(f.motion_ua, dtype=float).reshape(-1, 3),
             np.asarray(f.motion_g, dtype=float).reshape(-1, 3),
-            [(x.t.timestamp() - off, x.speed_ms) for x in f.fixes],
+            [(clock.fix_uptime(f, x), x.speed_ms) for x in f.fixes],
             reset=prev is not None and f.batch_seq != prev + 1,
             rr=np.asarray(f.motion_rr, dtype=float).reshape(-1, 3),
         )
@@ -480,21 +480,32 @@ def finalize_session(conn: Connection, archive: Archive, session_id: str,
     trip = pick_trip(archive, uploads, session_id, require_upload=require_upload)
     if not trip.batches:
         return None
-    sig = run_pipeline(trip.batches)
-    by_time = {x.t.timestamp(): x for f in trip.batches for x in f.fixes}
+    # Computed on the trip's own timeline (clock.py: a wall-clock step mid-trip); the fixes and labels
+    # are stored with the phone's times, which their rows are deduplicated by.
+    trip_clock = clock.TripClock()
+    timed = replace(trip, batches=clock.normalize(trip.batches, trip_clock))
+    sig = run_pipeline(timed.batches)
+    sig.state = {**(sig.state or {}), "clock": trip_clock.to_state()}
+    by_time = {x.t.timestamp(): x for f in timed.batches for x in f.fixes}
     fix_objs = [by_time[k] for k in sorted(by_time)]
     fixes = [(x.t.timestamp(), x.lat, x.lon, x.h_acc_m) for x in fix_objs]
-    checks = trip_checks(trip, sig, fix_objs)
+    checks = trip_checks(timed, sig, fix_objs)
     events = [e for e in sig.events if not checks.handled_at(e.t)]  # the phone being handled, not the road
     detection, matched = quality.score_detections([(e.t, e.type) for e in events], checks.taps)
     # A secondary output: a failed write must not keep the trip from being finalized (5 failures would
     # dead-letter it). It's logged and recorded in quality.parquetError; the next finalize writes it.
     try:
-        parquet, parquet_error = write_parquet(archive, trip, sig), None
+        parquet, parquet_error = write_parquet(archive, timed, sig), None
     except Exception as e:  # noqa: BLE001
         log.exception("Parquet output of %s failed; finalizing without it", session_id)
         parquet, parquet_error = [], f"{type(e).__name__}: {e}"[:500]
     store = Store(conn)
+    starts = [f.t0_utc.timestamp() for f in timed.batches]
+    shifts = [a.clock_offset - b.clock_offset for a, b in zip(timed.batches, trip.batches)]
+
+    def phone_time(t: float) -> float:
+        """A derived time back on the phone's clock, where the stored fixes are."""
+        return t - shifts[max(0, int(np.searchsorted(starts, t, side="right")) - 1)]
 
     with conn.transaction():
         first = trip.batches[0]
@@ -559,8 +570,8 @@ def finalize_session(conn: Connection, archive: Archive, session_id: str,
                         %s, %s, %s, %s)
                 ON CONFLICT (session_id, type, t) DO NOTHING
                 """,
-                [(session_id, e.type, from_epoch(e.t), session_id, from_epoch(e.t), e.speed, e.magnitude,
-                  e.confidence, m) for e, m in zip(events, matched)],
+                [(session_id, e.type, from_epoch(e.t), session_id, from_epoch(phone_time(e.t)), e.speed,
+                  e.magnitude, e.confidence, m) for e, m in zip(events, matched)],
             )
             passes = build_passes(sig.series, [f[:3] for f in fixes],
                                   [e.t for e in events if e.type == "pothole"],

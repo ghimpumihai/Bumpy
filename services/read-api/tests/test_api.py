@@ -95,6 +95,8 @@ def test_bad_parameters_are_400(client, path, params):
 def test_segment_detail(client):
     assert "not an H3 cell" in _err(client, "/api/segments/hello", 400)
     _err(client, "/api/segments/8a1fb46622dffff", 404)
+    for bad in ("8a1fb_46622dfff", "8a1fb46622dfff%20"):  # int(x, 16) let these through to a 404
+        assert "not an H3 cell" in _err(client, f"/api/segments/{bad}", 400)
 
 
 def test_unknown_route_is_404_with_error_body(client):

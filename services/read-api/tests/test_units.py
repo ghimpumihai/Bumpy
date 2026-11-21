@@ -37,6 +37,11 @@ def test_h3_cell():
     assert is_h3_cell("8a1fb46622dffff")
     assert not is_h3_cell("8a1fb46622dfff") and not is_h3_cell("7a1fb46622dffff")
     assert not is_h3_cell("8a1fb46622dfffz")
+    assert is_h3_cell("8A1FB46622DFFFF")  # int(x, 16) took it before; it stays a 404, not a 400
+    # Only hex digits: int(x, 16) also took underscores, whitespace and non-ASCII digits.
+    for bad in ("8a1fb_46622dfff", "8a1fb46622dfff ", " 8a1fb46622dfff", "8a1fb46622dfff\n", "+8a1fb46622dfff",
+                "8a1fb46622dfff\u0661"):
+        assert not is_h3_cell(bad), repr(bad)
 
 
 def test_cold_cache_is_filled_chunk_by_chunk(monkeypatch):

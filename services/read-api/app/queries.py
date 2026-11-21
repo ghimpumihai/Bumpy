@@ -16,6 +16,7 @@ from __future__ import annotations
 import datetime as dt
 import json
 import math
+import re
 from typing import TYPE_CHECKING
 
 from .fmt import epoch_ms, iso, rnd
@@ -751,12 +752,10 @@ def segment_detail(conn: Connection, h3: str) -> dict:
     }
 
 
+# int(value, 16) would also take underscores, a sign and surrounding whitespace.
+H3_CELL = re.compile(r"8[0-9a-fA-F]{14}")
+
+
 def is_h3_cell(value: str) -> bool:
     """H3 cell index: 15 hex digits, mode 1 (cell), so the first digit is 8."""
-    if len(value) != 15 or value[0] != "8":
-        return False
-    try:
-        int(value, 16)
-    except ValueError:
-        return False
-    return True
+    return H3_CELL.fullmatch(value) is not None

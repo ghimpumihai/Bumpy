@@ -491,7 +491,7 @@ for f in ["device_motion","accel_raw","gyro_raw","location","altimeter","labels"
 
 The full verifier is `src/mobile-ios/tools/quick_check.py` (stdlib only): headers, rates, gaps, clock alignment, labels, coverage and session.json (audio files from builds before D48 are reported and ignored).
 
-Pass criteria: motion streams ~100 Hz with max gap < 0.1 s; GPS ~1 Hz with sane coordinates; labels present with the right timestamps; `t_utc_ms` values are the correct real time.
+Pass criteria: motion streams ~100 Hz with max gap < 0.1 s; GPS ~1 Hz with sane coordinates; labels (if any; the app records none since D51) with the right timestamps; `t_utc_ms` values are the correct real time.
 
 ---
 

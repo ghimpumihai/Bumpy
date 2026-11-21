@@ -81,7 +81,7 @@ def fake_m4a(n=4096):
 
 def make_session(folder, gyro_gap=None, location_header=None, utc_offset_ms=0, legacy_meta=False,
                  empty_altimeter=False, pre=None, until=None, recovered=False, stats=None,
-                 legacy_audio=False):
+                 legacy_audio=False, no_labels=False):
     """Writes a ~30 s session that passes every quick_check rule unless a knob breaks it.
     pre:      {stem: [seconds before start, ...]} extra rows prepended (t_up/t_utc_ms before start)
     until:    {stem: seconds} the stream stops after that many seconds
@@ -150,7 +150,7 @@ def make_session(folder, gyro_gap=None, location_header=None, utc_offset_ms=0, l
         # multi-line quoted note with a comma and an escaped quote: must count as ONE label
         f'{T0_UP + 15:.6f},{utc(T0_UP + 15)},note,,"first line, with comma\nsecond ""line"""',
     ]
-    write("labels", labels)
+    write("labels", [] if no_labels else labels)
     if legacy_audio:
         seg_rows = []
         for f in seg_files:
@@ -253,6 +253,14 @@ class QuickCheckTests(unittest.TestCase):
         self.assertNotIn("[INFO]", out)
         self.assertNotIn("audio", out.lower())
         self.assertNotIn("D48", out)
+
+    def test_trip_without_labels_is_info_not_warn(self):
+        """D51: the app has no label buttons, so a new trip's labels.csv is header only."""
+        code, out = run_quick_check(self.session("nolabels", no_labels=True))
+        self.assertRan(out)
+        self.assertEqual(code, 0, out)
+        self.assertIn("OVERALL: PASS  (0 fail, 0 warn)", out)
+        self.assertIn("[INFO] labels.csv has no labels", out)
 
     def test_pre_d48_folder_with_audio_is_info_not_fail(self):
         """A folder from a build before D48 still has audio files, CSVs and keys: one INFO line,

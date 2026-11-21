@@ -592,7 +592,8 @@ def check_labels(folder, rep, span):
             outside += 1
     print(f"  rows={len(rows)}  " + ", ".join(f"{k}={v}" for k, v in sorted(counts.items())))
     if not rows:
-        rep.add("WARN", "labels.csv has no labels")
+        # The app has no label buttons since D51: a new trip never has labels.
+        rep.info("labels.csv has no labels (expected since D51: the app records none)")
     else:
         rep.ok(f"{len(rows)} labels")
     if outside:

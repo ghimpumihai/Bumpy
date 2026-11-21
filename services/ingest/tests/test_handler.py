@@ -3,7 +3,7 @@ import json
 
 import pytest
 
-from conftest import DEVICE_KEY, FakeSinks, gz, headers
+from conftest import DEVICE_KEY, OTHER_KEY, REPLAY_KEY, FakeSinks, gz, headers
 from ingest_core import contract
 from ingest_core.handler import handle_batch, handle_session
 from ingest_core.keys import KeyStore
@@ -28,11 +28,22 @@ def test_valid_batch_is_published_and_archived(batch, keys, sinks):
     assert sinks.blobs == {name: raw}  # archived exactly as the phone sent it
 
 
-def test_retry_overwrites_same_blob_and_answers_200(batch, keys, sinks):
-    for _ in range(2):
-        assert handle_batch(headers(), gz(batch), keys, sinks).status == 200
+def test_retry_finds_its_blob_and_answers_200(batch, keys, sinks):
+    first = gz(batch)
+    assert handle_batch(headers(), first, keys, sinks).status == 200
+    resp = handle_batch(headers(), gz(batch), keys, sinks)
+    assert resp.status == 200 and "archive=already-there" in resp.log_info
     assert len(sinks.blobs) == 1
     assert len(sinks.events) == 2  # duplicates are dropped in the database, not here
+
+
+def test_a_different_body_never_overwrites_the_archive(batch, keys, sinks):
+    first = gz(batch)
+    assert handle_batch(headers(), first, keys, sinks).status == 200
+    batch["labels"] = []
+    assert handle_batch(headers(), gz(batch), keys, sinks).status == 200
+    (blob,) = sinks.blobs.values()
+    assert blob == first  # first copy wins, as ON CONFLICT DO NOTHING in the database
 
 
 def test_wrong_or_missing_key_is_401_before_anything_else(batch, keys, sinks):
@@ -130,6 +141,34 @@ def test_idempotency_key_mismatch_is_400(batch, keys, sinks):
     assert not sinks.events
 
 
+# --- Device keys are bound to a deviceId ------------------------------------------------------
+
+def test_another_devices_key_is_403_and_nothing_is_stored(batch, keys, sinks):
+    resp = handle_batch(headers(**{"x-device-key": OTHER_KEY}), gz(batch), keys, sinks)
+    assert resp.status == 403  # the app retries 403: nothing is lost while the binding is fixed
+    assert "OTHER-PHONE" in resp.body["error"]
+    assert not sinks.events and not sinks.blobs
+
+
+def test_probe_with_any_valid_key_is_still_400(keys, sinks):
+    resp = handle_batch(headers(**{"x-device-key": OTHER_KEY, "x-probe": "1"}), gz({"probe": True}),
+                        keys, sinks)
+    assert resp.status == 400 and resp.body["error"].startswith("probe request")
+
+
+@pytest.mark.parametrize("key, device_id, status", [
+    (REPLAY_KEY, "replay-FIXTURE-DEVICE", 200),   # replay key, any replay-… ID
+    (REPLAY_KEY, "replay-SOMEONE", 200),
+    (REPLAY_KEY, "FIXTURE-DEVICE", 403),          # but never as a phone
+    (DEVICE_KEY, "replay-FIXTURE-DEVICE", 200),   # a phone replaying its own trip
+    (DEVICE_KEY, "replay-OTHER-PHONE", 403),
+    (DEVICE_KEY, "fixture-device", 200),          # case-insensitive
+])
+def test_replay_device_ids(key, device_id, status, batch, keys, sinks):
+    batch["deviceId"] = device_id
+    assert handle_batch(headers(**{"x-device-key": key}), gz(batch), keys, sinks).status == status
+
+
 def test_downstream_failure_is_503_so_the_app_retries(batch, keys):
     assert handle_batch(headers(), gz(batch), keys, FakeSinks(fail=True)).status == 503
 
@@ -167,6 +206,23 @@ def test_session_without_device_id_is_400(session_meta, keys, sinks):
     del session_meta["deviceId"]
     assert handle_session(sid, headers(), gz(session_meta), keys, sinks).status == 400
     assert not sinks.events
+
+
+def test_session_of_another_device_is_403(session_meta, keys, sinks):
+    sid = session_meta["sessionId"]
+    resp = handle_session(sid, headers(**{"x-device-key": OTHER_KEY}), gz(session_meta), keys, sinks)
+    assert resp.status == 403
+    assert not sinks.events and not sinks.blobs
+
+
+def test_session_retry_keeps_the_first_copy(session_meta, keys, sinks):
+    sid = session_meta["sessionId"]
+    first = gz(session_meta)
+    assert handle_session(sid, headers(), first, keys, sinks).status == 200
+    session_meta["vehicle"] = {"type": "bus"}
+    resp = handle_session(sid, headers(), gz(session_meta), keys, sinks)
+    assert resp.status == 200 and "archive=already-there" in resp.log_info
+    assert sinks.blobs == {f"raw/session={sid}/session-start.json.gz": first}
 
 
 def test_session_strings_are_capped(session_meta, keys, sinks):

@@ -345,3 +345,17 @@ def test_processor_replay_is_not_a_phone_duplicate(db, writer, batch):
 def _parse(body):
     from roadride.live import parse_batch
     return parse_batch(body)
+
+
+@requires_db
+def test_trip_end_notifies_after_the_commit(db, batch, session_meta):
+    kicked = []
+    w = stream.PartitionWriter("ingest", connect_fn=lambda pid: psycopg.connect(dbname=db.info.dbname),
+                               on_trip_end=lambda: kicked.append(_one(db, "SELECT status FROM sessions")))
+    stop = dict(session_meta, batchCount=1, endedAtUtc="2025-11-21T09:16:00.000Z")
+    w.write("0", [FakeEvent(batch_body(batch, 0), 110)])
+    assert kicked == []
+    w.write("0", [FakeEvent(stop, 111, kind="session")])
+    assert kicked == [("processing",)]  # the notifier sees the committed row
+    for c in w._conns.values():
+        c.close()

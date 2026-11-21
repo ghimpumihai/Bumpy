@@ -15,6 +15,7 @@ import os
 from contextlib import asynccontextmanager
 
 import fastapi
+import psycopg
 from fastapi import FastAPI, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
@@ -125,6 +126,13 @@ def create_app(pool: ConnectionPool | None = None) -> FastAPI:
     @app.exception_handler(PoolTimeout)
     async def _busy(request: Request, exc: PoolTimeout):
         log.warning("no free database connection for %s", request.url.path)
+        return JSONResponse({"error": "database busy, try again"}, status_code=503)
+
+    # A failover, a connection the server dropped, or a login failure: the next try may well work.
+    # QueryCanceled and PoolTimeout are OperationalErrors too, but keep their own handlers (closest class wins).
+    @app.exception_handler(psycopg.OperationalError)
+    async def _db_down(request: Request, exc: psycopg.OperationalError):
+        log.warning("database error on %s: %s", request.url.path, exc)
         return JSONResponse({"error": "database busy, try again"}, status_code=503)
 
     @app.exception_handler(pg_errors.QueryCanceled)

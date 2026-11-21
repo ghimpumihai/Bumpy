@@ -367,6 +367,23 @@ def cors_client(dbname, monkeypatch):
 ORIGIN = {"Origin": "https://dash.example"}
 
 
+def test_dropped_connection_is_503_with_cors(cors_client, monkeypatch):
+    """A failover or a connection the server closed is an OperationalError: retryable, so 503, not 500."""
+    import app.queries as q
+
+    real = q.overview
+
+    def dropped(conn):
+        monkeypatch.setattr(q, "overview", real)
+        conn.execute("SELECT pg_terminate_backend(pg_backend_pid())")
+
+    monkeypatch.setattr(q, "overview", dropped)
+    r = cors_client.get("/api/overview", headers=ORIGIN)
+    assert r.status_code == 503 and r.json() == {"error": "database busy, try again"}
+    assert r.headers.get("access-control-allow-origin") == "https://dash.example"
+    assert cors_client.get("/api/overview").status_code == 200  # the pool replaced the dead connection
+
+
 def test_500_is_json_with_cors_and_logged(cors_client, monkeypatch, caplog):
     # Without CORS headers on a 500, the browser reports a network error ("API unreachable").
     import app.queries as q

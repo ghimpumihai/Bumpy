@@ -5,6 +5,9 @@ on:
     paths:
       - "services/processor/**"
       - "db/**"
+      # tests/test_upload.py runs both tools on the same session folder as the finalize job.
+      - "tools/upload/**"
+      - "tools/replay/**"
       - ".github/workflows/processor-ci.yml"
       - "!**/*.md"
   push:
@@ -12,6 +15,8 @@ on:
     paths:
       - "services/processor/**"
       - "db/**"
+      - "tools/upload/**"
+      - "tools/replay/**"
       - "!**/*.md"
 
   # deploy-services runs this first and deploys only if it passes.

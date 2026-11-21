@@ -345,6 +345,8 @@ def test_stop_copy_after_the_idle_close_reopens_the_trip(db, batch, session_meta
 
 @requires_db
 def test_ready_sweep_sends_once_and_closes_silent_trips(db, batch, session_meta):
+    import datetime as dt
+
     import psycopg
 
     from roadride import ready
@@ -356,9 +358,10 @@ def test_ready_sweep_sends_once_and_closes_silent_trips(db, batch, session_meta)
     db.commit()
 
     sent = []
+    now = dt.datetime.now(dt.timezone.utc)
     with psycopg.connect(dbname=db.info.dbname, autocommit=True) as conn:
-        assert sorted(ready.sweep(conn, sent.append)) == ["ended", "silent"]
-        assert ready.sweep(conn, sent.append) == []  # already sent
+        assert sorted(ready.sweep(conn, sent.append, now)) == ["ended", "silent"]
+        assert ready.sweep(conn, sent.append, now) == []  # already sent
     assert sorted(json.loads(b)["sessionId"] for b in sent) == ["ended", "silent"]
     assert _one(db, "SELECT status, incomplete FROM sessions WHERE session_id = 'silent'") == ("processing", True)
     assert _one(db, "SELECT status, incomplete FROM sessions WHERE session_id = 'ended'") == ("processing", False)
@@ -406,3 +409,48 @@ def test_finalize_scores_detections_and_marks_handled_and_drifting_windows(db, b
     rough_windows = _one(db, "SELECT sum(n_windows) FILTER (WHERE roughness_rms IS NOT NULL) FROM segment_observations")[0]
     all_windows = _one(db, "SELECT sum(n_windows) FROM segment_observations")[0]
     assert all_windows - rough_windows >= 50
+
+
+@requires_db
+def test_a_trip_still_in_the_backlog_is_not_closed_as_silent(db, batch, session_meta):
+    """After a processor outage, the last applied batch was received 20 minutes ago, but the
+    processor has only read up to just after it: the phone wasn't silent, its batches are queued."""
+    import datetime as dt
+
+    import psycopg
+
+    from roadride import ready
+
+    batches, (start, _) = _trip(batch, session_meta, "backlog", n=3)
+    _stream(db, batches, [start])
+    received = dt.datetime.now(dt.timezone.utc) - dt.timedelta(minutes=20)
+    db.execute("UPDATE sessions SET last_received_at = %s", (received,))
+    db.commit()
+    with psycopg.connect(dbname=db.info.dbname, autocommit=True) as conn:
+        assert ready.sweep(conn, lambda body: None, received + dt.timedelta(seconds=5)) == []
+        assert ready.sweep(conn, lambda body: None, None) == []  # not every partition heard from yet
+        assert _one(db, "SELECT status FROM sessions")[0] == "live"
+        # Read to the end and still nothing from the phone for 20 minutes: silent.
+        assert ready.sweep(conn, lambda body: None, dt.datetime.now(dt.timezone.utc)) == ["backlog"]
+
+
+@requires_db
+def test_backlog_batches_already_finalized_are_not_counted_twice(db, batch, session_meta, tmp_path):
+    """The trip was closed while batches 10..19 were still in the processor's backlog, and the
+    finalize job built it from the archive (0..19). Applying the backlog afterwards must not feed
+    those batches on top of the finalized state."""
+    sid = "trip-backlog"
+    batches, (start, _) = _trip(batch, session_meta, sid, n=20)
+    _stream(db, batches[:10], [start])
+    db.execute("UPDATE sessions SET status = 'processing'")
+    _write_archive(tmp_path, sid, batches, [start])
+    fz.finalize_session(db, fz.DirArchive(tmp_path), sid)
+    msdv, series = _one(db, "SELECT msdv_z, (SELECT count(*) FROM session_series) FROM sessions")
+    events = _one(db, "SELECT count(*) FROM events")[0]
+
+    _stream(db, batches[10:], [start])
+
+    assert _one(db, "SELECT msdv_z, (SELECT count(*) FROM session_series) FROM sessions") == (msdv, series)
+    assert _one(db, "SELECT count(*) FROM events")[0] == events
+    assert _one(db, "SELECT last_batch_seq FROM signal_state")[0] == 19
+    assert _one(db, "SELECT status, ready_sent_at FROM sessions") == ("processing", None)  # finalized again

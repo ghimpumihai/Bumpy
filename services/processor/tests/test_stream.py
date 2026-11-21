@@ -354,6 +354,20 @@ def test_processor_replay_is_not_a_phone_duplicate(db, writer, batch):
     assert _one(db, "SELECT received_batches, duplicate_batches FROM sessions") == (2, 1)
 
 
+@requires_db
+def test_another_devices_batch_is_skipped_without_blocking_the_partition(db, writer, batch, caplog):
+    import logging
+
+    caplog.set_level(logging.INFO, logger="roadride")
+    events = [FakeEvent(batch_body(batch, 0), 120),
+              FakeEvent(batch_body(batch, 1, deviceId="OTHER", source="replay"), 121),
+              FakeEvent(batch_body(batch, 1), 122)]
+    writer.write("0", events)
+    assert _one(db, "SELECT source, received_batches FROM sessions") == ("live", 2)
+    assert _checkpoint(db) == (122,)
+    assert "batch:foreign_device=1" in caplog.text
+
+
 def _parse(body):
     from roadride.live import parse_batch
     return parse_batch(body)

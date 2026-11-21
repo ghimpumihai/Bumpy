@@ -20,7 +20,7 @@ Errors are always `{"error": "..."}`, with the CORS headers like any other answe
 
 `quality.streams` is the finalize job's (from the whole trip, `sessions.quality`) once a trip is finalized, under the dashboard's stream names (`deviceMotion` → `device_motion`). Before that it comes from the live batches (`ingest_batches.sample_counts`): rows, rate over the trip, and the longest pause between two batches carrying the stream. Gaps inside a batch aren't visible to the live path, `mag_raw` and `device` aren't counted by the processor, and an uploaded trip has `{}` until it is finalized.
 
-Not computed yet: `detection`, speed bumps and rail joints. They're `null` (or empty) until something writes them.
+`detection` comes from the finalize job (`sessions.quality.detection`, scored against the manual taps) and is `null` until a trip is finalized. Speed bumps come from the processor; rail joints aren't detected yet.
 
 ## Privacy (plan §11)
 

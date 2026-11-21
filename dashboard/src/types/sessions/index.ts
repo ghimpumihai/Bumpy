@@ -87,9 +87,13 @@ export interface SessionSummary {
   roughnessEligible: boolean;
   /** Non-rigid or handheld: sickness numbers are experimental. */
   sicknessExperimental: boolean;
-  /** ISO 2631-1 motion sickness dose value (vertical), m/s^1.5. */
+  /** Motion sickness dose value, vertical and lateral combined: √(msdvZ² + msdvY²), m/s^1.5 (D41). */
+  msdv: number | null;
+  /** The vertical part (ISO 2631-1 Wf), m/s^1.5. */
   msdvZ: number | null;
-  /** Predicted motion sickness incidence, % ≈ MSDV / 3. */
+  /** The lateral (side-to-side sway) part (Donohew & Griffin weighting), m/s^1.5; null for trips processed before D41. */
+  msdvY: number | null;
+  /** Predicted motion sickness incidence, % ≈ msdv / 3. */
   msiPct: number | null;
   eventCounts: RoadEventCounts;
   ratingsCount: number;
@@ -156,7 +160,9 @@ export interface SicknessRating {
 }
 
 export interface SicknessSummary {
+  msdv: number | null;
   msdvZ: number | null;
+  msdvY: number | null;
   msiPct: number | null;
   ratings: SicknessRating[];
   /** Spearman rank correlation between MISC ratings and MSDV so far. */

@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import datetime as dt
 import json
+import math
 from typing import TYPE_CHECKING
 
 from .fmt import epoch_ms, iso, rnd
@@ -100,7 +101,7 @@ WITH s AS MATERIALIZED (
          s.include_in_agg, s.exclusion_reasons, s.context_known, s.vehicle_type, s.vehicle_make_model,
          s.vehicle_line, s.mount, s.people, s.audio_enabled, s.synthetic_sensors,
          COALESCE(s.started_at, s.created_at) AS started_at, s.ended_at,
-         s.late_batches, s.duplicate_batches, s.msdv_z, s.updated_at AS version_at,
+         s.late_batches, s.duplicate_batches, s.msdv_z, s.msdv_y, s.updated_at AS version_at,
          s.valid_fraction, s.quality AS stored_quality, s.finalized_at, s.distance_m AS stored_distance_m,
          {ENDED_SQL} AS ended
   FROM sessions s WHERE {where}
@@ -305,9 +306,21 @@ def _merge(defaults: dict, stored) -> dict:
     return out
 
 
+def _sickness(r: dict) -> dict:
+    """D41: the dose is vertical plus lateral, as energies, so the combined MSDV is the root sum of
+    squares. A trip processed before the lateral dose existed has msdv_y null: vertical only."""
+    z, y = r["msdv_z"], r["msdv_y"]
+    msdv = None if z is None else math.sqrt(z ** 2 + (y or 0.0) ** 2)
+    return {
+        "msdv": rnd(msdv, 4),
+        "msdvZ": rnd(z, 4),  # ISO 2631-1 Wf, vertical, so far (live) or whole trip
+        "msdvY": rnd(y, 4),  # lateral sway, Donohew & Griffin weighting
+        "msiPct": None if msdv is None else round(msdv / 3, 4),  # API.md: MSI % ≈ MSDV / 3
+    }
+
+
 def _summary(r: dict) -> dict:
     mount = _merge(MOUNT_DEFAULTS, r["mount"])
-    msdv = rnd(r["msdv_z"], 4)
     roughness_eligible = bool(r["context_known"]) and mount["rigid"] is True and mount["handheld"] is not True
     end = r["ended_at"] or r["last_sample_at"] or r["started_at"]
     return {
@@ -333,8 +346,7 @@ def _summary(r: dict) -> dict:
         "exclusionReasons": list(r["exclusion_reasons"] or []),  # set by the processor (plan §10)
         "roughnessEligible": roughness_eligible,
         "sicknessExperimental": not roughness_eligible,
-        "msdvZ": msdv,  # ISO 2631-1 Wf, vertical, so far (live) or whole trip
-        "msiPct": None if msdv is None else round(msdv / 3, 4),  # API.md: MSI % ≈ MSDV / 3
+        **_sickness(r),
         "eventCounts": {t: int(r[f"ev_{t}"]) for t in EVENT_TYPES},
         "ratingsCount": int(r["ratings"]),
     }
@@ -416,8 +428,7 @@ def session_detail(conn: Connection, session_id: str, cache: TripStatsCache | No
         **_summary(r),
         "quality": _quality(r, streams),
         "detection": _detection(r),
-        "sickness": {"msdvZ": rnd(r["msdv_z"], 4),
-                     "msiPct": None if r["msdv_z"] is None else round(r["msdv_z"] / 3, 4),
+        "sickness": {**_sickness(r),
                      "ratings": _ratings(conn, session_id), "spearman": None},
         "processedAt": iso(r["finalized_at"]),
         "processorVersion": None,

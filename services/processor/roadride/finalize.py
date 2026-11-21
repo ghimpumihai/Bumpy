@@ -160,7 +160,9 @@ def load_trip(archive: Archive, session_id: str) -> Trip:
 class TripSignal:
     series: list[SeriesPoint] = field(default_factory=list)  # t in epoch seconds, UTC
     events: list[Event] = field(default_factory=list)
-    msdv: float = 0.0
+    msdv: float = 0.0  # vertical and lateral combined
+    msdv_z: float = 0.0
+    msdv_y: float = 0.0
     resets: int = 0
     state: dict | None = None  # the pipeline after the last batch, for batches that arrive later
     last_batch_seq: int | None = None
@@ -196,7 +198,7 @@ def run_pipeline(batches: list[BatchFacts]) -> TripSignal:
         for e in pipe.flush():
             e.t += off
             out.events.append(e)
-    out.msdv = math.sqrt(pipe.dose)
+    out.msdv, out.msdv_z, out.msdv_y = math.sqrt(pipe.dose), math.sqrt(pipe.dose_z), math.sqrt(pipe.dose_y)
     out.state = pipe.to_state()
     out.last_batch_seq = prev
     return out
@@ -589,19 +591,21 @@ def finalize_session(conn: Connection, archive: Archive, session_id: str,
         last_t = sig.series[-1].t if sig.series else trip.batches[-1].end_utc.timestamp()
         conn.execute(
             """
-            UPDATE sessions SET status = 'complete', incomplete = %s, msdv_z = %s, quality_status = %s,
+            UPDATE sessions SET status = 'complete', incomplete = %s, msdv_z = %s, msdv_y = %s,
+              quality_status = %s,
               valid_fraction = %s, quality = %s, distance_m = %s, finalized_at = now(),
               ended_at = COALESCE(ended_at, %s), updated_at = now()
             WHERE session_id = %s
             """,
-            (incomplete, sig.msdv, status, valid, Jsonb(q),
+            (incomplete, sig.msdv_z, sig.msdv_y, status, valid, Jsonb(q),
              float(track_distance([f[:3] for f in fixes])[-1]) if fixes else 0.0, from_epoch(last_t),
              session_id),
         )
         store._refresh_exclusions(session_id)
 
     summary = {"batches": len(trip.batches), "series": len(sig.series), "events": len(events),
-               "passes": len(passes), "msdv": round(sig.msdv, 4), "quality": status, "from": trip.origin}
+               "passes": len(passes), "msdv": round(sig.msdv, 4),
+               "msdv_y": round(sig.msdv_y, 4), "quality": status, "from": trip.origin}
     log.info("finalized %s %s", session_id, " ".join(f"{k}={v}" for k, v in summary.items()))
     return summary
 

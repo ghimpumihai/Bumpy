@@ -18,6 +18,17 @@ thesis odr.chalmers.se/bitstreams/7acd3e0a-09bd-4914-a01e-cfe3832b3ab3; MSDV = (
 arXiv:2501.17664 eq. 3). Its poles sit far below 100 Hz, so the signal is low-passed and decimated to
 20 Hz before Wf is applied.
 
+Side-to-side sway (D41): ISO 2631-1 only weights vertical motion for sickness. The lateral acceleration
+gets the Donohew & Griffin (2004) weighting Wy (03-research-notes: flat from 0.0315 to 0.25 Hz, then
+−12 dB per octave; built as second-order Butterworth corners there, since the exact coefficients
+weren't published), unit gain in its flat band like Wf at its peak. The two doses are energies on the
+same 20 Hz grid, so they add: dose = ∫(a_wz² + k_y²·a_wy²) dt and MSDV = √(MSDV_z² + MSDV_y²), the
+root-sum-of-squares ISO 2631-1 uses to combine axes. Every MSDV the pipeline reports (live, series,
+dose_inc for segment passes) is that combined value. Lateral needs the learned forward axis: the three
+horizontal phone-frame components are weighted from the start, and their output is projected on the
+lateral axis once it is known, so there is no lateral dose before that and no filter transient when it
+appears.
+
 Speed bumps (plan §9 step 5): a double peak in the vehicle's pitch rate, nose up as the front axle
 climbs, then nose down as the rear axle climbs, one wheelbase apart (2–7 m, car to bus or tram) at the
 GPS speed. Pitch is the rotation about the lateral axis, so it needs the learned forward axis: until
@@ -26,7 +37,7 @@ are held back for POTHOLE_HOLD_S and dropped if a speed bump turns out to cover 
 the ones still held at the end of a trip.
 
 Thresholds for potholes, speed bumps and the forward-axis estimate are PROVISIONAL: they haven't seen
-a real drive.
+a real drive. So are the Wy corners and LATERAL_K (no published coefficients, no MISC validation yet).
 """
 
 from __future__ import annotations
@@ -73,6 +84,8 @@ FWD_MIN_DT, FWD_MAX_DT = 0.5, 3.0  # s between the two fixes of a speed change
 FWD_MIN_EVIDENCE = 10  # speed changes before the forward axis is trusted
 
 WF = dict(f1=0.08, f2=0.63, f4=0.25, q4=0.86, f5=0.0625, q5=0.80, f6=0.1, q6=0.80)
+WY = dict(f_low=0.0315, f_high=0.25)  # PROVISIONAL: Donohew & Griffin (2004) lateral weighting, Hz
+LATERAL_K = 1.0  # PROVISIONAL: multiplying factor of the lateral axis in the combined dose (ISO-style k)
 
 
 # --- Filters ------------------------------------------------------------------------------
@@ -92,17 +105,33 @@ def wf_analog_factors() -> list[tuple[list[float], list[float]]]:
     return [hh, hl, ht, hs]
 
 
-def wf_analog_gain(freqs_hz: np.ndarray) -> np.ndarray:
+def wy_analog_factors() -> list[tuple[list[float], list[float]]]:
+    """Lateral weighting Wy as two analog (b, a) factors: Butterworth high-pass and low-pass."""
+    wl, wh = _w(WY["f_low"]), _w(WY["f_high"])
+    hh = ([1.0, 0.0, 0.0], [1.0, math.sqrt(2) * wl, wl ** 2])
+    hl = ([wh ** 2], [1.0, math.sqrt(2) * wh, wh ** 2])  # −12 dB per octave above f_high
+    return [hh, hl]
+
+
+def _analog_gain(factors, freqs_hz: np.ndarray) -> np.ndarray:
     w = 2 * np.pi * np.asarray(freqs_hz, dtype=float)
     gain = np.ones_like(w)
-    for b, a in wf_analog_factors():
+    for b, a in factors:
         gain *= np.abs(signal.freqs(b, a, worN=w)[1])
     return gain
 
 
-def _wf_sos(fs: float) -> np.ndarray:
+def wf_analog_gain(freqs_hz: np.ndarray) -> np.ndarray:
+    return _analog_gain(wf_analog_factors(), freqs_hz)
+
+
+def wy_analog_gain(freqs_hz: np.ndarray) -> np.ndarray:
+    return _analog_gain(wy_analog_factors(), freqs_hz)
+
+
+def _analog_sos(factors, fs: float) -> np.ndarray:
     zs, ps, k = [], [], 1.0
-    for b, a in wf_analog_factors():
+    for b, a in factors:
         z, p, kk = signal.tf2zpk(b, a)
         zd, pd, kd = signal.bilinear_zpk(z, p, kk, fs)
         zs.extend(zd)
@@ -113,12 +142,17 @@ def _wf_sos(fs: float) -> np.ndarray:
 
 SOS_BAND = signal.butter(4, ROUGH_BAND_HZ, btype="bandpass", fs=FS, output="sos")
 SOS_LOW = signal.butter(4, 2.0, btype="lowpass", fs=FS, output="sos")  # anti-alias before 10 Hz
-SOS_WF = _wf_sos(FS_WF)
+SOS_WF = _analog_sos(wf_analog_factors(), FS_WF)
+SOS_WY = _analog_sos(wy_analog_factors(), FS_WF)
 SOS_PITCH = signal.butter(2, BUMP_BAND_HZ, btype="bandpass", fs=FS, output="sos")
 
 
 def wf_digital_gain(freqs_hz: np.ndarray) -> np.ndarray:
     return np.abs(signal.sosfreqz(SOS_WF, worN=np.asarray(freqs_hz, dtype=float), fs=FS_WF)[1])
+
+
+def wy_digital_gain(freqs_hz: np.ndarray) -> np.ndarray:
+    return np.abs(signal.sosfreqz(SOS_WY, worN=np.asarray(freqs_hz, dtype=float), fs=FS_WF)[1])
 
 
 # --- Results ------------------------------------------------------------------------------
@@ -130,10 +164,10 @@ class SeriesPoint:
     a_lat: float  # m/s², low-passed; 0 until the forward axis is known
     a_lon: float
     speed: float | None  # m/s
-    msdv: float  # m/s^1.5 so far
+    msdv: float  # m/s^1.5 so far, vertical and lateral combined
     # For the finalize job's segment passes (not stored in session_series):
     rough_rms: float = 0.0  # m/s², RMS of the band-passed vertical over the 0.2 s window
-    dose_inc: float = 0.0  # ∫ a_w² dt over the window (m²/s³), so a pass's a_w RMS = √(Σ dose_inc / Σ dt)
+    dose_inc: float = 0.0  # ∫ (a_wz² + k_y²·a_wy²) dt over the window (m²/s³), so a pass's a_w RMS = √(Σ dose_inc / Σ dt)
 
 
 @dataclass
@@ -150,7 +184,9 @@ class FeedResult:
     series: list[SeriesPoint] = field(default_factory=list)
     events: list[Event] = field(default_factory=list)
     roughness_now: float | None = None
-    msdv: float = 0.0
+    msdv: float = 0.0  # combined: √(msdv_z² + msdv_y²)
+    msdv_z: float = 0.0  # vertical (ISO 2631-1 Wf)
+    msdv_y: float = 0.0  # lateral (Wy, × LATERAL_K)
     reset: bool = False  # filters restarted (gap) during this feed
 
 
@@ -163,7 +199,10 @@ def _zeros(sos: np.ndarray, channels: int = 1) -> list:
 class Pipeline:
     def __init__(self, state: dict | None = None):
         s = state or {}
-        self.dose = float(s.get("dose", 0.0))  # ∫ a_w² dt over the whole trip, never reset
+        self.dose = float(s.get("dose", 0.0))  # ∫ a_w² dt over the whole trip, both axes, never reset
+        # A trip saved before the lateral dose existed: everything so far was vertical.
+        self.dose_z = float(s.get("dose_z", self.dose))
+        self.dose_y = float(s.get("dose_y", 0.0))
         self.forward_sum = list(s.get("forward_sum", [0.0, 0.0, 0.0]))
         self.forward_n = int(s.get("forward_n", 0))
         self.prev_fix = s.get("prev_fix")  # [t, speed or None]
@@ -183,7 +222,8 @@ class Pipeline:
 
     def to_state(self) -> dict:
         return {
-            "dose": self.dose, "forward_sum": self.forward_sum, "forward_n": self.forward_n,
+            "dose": self.dose, "dose_z": self.dose_z, "dose_y": self.dose_y,
+            "forward_sum": self.forward_sum, "forward_n": self.forward_n,
             "prev_fix": self.prev_fix, "h_acc": self.h_acc, "h_n": self.h_n,
             "last_event_t": self.last_event_t, "open_event": self.open_event,
             "rough_ema": self.rough_ema, "grid": self.grid,
@@ -200,6 +240,7 @@ class Pipeline:
             gr["prev"] = gr["prev"] + [0.0, 0.0, 0.0]
         gr.setdefault("zi_pitch", _zeros(SOS_PITCH)[0])
         gr.setdefault("bump", {"peak": None, "p1": None})
+        gr.setdefault("zi_wy", _zeros(SOS_WY, 3))  # saved before the lateral dose: starts from rest
 
     def flush(self) -> list[Event]:
         """End of the trip: the potholes still held back (and one whose peak is still being searched)
@@ -227,6 +268,7 @@ class Pipeline:
             "zi_low": (signal.sosfilt_zi(SOS_LOW) * x0).tolist(),
             "zi_h": _zeros(SOS_LOW, 3),
             "zi_wf": _zeros(SOS_WF)[0],
+            "zi_wy": _zeros(SOS_WY, 3),
             "zi_pitch": _zeros(SOS_PITCH)[0],
             "win": {"n": 0, "peak": 0.0, "lat": 0.0, "lon": 0.0, "b2": 0.0, "aw2": 0.0},
             # Speed-bump search: the open pitch peak, and the nose-up peak waiting for its rear axle.
@@ -290,8 +332,7 @@ class Pipeline:
             out.reset = True
         if len(t) == 0:
             self.pending_fixes = fixes  # no samples to place them against yet
-            out.msdv = math.sqrt(self.dose)
-            out.roughness_now = self._rough()
+            self._totals(out)
             return out
         # A stall inside the batch (CoreMotion pausing for a moment) is treated exactly like a hole
         # between two batches: the batch is split there and each piece starts a new grid, so the
@@ -304,9 +345,14 @@ class Pipeline:
             self._feed_segment(t[a:b], samples[a:b], fixes, out)
             fixes, self.pending_fixes = self.pending_fixes, []
         self.pending_fixes = fixes
-        out.msdv = math.sqrt(self.dose)
-        out.roughness_now = self._rough()
+        self._totals(out)
         return out
+
+    def _totals(self, out: FeedResult) -> None:
+        out.msdv = math.sqrt(self.dose)
+        out.msdv_z = math.sqrt(self.dose_z)
+        out.msdv_y = math.sqrt(self.dose_y)
+        out.roughness_now = self._rough()
 
     def _feed_segment(self, t: np.ndarray, samples: np.ndarray,
                       fixes: list[tuple[float, float | None]], out: FeedResult) -> None:
@@ -355,14 +401,20 @@ class Pipeline:
             h_low[:, c], zh[c] = signal.sosfilt(SOS_LOW, horiz[:, c], zi=zh[c])
         gr["zi_band"], gr["zi_low"], gr["zi_h"] = zb.tolist(), zl.tolist(), zh.tolist()
 
-        # Motion-sickness dose: Wf on the 20 Hz decimation of the low-passed vertical.
+        # Motion-sickness dose: Wf on the 20 Hz decimation of the low-passed vertical, Wy on each
+        # horizontal phone-frame component (projected on the lateral axis per sample, below).
         dec = ks % DECIMATE == 0
         if dec.any():
             aw, zw = signal.sosfilt(SOS_WF, low[dec], zi=np.array(gr["zi_wf"]))
             gr["zi_wf"] = zw.tolist()
+            zy = np.array(gr["zi_wy"])
+            ay = np.empty((int(dec.sum()), 3))
+            for c in range(3):
+                ay[:, c], zy[c] = signal.sosfilt(SOS_WY, h_low[dec, c], zi=zy[c])
+            gr["zi_wy"] = zy.tolist()
         else:
-            aw = np.empty(0)
-        aw_iter = iter(aw)
+            aw, ay = np.empty(0), np.empty((0, 3))
+        aw_iter, ay_iter = iter(aw), iter(ay)
 
         alpha = DT / ROUGHNESS_TAU_S
         fix_i = 0
@@ -383,10 +435,16 @@ class Pipeline:
                 b = float(band[k])
                 self.rough_ema = b * b if self.rough_ema is None else self.rough_ema + alpha * (b * b - self.rough_ema)
                 win["b2"] = win.get("b2", 0.0) + b * b
+                axes = self._axes(down[k]) if self.forward_known else None
                 if dec[k]:
                     a = float(next(aw_iter))
-                    self.dose += a * a / FS_WF
-                    win["aw2"] = win.get("aw2", 0.0) + a * a / FS_WF
+                    y = next(ay_iter)
+                    dz = a * a / FS_WF
+                    dy = (LATERAL_K * float(y @ axes[1])) ** 2 / FS_WF if axes is not None else 0.0
+                    self.dose_z += dz
+                    self.dose_y += dy
+                    self.dose += dz + dy
+                    win["aw2"] = win.get("aw2", 0.0) + dz + dy
                 self.h_acc = (np.array(self.h_acc) + h_low[k]).tolist() if self.h_n else h_low[k].tolist()
                 self.h_n += 1
 
@@ -398,8 +456,8 @@ class Pipeline:
                 # 5 Hz series window
                 if abs(b) > abs(win["peak"]) or win["n"] == 0:
                     win["peak"] = b
-                if self.forward_known:
-                    fwd, lat = self._axes(down[k])
+                if axes is not None:
+                    fwd, lat = axes
                     win["lon"] += float(h_low[k] @ fwd)
                     win["lat"] += float(h_low[k] @ lat)
                 win["n"] += 1

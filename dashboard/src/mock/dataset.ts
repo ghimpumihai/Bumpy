@@ -190,6 +190,7 @@ export function sessionSummary(sim: SimulatedSession, nowMs: number = Date.now()
   const last = lastSampleIndex(sim, nowMs);
   const ended = endedAtMs(sim, nowMs);
   const msdv = sim.msdv[last];
+  const msdvY = sim.msdvY[last];
   return {
     sessionId: spec.sessionId,
     source: spec.source,
@@ -212,7 +213,9 @@ export function sessionSummary(sim: SimulatedSession, nowMs: number = Date.now()
     exclusionReasons: exclusionReasons(sim, nowMs),
     roughnessEligible: isRoughnessEligible(spec),
     sicknessExperimental: isSicknessExperimental(spec),
-    msdvZ: msdv,
+    msdv,
+    msdvZ: Math.sqrt(Math.max(0, msdv ** 2 - msdvY ** 2)),
+    msdvY,
     msiPct: msdv / 3,
     eventCounts: eventCounts(sim, last),
     ratingsCount: sim.ratings.filter((r) => r.sampleIndex <= last).length,
@@ -311,7 +314,9 @@ export function sessionDetail(sim: SimulatedSession, nowMs: number = Date.now())
     quality: sessionQuality(sim, last),
     detection: detectionMetrics(sim, last),
     sickness: {
+      msdv: summary.msdv,
       msdvZ: summary.msdvZ,
+      msdvY: summary.msdvY,
       msiPct: summary.msiPct,
       ratings,
       spearman: spearman(

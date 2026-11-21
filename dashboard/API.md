@@ -81,15 +81,15 @@ says so and shows each card's last data time, instead of reporting the phones as
 | `SessionSummary.*` context | `sessions` (+ `vehicles`, `devices`), from `session.json` |
 | `isMock` | `session.json` → `syntheticSensors` (mock sessions generated for the pipeline) |
 | `includeInAgg`, `exclusionReasons` | `sessions.include_in_agg` and the rule that set it |
-| `msdvZ`, `msiPct` | MSDV of the whole session (ISO 2631-1 Wf, vertical); `msiPct = msdvZ / 3` |
+| `msdv`, `msdvZ`, `msdvY`, `msiPct` | MSDV of the whole session (so far, while live). `msdvZ` is the vertical part (ISO 2631-1 Wf), `msdvY` the side-to-side part (Donohew & Griffin weighting; null for trips processed before D41), `msdv = √(msdvZ² + msdvY²)` the combined dose; `msiPct = msdv / 3` |
 | `quality.*` | per-stream rows/rates/gaps, GPS accuracy, invalid windows, `rejected/late/duplicate` live batches |
 | `detection` | detections vs. manual taps within ±1.5 s (precision, recall) |
-| `SessionSeries` | `session_series` (≈ 5 Hz vertical/lateral/longitudinal acceleration, speed, MSDV so far) |
+| `SessionSeries` | `session_series` (≈ 5 Hz vertical/lateral/longitudinal acceleration, speed, combined MSDV so far) |
 | `SegmentAggregate` | `segment_agg` table, rebuilt by the aggregation step (segment × vehicle type, plus an `all` row) |
 | `roughness` | `exp(mean(log r − vehicle effect − β·log(v / 10 m/s)))`: what a car would feel at 36 km/h |
 | `roughnessPctl` | mean per-session percentile of raw roughness (fallback when the model can't be fitted) |
 | `potholeHits / potholePasses / potholeConfirmed` | passes > 15 km/h with a detection; confirmed at ≥ k of n passes (per vehicle type) |
-| `sicknessAwRms`, `msi1hPct` | `sqrt(Σ a_w²·dt / Σ dt)` over rigid-mount sessions; `msi1hPct = a_w·√3600 / 3` |
+| `sicknessAwRms`, `msi1hPct` | `sqrt(Σ a_w²·dt / Σ dt)` over rigid-mount sessions, a_w² = a_wz² + a_wy² (vertical and lateral, D41); `msi1hPct = a_w·√3600 / 3` |
 | `LiveDevice` | `live_state` + the last positions of the live session; `receivedAt` from `ingest_batches` (arrival time); `latestRating` from `labels` |
 
 Implementation note learned while building the mock: measure a segment pass's **speed over the same

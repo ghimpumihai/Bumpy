@@ -80,8 +80,10 @@ export interface Route {
 export interface CellTruth {
   /** Reference roughness for a car at 36 km/h, m/s². */
   roughness: number;
-  /** Wf-weighted vertical RMS for a car, m/s². */
+  /** Weighted RMS for a car, vertical (Wf) and lateral (Wy) combined, m/s² (D41). */
   awRms: number;
+  /** The lateral part of awRms: sway in curves. */
+  awLatRms: number;
 }
 
 const ROUTE_NAMES: Record<RouteId, string> = {
@@ -164,10 +166,9 @@ function cellTruth(sample: RouteSample, routeId: RouteId): CellTruth {
   else if (routeId === "tram101") roughness = Math.max(roughness, TRAM_TRACK_ROUGHNESS * noise);
 
   const awNoise = 0.8 + 0.4 * unitHash(`${sample.cell}:aw`);
-  const awRms = sample.hillSection
-    ? (AW_HILL + Math.min(0.12, Math.abs(sample.curvature) * 4)) * awNoise
-    : AW_CITY * awNoise;
-  return { roughness, awRms };
+  const awLatRms = sample.hillSection ? Math.min(0.12, Math.abs(sample.curvature) * 4) * awNoise : 0;
+  const awRms = sample.hillSection ? AW_HILL * awNoise + awLatRms : AW_CITY * awNoise;
+  return { roughness, awRms, awLatRms };
 }
 
 export interface World {

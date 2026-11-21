@@ -392,7 +392,8 @@ Raw values are always stored as measured; normalization happens only in the aggr
    - Vertical acceleration through the ISO 2631-1 Wf filter (f1 0.08, f2 0.63, f4 0.25 with Q 0.86, f5 0.0625 with Q 0.80, f6 0.1 with Q 0.80 Hz), then MSDV = √(∫a_w² dt). Roughly MSDV/3 percent of unadapted people may vomit.
    - The prediction is compared against the passengers' MISC ratings.
    - The filter has a unit test checking its frequency response against reference values.
-   - Known limit, to state openly: the ISO metric only covers up-and-down motion, while in cars sideways sway is likely a strong cause of sickness. A sideways metric was considered and dropped (§19).
+   - Side-to-side sway (D41, 2026-11-21): lateral acceleration goes through the Donohew & Griffin (2004) lateral weighting (flat 0.0315–0.25 Hz, then −12 dB per octave), and its dose is added to the vertical one as energy: MSDV = √(∫(a_wz² + a_wy²) dt) = √(MSDV_z² + MSDV_y²), the root sum of squares ISO 2631-1 uses to combine axes, with k_y = 1. The combined value is the one shown everywhere and divided by 3 for the MSI; the vertical and lateral parts are stored too.
+   - Known limits, to state openly: the lateral weighting isn't part of ISO 2631-1 and its exact coefficients weren't published (the corners and k_y are provisional), the MSDV/3 rule was fitted to vertical motion, and lateral is only counted once the forward axis has been learned from GPS speed changes.
 
 **Across sessions** (the aggregation step). It runs at the end of every finalize job, and can be re-run by hand with the **aggregate** job (for example after changing the method). It takes a PostgreSQL advisory lock, so two runs never overlap, and rebuilds `segment_agg` in one transaction.
 - **Roughness is normalized per vehicle.** A bus and a car feel the same road differently. We fit one model across all observations: `log(roughness) = road segment effect + vehicle effect + β·log(speed)`. Segments driven by several vehicles tie the vehicle effects together. If there is too little overlap, the fallback is per-session percentiles.
@@ -578,7 +579,7 @@ These were in earlier versions of the plan. We removed them because they mainly 
 |---|---|---|---|
 | SQL on raw files (Athena + Glue on AWS) | SQL queries directly on raw files in storage | Nobody would use it in 3 days; pandas on the Parquet files does the same job | DuckDB on the `lake` container, or Synapse serverless SQL; the `session=` folders already fit |
 | OpenStreetMap road snapping | Segments that follow real roads, no blurring at junctions or parallel roads | H3 hexagons are good enough for aggregation and need no map import | Import an OSM extract, cut roads into 25 m pieces, add a road ID to `segments` |
-| Lateral (sideways) sickness metric | A second, non-standard sickness score based on Donohew & Griffin (2004) | Scientifically interesting, not required. The ISO vertical metric covers the requirement | The lateral acceleration is still stored in `session_series`, so the metric can be computed later from existing data |
+| Lateral (sideways) sickness metric (back in scope: D41, §9 step 6) | A second, non-standard sickness score based on Donohew & Griffin (2004) | Scientifically interesting, not required. The ISO vertical metric covers the requirement | The lateral acceleration is still stored in `session_series`, so the metric can be computed later from existing data |
 | checkov in CI | Automatic checks for Terraform misconfigurations | Extra checks that judges rarely open; gitleaks stays for secrets | Add one step to `security.yml` |
 
 ---

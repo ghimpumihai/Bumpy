@@ -42,7 +42,7 @@ Each new, in-order batch runs through the trip's pipeline (plan §9):
 
 - **Vertical acceleration:** user acceleration projected on "up" (minus the gravity direction), in m/s², resampled onto a uniform 100 Hz grid.
 - **Roughness:** 1–30 Hz band-pass. `roughness_now` on the live view is its RMS over roughly the last 5 s.
-- **Motion sickness:** ISO 2631-1 **Wf** applied at 20 Hz after low-pass and decimation. MSDV = (∫a_w² dt)^½ is accumulated over the whole trip: `msdv_so_far` live, `sessions.msdv_z`, and `msdv` in the series.
+- **Motion sickness:** ISO 2631-1 **Wf** on the vertical, applied at 20 Hz after low-pass and decimation. **Side-to-side sway** (D41): the horizontal acceleration goes through the Donohew & Griffin (2004) lateral weighting **Wy** (flat 0.0315–0.25 Hz, then −12 dB per octave) on the same 20 Hz grid and is projected on the lateral axis, so it counts only once the forward axis is known. The two doses add as energies: MSDV = (∫(a_wz² + a_wy²) dt)^½ = √(MSDV_z² + MSDV_y²), accumulated over the whole trip. The combined value is `msdv_so_far` live, `msdv` in the series and each window's `dose_inc`; `sessions.msdv_z` and `sessions.msdv_y` keep the two parts. A trip in progress during the deploy keeps its dose as vertical and starts the lateral one from there.
 - **Potholes:** band-passed vertical above 5 m/s², only above 15 km/h, the peak within 0.3 s, at most one per second. Position comes from the nearest GPS fix. They're written to `events` 2.5 s after the jolt, once no speed bump can cover them any more.
 - **Speed bumps:** a double peak in the vehicle's pitch rate (the rotation rate about the lateral axis, 0.5–5 Hz): nose up above 0.15 rad/s as the front axle climbs, then nose down as the rear axle climbs, one wheelbase (2–7 m, car to bus or tram) apart at the GPS speed, between 5 and 40 km/h. Peaks longer than 0.5 s (a hill crest, a slow turn) don't count. The bump's jolts aren't reported as potholes. Pitch needs the forward axis, so there are no speed bumps until it is known.
 - **Chart series:** `session_series` at 5 Hz, with vertical (the largest value of each 0.2 s window), lateral/longitudinal and speed.
@@ -57,7 +57,7 @@ It runs on the phone's **uptime clock** (`t0Up + t`), which only moves forward d
 
 Each series window also carries the RMS of the band-passed vertical and its share of the dose (`rough_rms`, `dose_inc`); they aren't stored in `session_series`, but the finalize job builds segment passes from them.
 
-**Provisional:** the pothole and speed-bump thresholds and the forward-axis estimate haven't seen a real drive yet. The pipeline's state of a trip in progress during the deploy that added the rotation rate is upgraded in place (no rotation channel yet: zero for the first interpolated sample).
+**Provisional:** the pothole and speed-bump thresholds, the forward-axis estimate and the lateral weighting (`WY`, `LATERAL_K`) haven't seen a real drive yet. The pipeline's state of a trip in progress during the deploy that added the rotation rate is upgraded in place (no rotation channel yet: zero for the first interpolated sample).
 
 ## Finalize job (`roadride/finalize.py`)
 

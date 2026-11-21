@@ -89,7 +89,10 @@ export interface SimulatedSession {
   aVert: Float64Array;
   aLat: Float64Array;
   aLon: Float64Array;
+  /** Vertical and lateral combined, m/s^1.5. */
   msdv: Float64Array;
+  /** The lateral part: msdv² = msdvZ² + msdvY². */
+  msdvY: Float64Array;
   events: SimulatedEvent[];
   labels: (SessionLabel & { sampleIndex: number })[];
   ratings: (SicknessRating & { sampleIndex: number })[];
@@ -207,6 +210,7 @@ export function simulateSession(spec: SessionSpec, startMs: number): SimulatedSe
     aLat: new Float64Array(n),
     aLon: new Float64Array(n),
     msdv: new Float64Array(n),
+    msdvY: new Float64Array(n),
     events: [],
     labels: [],
     ratings: [],
@@ -221,6 +225,7 @@ export function simulateSession(spec: SessionSpec, startMs: number): SimulatedSe
 
   let p = 0;
   let msdvSquared = 0;
+  let msdvYSquared = 0;
   for (let k = 0; k < n; k++) {
     const t = k * DT_S;
     while (p < profile.length - 2 && profile[p + 1].t <= t) p++;
@@ -246,10 +251,14 @@ export function simulateSession(spec: SessionSpec, startMs: number): SimulatedSe
     roughRms[k] = roughnessRms(truth?.roughness ?? 0.4, v, dyn, spec);
     sim.aVert[k] = random.gaussian() * roughRms[k];
     sim.aLat[k] = v * v * sample.curvature + random.gaussian() * 0.12;
-    const aw = (truth?.awRms ?? 0.05) * dyn.awFactor * (v < MOVING_SPEED_MS ? 0.35 : 1);
+    const awScale = dyn.awFactor * (v < MOVING_SPEED_MS ? 0.35 : 1);
+    const aw = (truth?.awRms ?? 0.05) * awScale;
+    const awLat = (truth?.awLatRms ?? 0) * awScale;
     awInstant[k] = aw;
     msdvSquared += aw * aw * DT_S;
+    msdvYSquared += awLat * awLat * DT_S;
     sim.msdv[k] = Math.sqrt(msdvSquared);
+    sim.msdvY[k] = Math.sqrt(msdvYSquared);
   }
   for (let k = 0; k < n; k++) {
     const prev = sim.speed[Math.max(0, k - 2)];

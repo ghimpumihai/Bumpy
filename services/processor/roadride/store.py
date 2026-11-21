@@ -231,8 +231,9 @@ class Store:
             else:
                 # signal_state wasn't advanced, so the next batch restarts the filters (a gap).
                 roughness_now = None
-                msdv = self.conn.execute("SELECT msdv_z FROM sessions WHERE session_id = %s",
-                                         (f.session_id,)).fetchone()[0]
+                msdv = self.conn.execute(
+                    "SELECT sqrt(msdv_z ^ 2 + coalesce(msdv_y, 0) ^ 2) FROM sessions WHERE session_id = %s",
+                    (f.session_id,)).fetchone()[0]
             self._optional("live_state", f.session_id,
                            lambda: self._update_live_state(f, received_at, roughness_now, msdv))
         self._mark_processing_when_complete(f.session_id)
@@ -300,7 +301,8 @@ class Store:
             """,
             (f.session_id, Jsonb(pipeline.to_state()), f.batch_seq, int(out.reset)),
         )
-        self.conn.execute("UPDATE sessions SET msdv_z = %s WHERE session_id = %s", (out.msdv, f.session_id))
+        self.conn.execute("UPDATE sessions SET msdv_z = %s, msdv_y = %s WHERE session_id = %s",
+                          (out.msdv_z, out.msdv_y, f.session_id))
         return out.roughness_now, out.msdv
 
     def _update_live_state(self, f: BatchFacts, received_at: dt.datetime,

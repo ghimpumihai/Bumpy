@@ -10,7 +10,7 @@ struct RecapView: View {
     @Environment(AppModel.self) private var app
     @Environment(\.openURL) private var openURL
     @State private var shownQuality = 0
-    @State private var counts: (pending: Int, failed: Int)?
+    @State private var cloud: TripCloudCopy?
 
     private var summary: TripSummary { TripSummary(metadata: metadata) }
 
@@ -96,7 +96,7 @@ struct RecapView: View {
 
     @ViewBuilder private var uploadBlock: some View {
         if AppSettings.uploadConfig.isEnabled {
-            let percent = uploadPercent
+            let percent = cloud?.percent
             VStack(alignment: .leading, spacing: 10) {
                 HStack(alignment: .firstTextBaseline) {
                     Text("Trip in the cloud").font(Theme.font(15)).foregroundStyle(Theme.muted)
@@ -114,14 +114,14 @@ struct RecapView: View {
                     }
                 }
                 .frame(height: 4)
-                if rejected > 0 {
+                if let warning = uploadWarning {
                     // Upload problems are WARN at most: the data is safe on disk.
-                    Text("\(rejected) part(s) were rejected by the server. They are kept on this phone.")
+                    Text(warning)
                         .font(Theme.font(13))
                         .foregroundStyle(Theme.warn)
                 } else {
-                    Text(percent == 100 ? "Complete. The web shows the whole trip."
-                                        : "The rest is saved on this phone and uploads when you have signal.")
+                    Text(cloud?.isComplete == true ? "Complete. The web shows the whole trip."
+                                                   : "The rest is saved on this phone and uploads when you have signal.")
                         .font(Theme.font(13))
                         .foregroundStyle(Theme.muted)
                 }
@@ -137,24 +137,27 @@ struct RecapView: View {
         }
     }
 
-    private var rejected: Int { counts?.failed ?? 0 }
-
-    /// Share of this trip's batches accepted by the server. Rejected ones count as not sent, so the
-    /// line never says "Complete" for a trip the backend refused.
-    private var uploadPercent: Int? {
-        guard let counts else { return nil }
-        let created = metadata.stats?.uploadBatchesCreated ?? 0
-        guard created > 0 else { return counts.pending + counts.failed == 0 ? 100 : 0 }
-        let sent = max(0, created - counts.pending - counts.failed)
-        return min(100, sent * 100 / created)
+    /// Parts the live upload will not deliver by itself: say what the operator has to do.
+    private var uploadWarning: String? {
+        guard let cloud else { return nil }
+        var parts: [String] = []
+        if cloud.partsNeverQueued > 0 {
+            parts.append("\(cloud.partsNeverQueued) part(s) of this trip never went into the live upload.")
+        }
+        if cloud.rejectedParts > 0 {
+            parts.append("\(cloud.rejectedParts) part(s) were rejected by the server; retry them in Settings.")
+        }
+        guard !parts.isEmpty else { return nil }
+        return (parts + ["Everything is kept on this phone: upload the trip from a laptop so the web has all of it."])
+            .joined(separator: " ")
     }
 
     private func pollUpload() async {
-        let queue = app.uploadQueue, id = metadata.sessionId
+        let queue = app.uploadQueue, id = metadata.sessionId, stats = metadata.stats
         while !Task.isCancelled {
-            // Directory listing: never on the main thread.
-            let c = await Task.detached(priority: .utility) { queue.batchCounts(sessionId: id) }.value
-            counts = c
+            // Directory listing and the ack record: never on the main thread.
+            let state = await Task.detached(priority: .utility) { queue.tripState(sessionId: id) }.value
+            cloud = TripCloudCopy(stats: stats, state: state)
             try? await Task.sleep(nanoseconds: 1_000_000_000)
         }
     }

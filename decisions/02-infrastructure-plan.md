@@ -8,7 +8,7 @@
 
 ## 1. The plan in one paragraph
 
-Phones record trips (a "session") in cars, buses and trams and **send them to the cloud while driving**: every 2 seconds the app posts a batch of sensor data to an **ingest function**, which puts it into **Event Hubs** (a stream). A **stream processor** turns the batches into road-quality and motion-sickness numbers per small piece of road and stores them in a **PostgreSQL database with PostGIS** (maps support). The **web dashboard** shows the vehicle moving on the map, the road colouring in and the sickness score rising, a few seconds behind the phone. When a trip ends, a **finalize job** reprocesses the whole trip from the archived batches, and an **aggregation step** combines all trips, so every trip makes the shared map better. If the phone has no network, the app keeps the batches on disk and sends them later; only if a trip never reaches the cloud is its folder uploaded from a laptop, through the same finalize job. A **replay tool** sends a recorded trip through the live path, so we can show "live" in the presentation room without a car. Everything is created by **Terraform** (infrastructure as code) and deployed by **GitHub Actions** (CI/CD).
+Phones record trips (a "session") in cars, buses and trams and **send them to the cloud while driving**: every 2 seconds the app posts a batch of sensor data to an **ingest function**, which puts it into **Event Hubs** (a stream). A **stream processor** turns the batches into road-quality and motion-sickness numbers and stores them in a **PostgreSQL database with PostGIS** (maps support). The **web dashboard** shows the vehicle moving on the map with its track, its current roughness and the sickness score rising, a few seconds behind the phone. When a trip ends, a **finalize job** reprocesses the whole trip from the archived batches, and an **aggregation step** combines all trips, so every trip makes the shared map better. If the phone has no network, the app keeps the batches on disk and sends them later; only if a trip never reaches the cloud is its folder uploaded from a laptop, through the same finalize job. A **replay tool** sends a recorded trip through the live path, so we can show "live" in the presentation room without a car. Everything is created by **Terraform** (infrastructure as code) and deployed by **GitHub Actions** (CI/CD).
 
 ---
 
@@ -56,13 +56,13 @@ Why we went back to Azure:
 
 Yes, in five places. The overall shape (capture, transmit, process, store, visualize) stays the same.
 
-1. **The live stream is the dataset, not just a preview.** Each batch holds every sensor at full rate (only raw audio stays on the phone), and the app resends until the backend accepts it. So once a trip has ended and all its batches have arrived, a finalize job reprocesses it as a whole and it joins the dataset. Uploaded files are only needed when a phone never got a connection.
+1. **The live stream is the dataset, not just a preview.** Each batch holds every sensor at full rate (the app records no audio, D48), and the app resends until the backend accepts it. So once a trip has ended and all its batches have arrived, a finalize job reprocesses it as a whole and it joins the dataset. Uploaded files are only needed when a phone never got a connection.
 2. **A new aggregation layer.** We need to line up many trips on the same roads. That means fixed road segments (§8), a table of "one observation per session per segment", and a step that combines them. This is now core, not a stretch goal.
 3. **Raw samples stay out of the database.** One hour of driving is about a million sensor rows. Fifty hours would be about fifty million rows, too much for a small database. So raw samples stay in Blob Storage as files (converted to Parquet, a compact column format), and the database only stores results: segments, events, a light track, and downsampled chart data. This keeps the database small and cheap no matter how much we drive.
 4. **Every session carries its context.** Vehicle type, bus line, how the phone was mounted, seated or standing. Without that, a bumpy bus would look like a bumpy road. Normalization between vehicles is in §9.
 5. **Data quality rules.** Some sessions will be bad (hand-held phone, phone moved). The pipeline marks them and keeps them out of the aggregated map automatically.
 
-How much data is "a lot"? Expect about **5 to 15 sessions** in the time we have. The story to tell is "the method gets better with every trip", not "big data". Storage is no problem either way: each hour is about 100 to 150 MB (CSV plus audio), so even 50 hours is under 10 GB.
+How much data is "a lot"? Expect about **5 to 15 sessions** in the time we have. The story to tell is "the method gets better with every trip", not "big data". Storage is no problem either way: each hour is about 70 to 120 MB of CSV (no audio since D48), so even 50 hours is under 10 GB.
 
 ---
 
@@ -121,9 +121,9 @@ Read this section if a tool name is unfamiliar. Each entry says what the tool is
 
 ### Capture side
 
-**iPhone recorder app** (built by our teammate, see [01-initial-plan.md](01-initial-plan.md)). Writes every sensor to CSV files on the phone first, so nothing is lost if the network fails. Every 2 seconds it builds a batch with all sensors at full rate (everything except raw audio), saves it in a **queue on disk**, and sends the queue oldest first, retrying with backoff until the backend accepts each batch. A dead zone therefore delays data, it doesn't lose it. It also sends the session's metadata (`session.json`: vehicle, mount, seat, posture) at Start and again at Stop, through the same queue, so the backend knows the context and when the trip ended. This metadata call is a **small addition to the app** (spec §6.1).
+**iPhone recorder app** (built by our teammate, see [01-initial-plan.md](01-initial-plan.md)). Writes every sensor to CSV files on the phone first, so nothing is lost if the network fails. Every 2 seconds it builds a batch with all sensors at full rate (the app records no audio, D48), saves it in a **queue on disk**, and sends the queue oldest first, retrying with backoff until the backend accepts each batch. A dead zone therefore delays data, it doesn't lose it. It also sends the session's metadata (`session.json`: vehicle, mount, seat, posture) at Start and again at Stop, through the same queue, so the backend knows the context and when the trip ended (spec §6.1). Since D51 the app has no setup form: every trip is recorded as a car, with the remembered mount and people settings.
 
-**Laptop upload (fallback)** (`tools/upload`, a few lines wrapping `azcopy copy --recursive` after `azcopy login`). Only for a trip that never reached the cloud (no network at all, upload switched off, or the app's queue was cleared). The session folder is AirDropped to a laptop and uploaded with one command. The script uploads all files first and writes a small `_complete.json` marker **last**, so processing never starts on a half-uploaded folder. Team members log in with their own Azure account; they need the "Storage Blob Data Contributor" role on the `sessions` container.
+**Laptop upload (fallback)** (`tools/upload/upload.py`, a Python script using only the standard library: it calls the Blob Storage REST API with a token from your `az login`). Only for a trip that never reached the cloud (no network at all, upload switched off, or the app's queue was cleared). The session folder (or its exported `.zip`) is AirDropped to a laptop and uploaded with one command; raw audio files from older app builds stay on the laptop. The script uploads all files first and writes a small `_complete.json` marker **last**, with each file's size and SHA-256, so processing never starts on a half-uploaded folder. Team members log in with their own Azure account; they need the "Storage Blob Data Contributor" role on the `sessions` container (Terraform gives it to everyone in `admin_object_ids`).
 
 **Replay tool** (`tools/replay`, a small Python script). Reads a recorded session folder, builds the same 2-second batches the phone would send, and posts them to the real API at real speed (or faster). It is our end-to-end test before every drive, and our backup demo: in the room we can show the map updating live from a real trip. Replays are tagged `source=replay` with a new session ID, and are never counted in the aggregated map, so nothing is counted twice.
 
@@ -136,15 +136,16 @@ Read this section if a tool name is unfamiliar. Each entry says what the tool is
 | `POST /api/ingest` | one 2-second batch (spec §6) |
 | `PUT /api/ingest/sessions/{sessionId}` | the session's metadata, sent at Start and at Stop (spec §6.1) |
 
-There is no health route. The app tests its connection with a **probe**: a gzipped `{"probe":true}` with the device key and the header `x-probe: 1`, sent to `/api/ingest`. Because the function checks the key before the body, the answer tells the app everything it needs: `401`/`403` = wrong key, `400` = reachable and key accepted (the probe is rejected and never stored), `404` = wrong address. `src/mobile-ios/tools/mock_ingest_server.py` implements exactly this order and is the reference for the function's responses.
+There is no health route. The app tests its connection with a **probe**: a gzipped `{"probe":true}` with the device key and the header `x-probe: 1`, sent to `/api/ingest`. Because the function checks the key before the body, the answer tells the app everything it needs: `401`/`403` = wrong key, `400` = reachable and key accepted (the probe is rejected and never stored), `404` = wrong address. `src/mobile-ios/tools/mock_ingest_server.py` implements the same order and is the reference for the function's responses; only the two `403` checks below (device binding and session owner) are not in the mock.
 
 For each batch or metadata message the function:
-- checks the `x-device-key` header against hashed device keys (stored in Key Vault, loaded once at start-up, compared in constant time so timing can't leak them);
-- decompresses the gzip body and checks its format (with pydantic, a Python validation library), and rejects bodies over 200 KB. The Functions host does not document whether it decompresses request bodies itself, so the code checks the gzip magic bytes (`1f 8b`) and only decompresses when they are there; that works either way;
+- checks the `x-device-key` header against hashed device keys (stored in Key Vault, compared in constant time so timing can't leak them). The function caches them and reloads the secret every 5 minutes, and within a minute when an unknown key arrives, so a new key works without a restart. If Key Vault can't be read when a reload is needed (the first load, an unknown key, a key sending as another device) it answers `503`; known keys keep working from the cache, but not with keys older than 6 hours;
+- decompresses the gzip body and checks its format (plain Python checks ported from the mock server), and rejects bodies over 200 KB decompressed (`413`). The Functions host does not document whether it decompresses request bodies itself, so the code checks the gzip magic bytes (`1f 8b`) and only decompresses when they are there; that works either way;
+- checks that the key may send as the body's `deviceId` (each key is stored under one device ID; `403` otherwise), and that the session belongs to that device: the first accepted message of a session records its device in `lake/owners/session=<sessionId>.json`, and a later message from another device gets `403` (D53);
 - sends it to Event Hubs as **decompressed JSON**, marked `kind=batch` or `kind=session`, with the **device ID as the partition key**, so a phone's metadata and batches stay in the order the phone sent them;
-- writes it to the raw archive under `lake/raw/session=<sessionId>/` (`<batchSeq>.json.gz` or `session.json.gz`), then answers `200`, for a new batch and for a repeat alike (it can't tell them apart; the database drops repeats). Invalid bodies get `400`/`422` with a reason; the app moves those to its `upload_failed/` folder.
+- writes it to the raw archive under `lake/raw/session=<sessionId>/` (`<batchSeq, 8 digits>.json.gz`, or `session-start.json.gz` / `session-stop.json.gz`), then answers `200`, for a new batch and for a repeat alike (the database drops repeats). Invalid bodies get `400` (or `413` when too large) with a reason; the app moves those to its `upload_failed/` folder. If Event Hubs or storage fails, the answer is `503` and the app retries.
 
-The archive file name comes from the message itself, so if the phone retries, the same file is simply overwritten: no duplicates in the archive. Duplicates in the stream are removed later in the database (§8). The archive is the long-term copy of every trip: the finalize job rebuilds a whole trip from it.
+The archive file name comes from the message itself, so if the phone retries, the file is already there and the first copy is kept (the archive never overwrites): no duplicates in the archive. Duplicates in the stream are removed later in the database (§8). The archive is the long-term copy of every trip: the finalize job rebuilds a whole trip from it.
 
 It runs **outside** our private network (VNet) on purpose: it then needs no network setup and reaches Event Hubs, Blob Storage and Key Vault directly over their public, login-protected endpoints. Abuse is limited by the device keys and by a cap on how many copies of the function may run at once (`maximum_instance_count`), so a flood of bad requests can't run up the bill.
 
@@ -164,26 +165,27 @@ Setup details: Python 3.12 (GA on Flex Consumption), instance memory 512 MB (bil
 
 Basic tier limits that matter: one reader group (fine, only the processor reads; the archive is written by the ingest function), 256 KB per message (a batch is about 30 KB, billed as one event because events are counted in 64 KB units), 1 day of retention, up to 32 partitions, 100 connections per namespace. Price in North Europe: $0.015 per throughput-unit hour plus $0.028 per million events.
 
-Login: the ingest function and processor use their managed identities ("Azure Event Hubs Data Sender" / "Data Receiver" roles) and key-based access is switched off. Microsoft's tier tables don't list authentication per tier, so on day 0 we send one test event with a managed identity; if Basic refused it, the fallback is a send-only and a listen-only access key stored in Key Vault. *Rejected:* Event Hubs Standard with **Capture**, which writes the stream to storage by itself, like Firehose. Capture costs extra per hour on Standard and writes Avro files instead of plain JSON; a few lines in the ingest function do the same job for free. See §6 for Kafka and others.
+Login: the ingest function and processor use their managed identities ("Azure Event Hubs Data Sender" / "Data Receiver" roles) and key-based access is switched off. Microsoft's tier tables don't list authentication per tier, so on day 0 we send one test event with a managed identity; if Basic refused it, the fallback is key login (`eventhub_local_auth_enabled` in Terraform, only with the user's OK; the services have no code for keys yet). *Rejected:* Event Hubs Standard with **Capture**, which writes the stream to storage by itself, like Firehose. Capture costs extra per hour on Standard and writes Avro files instead of plain JSON; a few lines in the ingest function do the same job for free. See §6 for Kafka and others.
 
 ### Processing: live, then once more per trip
 
 **Stream processor.** Reads Event Hubs continuously and handles each message within a second or two:
 - a `session` message creates or updates the trip and its context (vehicle, mount, seat);
-- a `batch` message runs the same calculations as the full pipeline (§9), incrementally: it updates the vehicle's live position and scores, writes segment observations as each 25 m hexagon is passed, adds detected potholes and the downsampled chart data;
+- a message whose `deviceId` isn't the session's device is skipped (D54);
+- a `batch` message runs the same calculations as the full pipeline (§9), incrementally: it updates the vehicle's live position and scores, adds the GPS track, detected potholes and the downsampled chart data (segment observations are written by the finalize job);
 - it records how far it has read in the same database transaction, so a restart continues exactly where it left off.
 
 Gaps and late data. If a batch number is skipped (still queued on the phone, or rejected), the processor resets its filters at the gap and flags it; when a dead zone ends, the phone sends a burst of older batches, which the dashboard shows as "catching up" rather than live. These live results are good enough to watch, and the finalize job replaces them with exact ones.
 
-**Trip end.** A trip is ready when its Stop metadata has arrived (it carries the number of batches) and every batch up to that number is in. The processor then puts a "session ready" message in the Service Bus queue. If no Stop arrives (app crashed, phone died), a trip with no new batch for 15 minutes is closed as incomplete and finalized anyway, with its gaps marked.
+**Trip end.** A trip is ready when its Stop metadata has arrived (it carries the number of batches) and every batch up to that number is in. The processor then puts a "session ready" message in the Service Bus queue. If no Stop arrives (app crashed, phone died), a trip with no new batch for 15 minutes is closed as incomplete and finalized anyway, with its gaps marked. New data after that (the phone reconnects and sends its backlog, or streams on) makes the trip live again, and it ends again by the same rules, so it is finalized once more after its data has settled, not once per batch (D54).
 
-**Finalize job.** Runs once per finished trip, a few seconds after it ends. It reads the whole trip, either from the raw archive (live trips) or from the uploaded folder (fallback), recomputes everything over the complete trip in one pass (no gaps, filters run over the whole signal), writes Parquet samples to `lake`, replaces the trip's live results in the database, then runs the aggregation step (§9). If a trip arrives both ways, the uploaded folder wins, since it also has the samples a failed batch may have lost.
+**Finalize job.** Runs once per finished trip, shortly after it ends (the queue is checked every 30 seconds). It reads the whole trip, either from the raw archive (live trips) or from the uploaded folder (fallback), recomputes everything over the complete trip in one pass (no gaps, filters run over the whole signal), writes Parquet samples to `lake` (`processed/session=<sessionId>/`), replaces the trip's live results in the database, then runs the aggregation step (§9). If a trip arrives both ways, the uploaded folder wins, since it also has the samples a failed batch may have lost.
 
 **Blob Storage.** Azure's file storage ("containers" of files in a storage account). Very cheap, very durable, and the place where all raw data lives. We use two containers:
 - `lake`: the raw live archive and processed Parquet files;
 - `sessions`: fallback uploads of session folders, exactly as recorded.
 
-Public access and storage keys are switched off; everything logs in with an Azure identity.
+Public access and storage keys are switched off; everything logs in with an Azure identity. The account keeps blob versions and soft-deletes blobs and containers for 14 days, so a trip blob deleted or overwritten by mistake can be restored (D56).
 
 **Parquet.** A compressed, column-based file format used for analytics. A 100 Hz sensor file shrinks a lot, and pandas reads it fast.
 
@@ -200,7 +202,7 @@ The processor and jobs run the **same Python code** (numpy and scipy for signal 
 
 Setup details:
 - A **workload profiles** environment with only the free-of-fee Consumption profile, on its own `/27` subnet (the minimum; the size can't change later). It is **external**, so the read API can have public ingress; the processor and jobs have no ingress at all, so they stay unreachable. The environment brings its own static public IP for outgoing traffic (and one for incoming), so it doesn't depend on the VNet's default outbound access.
-- The finalize job uses a KEDA rule (Azure's built-in autoscaler) on the Service Bus queue: 0 copies when the queue is empty, at most 3 at once, a 30-minute time limit per run (`replica_timeout_in_seconds = 1800`). The rule logs in with a **user-assigned** identity (`identity_id` on the rule) that Terraform creates and gives "Azure Service Bus Data Receiver" **before** the job exists; with a system-assigned identity the job would need the role before it could be created.
+- The finalize job uses a KEDA rule (Azure's built-in autoscaler) on the Service Bus queue: 0 copies when the queue is empty, at most 3 at once, a 30-minute time limit per run (`replica_timeout_in_seconds = 1800`). The rule logs in with a **user-assigned** identity (`identity_id` on the rule) that Terraform creates and gives "Azure Service Bus Data Owner" on the queue **before** the job exists (Owner, not Receiver: the scaler reads the queue length through the management API, which needs the Manage right); with a system-assigned identity the job would need the role before it could be created.
 - A long session can take longer than the 5-minute maximum message lock, so the job renews the lock while it works (`AutoLockRenewer` in the Service Bus SDK).
 - Jobs are billed only while they run, at the active rate; there are no idle or request charges for jobs.
 
@@ -235,15 +237,13 @@ Setup details:
 
 **What the dashboard shows.** The web app is where the whole system becomes visible, so it is built around the live path:
 
-The dashboard is already built (`dashboard/`, React + MapLibre + uPlot) and runs on a mock backend until the read API is deployed. Its pages:
+The dashboard is built (`dashboard/`, React + MapLibre + uPlot) and deployed to Static Web Apps, where it reads the real read API; for local work it runs on a mock backend. Its pages (the Quality and Method pages were removed by D52):
 
 | Page | What you see | Fed by |
 |---|---|---|
 | **Live** (the main screen) | Each vehicle that sent data in the last 60 s moves on the map with its last ~2 minutes of track; speed, current roughness, motion-sickness dose so far, and how fresh the data is. Polled every 2 s. | stream processor (`live_state`) |
-| **Map** | All finished trips combined: H3 hexagons coloured by normalized roughness or sickness score, filtered by vehicle type; confirmed potholes; a panel per segment. | finalize job + aggregation |
-| **Sessions** / **Session** | The list of trips, and one trip: acceleration, speed and sickness dose over time, its track and events on the map, detection scores. | processor while live, finalize job after |
-| **Quality** | The data-quality panel for every trip (§10). | processor + finalize job |
-| **Method** | How the numbers are computed, including the fitted vehicle effects and β. | aggregation |
+| **Map** | All finished trips combined: a heat map of how many trips covered each street, drawn from per-trip GPS lines (D52); confirmed potholes; a panel per segment. | finalize job + aggregation |
+| **Sessions** / **Session** | The list of trips, and one trip: acceleration, speed and sickness dose over time, its track and events on the map, detection scores, and its data-quality panel (§10). | processor while live, finalize job after |
 
 End-to-end delay target: under 10 seconds from the phone to the screen (2 s batch, upload, stream, processing, 2 s polling). The processor stores when each batch arrived, so the dashboard can show the real delay instead of claiming "live".
 
@@ -253,11 +253,11 @@ End-to-end delay target: under 10 seconds from the phone to the screen (2 s batc
 
 **React + Vite + MapLibre + uPlot, hosted on Static Web Apps.**
 - *React + Vite*: a common way to build a web app; Vite is the build tool.
-- *MapLibre GL JS*: an open-source map library, with free OpenFreeMap tiles (the background map). We colour road segments by roughness or sickness score.
+- *MapLibre GL JS*: an open-source map library, with CARTO's free Dark Matter tiles as the background map on every page (a plain background if they don't load within 8 s). The Map page draws the heat map of trip overlap on it (D52).
 - *uPlot*: a very fast chart library for long time series.
 - *Azure Static Web Apps (Free plan)*: hosts the built website (plain files) over HTTPS from a global network. Free.
 
-The read API allows browser requests (CORS, set in the container app's ingress settings) only from the dashboard's Static Web Apps address; Terraform passes that address to the container app in the same run. The Free plan of Static Web Apps allows 100 GB of traffic a month and 250 MB per app, far more than we need. The dashboard reads its API address at runtime from `/config.json` (`{"apiBase": "https://<read-api>.<env>.northeurope.azurecontainerapps.io"}`); the deploy workflow writes that file from a Terraform output just before uploading, and the empty `public/config.json` in the repo keeps the mock backend for local work. It polls the read API every 2 to 5 seconds when showing live data. *Rejected:* WebSockets or SignalR (more moving parts for a handful of viewers), Front Door + Storage static website (Front Door has a monthly base fee).
+The read API allows browser requests (CORS, enforced by the read API itself from its `CORS_ALLOWED_ORIGINS` setting) only from the dashboard's Static Web Apps address; Terraform passes that address to the container app in the same run. The Free plan of Static Web Apps allows 100 GB of traffic a month and 250 MB per app, far more than we need. The dashboard reads its API address at runtime from `/config.json` (`{"apiBase": "https://<read-api>.<env>.northeurope.azurecontainerapps.io"}`); the deploy workflow looks up the read API's address with `az containerapp show`, checks that it answers the site, and writes that file just before uploading, and the empty `public/config.json` in the repo keeps the mock backend for local work. It polls the read API every 2 to 5 seconds when showing live data. *Rejected:* WebSockets or SignalR (more moving parts for a handful of viewers), Front Door + Storage static website (Front Door has a monthly base fee).
 
 ### Running and watching it
 
@@ -265,7 +265,7 @@ The read API allows browser requests (CORS, set in the container app's ingress s
 - `snet-aca` (`/27`, handed over to Container Apps): the processor, the jobs and the read API;
 - `snet-psql` (`/28`, handed over to PostgreSQL): the database, unreachable from the internet.
 
-A private DNS zone lets our services find the database by name. Network security groups (Azure's firewall rules) allow the database only from `snet-aca`, and allow the database to reach Microsoft Entra ID (to check login tokens).
+A private DNS zone lets our services find the database by name. A network security group (Azure's firewall rules) on `snet-psql` allows the database only from `snet-aca`, and allows the database to reach Microsoft Entra ID (to check login tokens).
 
 Outgoing internet access: since 31 March 2026, subnets in **new** VNets are private by default (no implicit internet access). That doesn't hurt us: the Container Apps environment has its own outgoing IP, the ingest function isn't in the VNet, and Terraform's `default_outbound_access_enabled` is `true` by default and we set it explicitly on `snet-psql`, so the database can still reach Entra ID. *Why not a NAT gateway* (Microsoft's recommended way to give private subnets internet access)? It costs about $1 per day plus data, and with this layout nothing needs it. Storage, Event Hubs and Service Bus are reached over their login-protected public endpoints.
 
@@ -274,26 +274,26 @@ Outgoing internet access: since 31 March 2026, subnets in **new** VNets are priv
 | Identity | Roles |
 |---|---|
 | ingest function | send to the event hub; write to `lake`; read the device-key secret |
-| processor and jobs | read from the event hub; send to and receive from the queue; read `sessions`; read and write `lake`; pull images; database `writer` |
+| processor and jobs | read from the event hub; send to, receive from and manage the queue (Data Owner, for the finalize job's scale rule); read `sessions`; read and write `lake`; pull images; database `writer` |
 | migrate job | database Entra admin; pull images |
 | read API | database `reader`; pull images |
 | Event Grid | send to the Service Bus queue |
 
 Event Hubs, Service Bus and Storage have **key-based access switched off**, so there are no connection strings to leak.
 
-**Key Vault.** Azure's store for secrets. It keeps the hashed device keys, which the ingest function reads through a Key Vault reference in its settings. There are no database passwords to store. Encryption at rest for Storage, PostgreSQL and Event Hubs is on by default with Microsoft-managed keys; we don't need our own keys.
+**Key Vault.** Azure's store for secrets. It keeps the hashed device keys, which the ingest function reads with the Key Vault SDK and caches (see the ingest function above). There are no database passwords to store. Encryption at rest for Storage, PostgreSQL and Event Hubs is on by default with Microsoft-managed keys; we don't need our own keys.
 
 Nothing secret is ever committed to the repo.
 
-**Azure Monitor: Log Analytics and Application Insights.** Azure's logs, metrics and alerts. All services send logs and traces to one Log Analytics workspace. The first 5 GB a month per billing account are free, and the workspace has a daily cap (`daily_quota_gb = 0.5`) so logs can't run up the bill. One **workbook** (an Azure dashboard), defined in Terraform, shows ingest rate, errors, Event Hubs incoming messages, **processor lag** (now minus the time of the last processed message, a custom metric the processor reports), rows written and data-quality counts. An action group emails us on errors and lag.
+**Azure Monitor: Log Analytics and Application Insights.** Azure's logs, metrics and alerts. All services send logs and traces to one Log Analytics workspace. The first 5 GB a month per billing account are free, and the workspace has a daily cap (`daily_quota_gb = 0.5`) so logs can't run up the bill. One **workbook** (an Azure dashboard), defined in Terraform, shows ingest requests and rejections, Event Hubs messages in and out, **processor lag** (now minus the Event Hubs time of the last processed message, from the processor's per-batch log lines and a custom metric it reports), the finalize job and its queue, finalized trips by data quality, PostgreSQL load and the read API (`infra/README.md` "Monitoring workbook"). There are no alert rules yet: the email action group exists, but nothing emails us on errors or lag.
 
-**Cost Management budget.** Sends an email when spending crosses $20 and $50, so a forgotten resource can't surprise us. On the free account, the spending limit is a second safety net: when the credit is used up, resources are stopped, not billed. Note that the credit can't pay for Marketplace products, so we use none.
+**Cost Management budget.** Sends an email when spending crosses $20 and $50, and when the month's forecast reaches $50, so a forgotten resource can't surprise us. On the free account, the spending limit is a second safety net: when the credit is used up, resources are stopped, not billed. Note that the credit can't pay for Marketplace products, so we use none.
 
 ### Building and deploying
 
-**Terraform.** Infrastructure as code: we describe every Azure resource in `.tf` files (the `azurerm` provider), and Terraform creates, changes or deletes the real resources to match. `terraform plan` shows what would change; `terraform apply` does it. The current state is stored in a Blob Storage container, which locks it automatically, so two people can't apply at once. Because storage keys are off, the provider uses Entra login for storage (`storage_use_azuread = true`, and `use_azuread_auth = true` in the backend). We write plain `azurerm` resources and use Azure Verified Modules only where they clearly save time.
+**Terraform.** Infrastructure as code: we describe every Azure resource in `.tf` files (the `azurerm` provider), and Terraform creates, changes or deletes the real resources to match. `terraform plan` shows what would change; `terraform apply` does it. The current state is stored in a Blob Storage container, which locks it automatically, so two people can't apply at once. Because storage keys are off, the provider uses Entra login for storage (`storage_use_azuread = true`, and `use_azuread_auth = true` in the backend). We write plain `azurerm` resources in our own modules (no Azure Verified Modules).
 
-**GitHub Actions.** CI/CD inside GitHub: workflows run on every pull request and every merge. They log in to Azure with **OIDC**: GitHub proves which repo and branch a job comes from, Azure trusts that through a **federated credential** on a managed identity, and hands out short-lived tokens (`azure/login@v2`). No Azure secrets are stored anywhere; the client, tenant and subscription IDs are plain repo variables.
+**GitHub Actions.** CI/CD inside GitHub: workflows run on every pull request and every merge. They log in to Azure with **OIDC**: GitHub proves which repo and branch a job comes from, Azure trusts that through a **federated credential** on a managed identity, and hands out short-lived tokens (`azure/login` v2, pinned to a commit SHA like every action). No Azure secrets are stored anywhere; the client, tenant and subscription IDs are plain repo variables.
 
 Our repo was created on 2026-11-20, after GitHub switched new repos to **immutable subject claims** (2026-07-15). The token's subject therefore carries the numeric owner and repo IDs, and the federated credentials must match them exactly:
 - deploy: `repo:ghimpumihai@163877193/DataInfrastructure_Chuds@1465690625:environment:prod`
@@ -301,7 +301,7 @@ Our repo was created on 2026-11-20, after GitHub switched new repos to **immutab
 
 These IDs are public and never change, even if the repo is renamed. If login fails, print the real `sub` claim in a workflow step and compare.
 
-**Docker Compose (local development).** Runs PostgreSQL with PostGIS on a laptop. The processor can run directly on session CSV files, so most development and testing needs no Azure at all.
+**Docker Compose (local development).** Runs PostgreSQL with PostGIS on a laptop (`docker-compose.yml`). The processor can run directly on session CSV files, so most development and testing needs no Azure at all.
 
 ---
 
@@ -336,8 +336,8 @@ If the project ever grows to thousands of vehicles, the design moves to Kafka cl
 1. At Start, the app sends the session metadata (`PUT /api/ingest/sessions/{id}`). The trip appears on the dashboard with its vehicle and context.
 2. Every 2 seconds the phone (or the replay tool) posts a gzip batch to the ingest function. Without network, batches wait in the app's disk queue and are sent oldest first when the network returns.
 3. The ingest function checks each message, sends it to Event Hubs keyed by device, and writes it to the raw archive.
-4. The stream processor reads the messages in order, runs the calculations incrementally, and writes live state, segment observations, events and chart data. It records how far it has read (the partition's sequence number, in `stream_checkpoints`) in the same database transaction.
-5. The dashboard polls the read API every 2 seconds: the vehicle moves, the road colours in, the sickness dose rises.
+4. The stream processor reads the messages in order, runs the calculations incrementally, and writes live state, the track, events and chart data. It records how far it has read (the partition's sequence number, in `stream_checkpoints`) in the same database transaction.
+5. The dashboard polls the read API every 2 seconds: the vehicle moves, its track grows, the sickness dose rises.
 
 **When the trip ends.**
 1. At Stop, the app sends the metadata again, now with the end time and the number of batches. It goes through the same queue, so it arrives after the last batch.
@@ -356,18 +356,21 @@ If the project ever grows to thousands of vehicles, the design moves to Kafka cl
 
 | Table | One row per | Key fields |
 |---|---|---|
-| `vehicles` | vehicle | type (car/bus/tram), make/model, line |
-| `devices` | phone | device ID, hashed key |
-| `sessions` | trip | vehicle, device, mount (rigid, handheld, location), rater seat and posture (from `session.json`), `source` (`live`/`upload`/`replay`), `status` (`live` while recording, `processing` until finalized, `complete`; plus an `incomplete` flag for trips closed without a Stop), `quality_status` (`pending`/`ok`/`degraded`/`bad`), exclusion reasons, expected batch count, quality status, `include_in_agg` |
-| `ingest_batches` | live batch received | (session_id, batch_seq) **unique**: a repeated batch is ignored with `ON CONFLICT DO NOTHING`; arrival time, for the delay shown on the dashboard |
+| `devices` | phone | device ID, first and last seen (the key hashes live only in Key Vault) |
+| `sessions` | trip | device, vehicle type, make/model and line (on the trip itself: there is no separate vehicles table), mount (rigid, handheld, location), people (rater seat and posture), from `session.json`; `source` (`live`/`upload`/`replay`), `status` (`live` while recording, `processing` until finalized, `complete`; plus an `incomplete` flag for trips closed without a Stop), `quality_status` (`pending`/`ok`/`degraded`/`bad`), exclusion reasons, expected batch count, `include_in_agg`, MSDV (vertical and lateral parts) |
+| `ingest_batches` | live batch received | (session_id, batch_seq) **primary key**: a repeated batch is ignored with `ON CONFLICT DO NOTHING`; arrival time, for the delay shown on the dashboard |
 | `stream_checkpoints` | Event Hubs partition | last sequence number processed |
+| `track_points` | GPS fix | position, speed, course, accuracy (the light track) |
+| `signal_state` | live trip | the processor's filter state, so a trip's filters continue across batches and restarts |
 | `segments` | road piece | H3 cell ID, geometry |
-| `segment_observations` | session × segment × pass | speed, raw roughness, MSDV contribution, sample count, quality flags |
-| `events` | detected pothole or speed bump | position, time, type, confidence, session |
+| `segment_observations` | session × segment × pass | speed, raw roughness, weighted acceleration for the sickness dose (whole pass, and moving time only, D45), pothole count, window count |
+| `events` | detected pothole, speed bump or rail joint | position, time, type, confidence, session |
 | `labels` | manual tap | type, value, time (from the app's `labels.csv`; MISC ratings from older app builds are stored but never shown, D47) |
 | `session_series` | downsampled chart data | about 5 Hz vertical and lateral acceleration, speed, MSDV so far |
 | `live_state` | device | last position, speed, current scores (for the live view) |
-| `segment_agg` | segment × vehicle type | normalized roughness, pothole confirmation ratio, sickness score, number of sessions; rebuilt by the aggregation step |
+| `segment_agg` | segment × vehicle type (plus an `all` row) | normalized roughness, pothole confirmation ratio, sickness score, number of sessions; rebuilt by the aggregation step |
+| `segment_sickness` | segment × vehicle type × seat × posture | sickness score, number of sessions; rebuilt by the aggregation step |
+| `aggregation_fit` | the latest roughness fit (one row) | method, β, vehicle effects |
 
 `include_in_agg` is true only for **finalized** trips (live or uploaded, never replays) whose context is known and that pass the quality rules (§10). The dashboard shows why a trip is excluded: `replay`, `live_only` (a live trip that isn't finalized yet), bad quality, and so on.
 
@@ -387,7 +390,7 @@ Raw values are always stored as measured; normalization happens only in the aggr
 5. **Potholes and speed bumps.**
    - A pothole is a sharp jump in band-passed (1–30 Hz) vertical acceleration, counted only above 15 km/h.
    - A speed bump shows a double peak in pitch rate (front axle, then rear axle).
-   - Detections are scored against manual taps within ±1.5 s, since people react late, as precision and recall.
+   - Detections are scored against manual taps within ±1.5 s, since people react late, as precision and recall (taps come from older app builds: the D51 app has no label buttons).
 6. **Motion sickness.**
    - Vertical acceleration through the ISO 2631-1 Wf filter (f1 0.08, f2 0.63, f4 0.25 with Q 0.86, f5 0.0625 with Q 0.80, f6 0.1 with Q 0.80 Hz), then MSDV = √(∫a_w² dt). Roughly MSDV/3 percent of unadapted people may vomit.
    - The sickness number comes from the measured motion only. Passengers are not asked how they feel, so there is no comparison with ratings (D47, §19).
@@ -408,11 +411,11 @@ Raw values are always stored as measured; normalization happens only in the aggr
 ## 10. Data quality and session rules
 
 - **A rigid mount is required for roughness.** Tape or clamp the phone; run the stillness preflight. Sessions with `mount.rigid = false` or `handheld = true` are excluded from roughness; they count for sickness (D41) and are marked "experimental" on the trip page.
-- **Buses.** Frequent stops, door cycles, kneeling and idling engines are separated using speed near zero and the activity data.
-- **Trams.** Rail joints cause regular, repeating impacts. They are labelled as rail joints so they don't count as potholes.
-- **No audio** (D48): the backend ignores the sound level, and the app stops recording audio.
+- **Buses.** Frequent stops, door cycles, kneeling and idling engines are kept out by speed: a segment pass's roughness and sickness count only moving windows (speed ≥ 1 m/s, D45).
+- **Trams.** Rail joints cause regular, repeating impacts. When a tram trip is finalized, every pothole detection is labelled `rail_joint` (D42), so rail joints never count as potholes in the aggregated map.
+- **No audio** (D48): the app records no sound, and the backend ignores the sound level older app builds still send.
 - **Only finalized trips count in aggregates.** A trip still recording, or one whose context (vehicle, mount) never arrived, shows on the live view but not in the aggregated map. Replays never count.
-- A **data-quality panel** on the dashboard shows per session: sample rates, gaps, GPS accuracy, valid fraction and rejected batches.
+- A **data-quality panel** on each trip's dashboard page shows: sample rates, gaps, GPS accuracy, valid fraction and rejected batches.
 
 ---
 
@@ -425,8 +428,8 @@ Raw values are always stored as measured; normalization happens only in the aggr
 | Data at rest | Storage, PostgreSQL and Event Hubs encrypted by default; blob public access off |
 | Database exposure | Private subnet only, no public access; password login off, Entra login only |
 | Permissions | One managed identity per service, least privilege; key-based access off on Storage, Event Hubs and Service Bus |
-| CI/CD credentials | GitHub OIDC with federated credentials; no stored Azure secrets; deploy identity usable only from the protected `prod` environment |
-| Secrets in the repo | None; gitleaks scans every push |
+| CI/CD credentials | GitHub OIDC with federated credentials; no stored Azure secrets; deploy identity usable only from jobs in the `prod` environment (it has no reviewers or branch rules; the deploy jobs run only on `main`) |
+| Secrets in the repo | None; gitleaks scans the whole history on every PR and every push to `main` and `staging` |
 | Privacy | No audio (D48); GPS shown whole, start and end included (D40: the start/end trim hid every short test drive and isn't wanted; everyone recording accepts that their routes are visible to anyone with the dashboard link) |
 
 ---
@@ -435,22 +438,25 @@ Raw values are always stored as measured; normalization happens only in the aggr
 
 ```
 infra/
-  bootstrap/          # run once by hand: state storage account, GitHub identities + federated credentials, resource provider registration
+  tf.ps1              # runs Terraform with the settings from infra/.env (infra/README.md)
+  bootstrap/          # run once by hand: stack resource group, state storage account, team group, GitHub identities + federated credentials, resource provider registration
   main/               # the whole stack (one cloud environment)
-    main.tf  variables.tf  outputs.tf  backend.tf (azurerm, use_azuread_auth = true, use_oidc = true)
+    main.tf  identities.tf (user-assigned identities)  rbac.tf (data-plane role assignments)  variables.tf  outputs.tf
+    versions.tf       # providers; azurerm backend with use_azuread_auth = true, the rest from -backend-config
   modules/
-    network/          # VNet, subnets (snet-aca, snet-psql), NSGs (incl. outbound to AzureActiveDirectory), private DNS zone
-    storage/          # storage account, containers (sessions, lake), Event Grid subscription to Service Bus
+    network/          # VNet, subnets (snet-aca, snet-psql), NSG (incl. outbound to AzureActiveDirectory), private DNS zone, optional NAT gateway
+    storage/          # storage account (versioning, soft delete), containers (sessions, lake), Event Grid subscription to Service Bus
     messaging/        # Service Bus (Basic) queue + dead-letter, Event Hubs (Basic) namespace + hub
     database/         # PostgreSQL Flexible Server, server parameters (azure.extensions, TLS), Entra admin
-    compute/          # ACR, Container Apps environment, processor and read API apps, finalize/aggregate/migrate jobs, ingest function app, Key Vault, user-assigned identities + role assignments
+    compute/          # ACR, Container Apps environment, processor and read API apps, finalize/aggregate/migrate jobs, ingest function app + its host storage, Key Vault, the role assignments on these
     web/              # Static Web App for the dashboard
-    observability/    # Log Analytics, Application Insights, workbook, alerts, budget
+    observability/    # Log Analytics, Application Insights, workbook, email action group, budget (no alert rules yet)
+  scripts/            # add-device-key.ps1: device key hashes into Key Vault
 ```
 
 - **One cloud environment plus local**, not dev and prod copies; that halves cost and wiring.
-- **One resource group** for the stack, so `terraform destroy` (or deleting the group) removes everything.
-- Terraform owns resource definitions; CI only ships new code and images. Terraform ignores those fields (`lifecycle { ignore_changes }` on image tags), so plan and deploy don't fight.
+- **One resource group** for the stack (created by bootstrap), so `terraform destroy` empties it.
+- Terraform owns resource definitions; CI only ships new code and images. Terraform ignores those fields (`lifecycle { ignore_changes }` on the images, and on the read API's ingress port), so plan and deploy don't fight.
 - The CI deploy identity needs Contributor plus "Role Based Access Control Administrator" on the resource group, because Terraform creates role assignments.
 
 ---
@@ -459,14 +465,18 @@ infra/
 
 | Workflow | Runs when | What it does |
 |---|---|---|
-| `python-ci.yml` | PR touching `services/**` or `tools/**` | ruff (lint), pytest (including the Wf filter test and a test on a sample session) |
-| `terraform-plan.yml` | PR touching `infra/**` | fmt, validate, plan; posts the plan as a PR comment; read-only identity |
-| `terraform-apply.yml` | merge to `main` touching `infra/**` | apply, after approval in the protected `prod` environment |
-| `deploy-services.yml` | merge to `main` touching `services/**` or `db/**` | build images, push to ACR, run the migrate job and wait for it, update the processor, read API and jobs, deploy the ingest function app |
-| `deploy-dashboard.yml` | merge to `main` touching `dashboard/**` | build, write `config.json` with the read API address from Terraform, deploy to Static Web Apps (the deploy token is fetched with `az` after OIDC login, not stored) |
-| `security.yml` | every PR | gitleaks (scans for committed secrets) |
-| `ios-app.yml` (exists) | push or PR touching `src/mobile-ios/**` | builds the app for device (unsigned) and runs its tests on a macOS runner (free for public repos) |
-| `teardown.yml` | manual | `terraform destroy` after the hackathon |
+| `processor-ci.yml`, `read-api-ci.yml`, `ingest-ci.yml` | PR, or push to `main`/`staging`, touching that service (processor: also `db/**`, `tools/upload/**`, `tools/replay/**`; read API: also `db/**` and the processor package; ingest: also the mock server and its fixtures) | pytest (the processor's include the Wf filter test and a test on a sample session folder), against a throwaway PostGIS container where a database is needed; the processor and read API images are built too |
+| `replay-ci.yml`, `upload-ci.yml` | PR, or push to `main`/`staging`, touching `tools/replay/**` / `tools/upload/**` (replay also the ingest contract code, the processor's parser and the app's fixtures) | pytest for the tool |
+| `dashboard-ci.yml` | PR, or push to `main`/`staging`, touching `dashboard/**`, the read API, the processor package or `db/**` | `npm run check`, end-to-end tests on the mock backend and against a real read API |
+| `terraform-plan.yml` | PR touching `infra/**` | fmt, validate, plan (`-refresh=false`, read-only identity); posts the plan as a PR comment; fails if it deletes or replaces a resource that holds data |
+| `terraform-apply.yml` | manual (Actions → Run workflow) | plan, the same delete guard, apply, as the deploy identity in the `prod` environment. Manual instead of on merge because `prod` has no required reviewers: starting the run is the approval (`infra/README.md`) |
+| `deploy-ingest.yml` | merge to `main` touching `services/ingest/**`, or manual | runs `ingest-ci.yml`, deploys the ingest function app, then a smoke check with a random device key (expects `401`) |
+| `deploy-services.yml` | merge to `main` touching `services/processor/**`, `services/read-api/**` or `db/**`, or manual | runs the processor and read API tests, builds images, pushes to ACR, runs the migrate job and waits for it, updates the finalize and aggregate jobs, the processor and the read API, then checks that the read API's main routes answer `200` |
+| `deploy-dashboard.yml` | manual | checks that the read API answers the site (JSON, CORS), builds, writes `config.json` with the read API address (from `az containerapp show`), deploys to Static Web Apps (the deploy token is fetched with `az` after OIDC login, not stored) |
+| `security.yml` | every PR, and every push to `main` and `staging` | gitleaks over the whole history (scans for committed secrets) |
+| `ios-app.yml` | push or PR touching `src/mobile-ios/**` | tests the app's Python tools, builds the app for device (unsigned, not on PRs) and runs its unit tests on a macOS runner (free for public repos) |
+
+There is no teardown workflow: `infra/tf.ps1 destroy` runs from a laptop after the hackathon, because purging the soft-deleted Key Vault needs rights at subscription level.
 
 ---
 
@@ -493,7 +503,7 @@ Prices are North Europe list prices from the Azure Retail Prices API (2026-11-20
 - **Azure free account:** $200 credit for 30 days (card needed for identity, not charged while the spending limit is on). Within 30 days, or when the credit runs out, it must be upgraded to pay-as-you-go to keep running; the 12-month free services (PostgreSQL, Container Registry) continue after the upgrade. Credits can't pay for Marketplace products. One free account per person.
 - **Azure for Students** (if a team member is a full-time student at a degree-granting school): $100 credit for 12 months, **no card**; when the credit is gone the subscription is disabled.
 
-Either covers the hackathon: three days cost about $2. Run `teardown.yml` after the event.
+Either covers the hackathon: three days cost about $2. Run `infra/tf.ps1 destroy` after the event.
 
 ---
 
@@ -502,6 +512,7 @@ Either covers the hackathon: three days cost about $2. Run `teardown.yml` after 
 ```
 decisions/            # this folder: plans and decision log
 src/mobile-ios/       # iPhone app (teammate, built on a Mac)
+  tools/              # quick_check.py (sanity check of a session folder, initial plan §10), mock_ingest_server.py
 services/
   ingest/             # Function app: validate, send to Event Hubs, archive
   read-api/           # Container App (FastAPI): dashboard queries
@@ -509,9 +520,8 @@ services/
 tools/
   upload/             # fallback: upload a session folder to Blob Storage, marker file last
   replay/             # re-send a recorded session through the live API
-  quick_check/        # sanity check of a session folder (from the initial plan §10)
 dashboard/            # React + MapLibre + uPlot
-db/migrations/        # SQL: PostGIS, tables, users
+db/migrations/        # SQL: PostGIS and tables (the migrate job creates the users)
 infra/                # Terraform (see §12)
 .github/workflows/    # see §13
 docker-compose.yml    # local PostGIS
@@ -525,7 +535,7 @@ docker-compose.yml    # local PostGIS
 - Create the Azure free account (or Azure for Students, if a team member qualifies: no card needed). The 30-day credit clock starts now.
 - Register the resource providers the stack needs (`Microsoft.App`, `Microsoft.EventHub`, `Microsoft.ServiceBus`, `Microsoft.EventGrid`, `Microsoft.DBforPostgreSQL`, `Microsoft.Web`, `Microsoft.ContainerRegistry`, `Microsoft.OperationalInsights`); `infra/bootstrap` does this.
 - Check the region: `az functionapp list-flexconsumption-locations` lists North Europe, and creating the `B1ms` server in North Europe succeeds (capacity isn't guaranteed by quota).
-- Send one test event to Event Hubs Basic with a managed identity (or `az login` user with the Data Sender role); if Basic refuses Entra login, switch to the key-in-Key-Vault fallback (§5).
+- Send one test event to Event Hubs Basic with a managed identity (or `az login` user with the Data Sender role); if Basic refuses Entra login, switch to the key login fallback (`eventhub_local_auth_enabled`, §5).
 - Create the GitHub federated credentials with the immutable subjects from §5.
 - Create the budget, run `infra/bootstrap`, and set up OIDC.
 
@@ -550,9 +560,9 @@ docker-compose.yml    # local PostGIS
 ## 17. Top risks
 
 1. **Account limits.** The free account's credit lasts 30 days and some sizes may be unavailable in the region. Fix on day 0; fall back to West Europe if needed.
-2. **Login and network surprises.** The database must reach Entra ID to accept token logins (NSG rule plus default outbound access on `snet-psql`); a scale rule that can't log in never starts the finalize job. Test both on day 1. Reported quirk: suspending or updating a Container Apps Job can break its event trigger; if the finalize job stops starting, recreate it (`terraform apply -replace`).
+2. **Login and network surprises.** The database must reach Entra ID to accept token logins (NSG rule plus default outbound access on `snet-psql`); a scale rule that can't log in never starts the finalize job. Test both on day 1. Reported quirk: suspending or updating a Container Apps Job can break its event trigger; if the finalize job stops starting, recreate it (`infra/tf.ps1 apply -replace=module.compute.azurerm_container_app_job.finalize`).
 3. **The app's metadata call isn't ready.** Without it the backend doesn't know the vehicle or when a trip ended. Fallback: the processor creates the trip from its first batch with unknown context and closes it after 15 minutes of silence; such trips stay out of the aggregated map until their folder is uploaded.
-4. **Bad recordings:** loose mount, clock problems, wrong axes. Do a 10-minute dry run, watch it live on the dashboard, and check the folder with `quick_check` before the first real drive.
+4. **Bad recordings:** loose mount, clock problems, wrong axes. Do a 10-minute dry run, watch it live on the dashboard, and check the folder with `src/mobile-ios/tools/quick_check.py` before the first real drive.
 5. **Mobile network on the route.** Dead zones delay data (the queue catches up) but don't lose it. Pick a loop with decent coverage so the live view looks live.
 6. **Not enough overlapping trips** for aggregation. Plan a fixed loop and repeat it.
 7. **Live parts fail in the room** (Wi-Fi, function cold start). The replay through the real live path is the main demo; the video of a real drive is the backup.
@@ -593,7 +603,7 @@ Every point the plan had marked as unsure, what we found, and what it changed. S
 | Question | Answer | Effect on the plan |
 |---|---|---|
 | What does Event Hubs Basic cost? | $0.015 per throughput-unit hour + $0.028 per million events (events counted in 64 KB units) | $0.36/day; batches are one event each (§14) |
-| Does Event Hubs Basic accept Entra (managed identity) login? | Not stated per tier in Microsoft's tables; Entra login is documented for Event Hubs in general | Day-0 test; fallback is a send-only and a listen-only key in Key Vault (§5, §16) |
+| Does Event Hubs Basic accept Entra (managed identity) login? | Not stated per tier in Microsoft's tables; Entra login is documented for Event Hubs in general | Day-0 test; fallback is key login (`eventhub_local_auth_enabled`, §5, §16) |
 | What are Container Apps' free grant and rates? | 180,000 vCPU-s, 360,000 GiB-s and 2 M requests per subscription per month; active $0.000024/vCPU-s, idle $0.000003/vCPU-s, memory $0.000003/GiB-s; jobs billed only while running | Costs in §14 |
 | Is Container Registry free? | One Standard registry is free for 12 months on the free account | Use Standard, not Basic (§5) |
 | Is PostgreSQL `B1ms` free? | Yes: 750 hours, 32 GB storage, 32 GB backup per month for 12 months, new customers only; $0.018/hour after | Unchanged |
@@ -603,7 +613,7 @@ Every point the plan had marked as unsure, what we found, and what it changed. S
 | How does a VNet-joined Flex Consumption function get outgoing access? | All its traffic goes through the subnet, which is now private by default | **Read API moved from a function to a container app** (D34) |
 | Does PostgreSQL with private networking need anything for Entra login? | Yes: an outbound rule to the `AzureActiveDirectory` service tag | NSG rule added (§5, D35) |
 | Which TLS mode for PostgreSQL? | Microsoft recommends `require`; `verify-ca`/`verify-full` are unsupported because intermediate certificates rotate without notice | `sslmode=require` (D35) |
-| Can a Container Apps Job's KEDA rule log in with a managed identity? | Yes: `identity_id` on the rule in `azurerm_container_app_job`; needs "Service Bus Data Receiver". Reported quirk: suspending or updating a job can break its trigger | User-assigned identity created first; recreate the job if it stops starting (§5, §17) |
+| Can a Container Apps Job's KEDA rule log in with a managed identity? | Yes: `identity_id` on the rule in `azurerm_container_app_job`; needs "Service Bus Data Receiver". Reported quirk: suspending or updating a job can break its trigger | User-assigned identity created first, with "Service Bus Data Owner" in the end (the scaler reads the queue length, which needs Manage); recreate the job if it stops starting (§5, §17) |
 | Does Event Grid deliver to a Service Bus Basic queue with a managed identity? | Yes, with "Azure Service Bus Data Sender" on the queue | Unchanged (§5) |
 | Service Bus Basic limits? | $0.05 per million operations, 256 KB messages, dead-letter queue, message lock up to 5 minutes | Lock renewal kept (§5) |
 | Does the Functions host decompress gzip request bodies? | Not documented; reports suggest the body arrives as sent | Code checks the gzip magic bytes and handles both (§5) |

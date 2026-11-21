@@ -1,49 +1,5 @@
 import Foundation
 
-/// Labels written to `labels.csv` (spec §3.7). Raw values are the CSV `type` column.
-enum LabelType: String, Sendable {
-    case pothole, speedBump = "speed_bump", phoneMoved = "phone_moved"
-    case surfaceStart = "surface_start", surfaceEnd = "surface_end"
-    case segmentStart = "segment_start", segmentEnd = "segment_end"
-    case syncTap = "sync_tap", note
-}
-
-enum SurfaceKind: String, CaseIterable, Identifiable, Sendable {
-    case cobblestones, roughAsphalt = "rough_asphalt", smoothAsphalt = "smooth_asphalt", gravel, tramRails = "tram_rails"
-    var id: String { rawValue }
-    var shortName: String {
-        switch self {
-        case .cobblestones: return "Cobble"
-        case .roughAsphalt: return "Rough"
-        case .smoothAsphalt: return "Smooth"
-        case .gravel: return "Gravel"
-        case .tramRails: return "Rails"
-        }
-    }
-}
-
-enum SegmentKind: String, CaseIterable, Identifiable, Sendable {
-    case winding, roundabout, stopAndGo = "stop_and_go", highway, idle
-    var id: String { rawValue }
-    var shortName: String {
-        switch self {
-        case .winding: return "Winding"
-        case .roundabout: return "Rndabout"
-        case .stopAndGo: return "Stop&Go"
-        case .highway: return "Highway"
-        case .idle: return "Idle"
-        }
-    }
-}
-
-struct LoggedLabel: Equatable, Sendable {
-    let type: LabelType
-    let value: String?
-    let note: String?
-    let tUp: TimeInterval
-    let date: Date
-}
-
 /// One recording: owns the session folder, all writers, sensor wiring and the periodic timers.
 /// Thread-safety: sensor callbacks arrive on background queues; public methods may be called
 /// from the main thread; all shared state is behind locks.
@@ -72,12 +28,6 @@ final class RecordingSession: @unchecked Sendable {
         var returnedFromBackgroundUp: TimeInterval?
     }
 
-    struct LabelState {
-        var count = 0
-        var activeSurface: SurfaceKind?
-        var activeSegments: Set<SegmentKind> = []
-    }
-
     let id: UUID
     let folder: URL
     let startDate: Date
@@ -93,7 +43,6 @@ final class RecordingSession: @unchecked Sendable {
     private let deps: Dependencies
     private let metadataBox: Locked<SessionMetadata>
     private let latestBox = Locked(LatestValues())
-    private let labelBox = Locked(LabelState())
     private let timerQueue = DispatchQueue(label: "sensorrecorder.session-timers", qos: .utility)
     private var timers: [DispatchSourceTimer] = []
     /// Window start of the next upload batch. Touched by the batch timer and by stop() (final
@@ -102,9 +51,9 @@ final class RecordingSession: @unchecked Sendable {
     /// Batches built while upload is ON but not queued yet (enqueue failed: disk full, encode error),
     /// oldest first. Retried at the next batch tick; touched by the batch timer and by stop().
     private let unqueuedBatches = Locked<[IngestBatch]>([])
+    /// Windows dropped from the live upload (`Stats.uploadWindowsNotQueued`); the session files keep them.
+    private let windowsNotQueued = Locked(0)
     private let stateBox = Locked((started: false, stopped: false))
-    /// Set after the final close; later labels are refused instead of silently vanishing.
-    private let writersClosed = Locked(false)
 
 
     static let anchorInterval: TimeInterval = 10
@@ -120,7 +69,6 @@ final class RecordingSession: @unchecked Sendable {
 
     var metadata: SessionMetadata { metadataBox.current }
     var shortId: String { SessionStore.shortId(id) }
-    var labels: LabelState { labelBox.current }
     var latest: LatestValues { latestBox.current }
 
     /// Creates the session folder, writers, `session.json` and the first clock anchor.
@@ -149,17 +97,7 @@ final class RecordingSession: @unchecked Sendable {
         accumulator = BatchAccumulator(sessionId: id.uuidString, deviceId: deps.deviceId)
 
         var mount = setup.mount
-        if let jpeg = setup.mountPhotoJPEG {
-            do {
-                try jpeg.write(to: folder.appendingPathComponent(SessionFileName.mountPhoto), options: .atomic)
-                mount.photoFile = SessionFileName.mountPhoto
-            } catch {
-                mount.photoFile = nil
-                appLogger.error("mount photo not saved: \(error.localizedDescription, privacy: .public)")
-            }
-        } else {
-            mount.photoFile = nil
-        }
+        mount.photoFile = nil // no mount photo since D51
 
         let meta = SessionMetadata(
             sessionId: id.uuidString, appVersion: deps.appVersion, device: deps.deviceInfo,
@@ -220,7 +158,6 @@ final class RecordingSession: @unchecked Sendable {
             timers.forEach { $0.cancel() }
             timers.removeAll()
         }
-        endAllToggles(note: "auto at stop")
         deps.motion.stop()
         deps.location?.stopRecording()
         deps.altimeter?.stop()
@@ -228,6 +165,7 @@ final class RecordingSession: @unchecked Sendable {
 
         makeBatch() // last partial window (and any batch that couldn't be queued earlier)
         let notQueued = unqueuedBatches.withLock { w -> Int in defer { w.removeAll() }; return w.count }
+        windowsNotQueued.withLock { $0 += notQueued }
         if notQueued > 0 {
             // batchCount below counts only queued batches, so the backend doesn't wait for these.
             writer.log(.warn, "\(notQueued) upload batch window(s) could not be queued before Stop (the session files keep the data)")
@@ -248,7 +186,6 @@ final class RecordingSession: @unchecked Sendable {
         }
         queueSessionMetadata(meta, phase: .stop, batchCount: accumulator.batchesCreated)
         writer.close()
-        writersClosed.withLock { $0 = true }
         return meta
     }
 
@@ -464,7 +401,8 @@ final class RecordingSession: @unchecked Sendable {
         // consuming a batchSeq. Upload ON: build, check size, queue.
         guard let q = deps.uploadQueue, q.isEnabled else {
             accumulator.discard()
-            unqueuedBatches.withLock { $0.removeAll() }
+            let dropped = unqueuedBatches.withLock { w -> Int in defer { w.removeAll() }; return w.count }
+            windowsNotQueued.withLock { $0 += 1 + dropped }
             return
         }
         let batch = accumulator.drain(t0Up: start, t0UtcMs: timeBase.utcMs(fromUptime: start), device: latestBox.current.device)
@@ -476,6 +414,7 @@ final class RecordingSession: @unchecked Sendable {
         if waiting.count > Self.maxUnqueuedBatches {
             let dropped = waiting.count - Self.maxUnqueuedBatches
             waiting.removeFirst(dropped)
+            windowsNotQueued.withLock { $0 += dropped }
             writer.log(.warn, "\(dropped) upload batch window(s) could not be queued and were dropped from the live upload (the session files keep the data)")
         }
         // Oldest first; each batch gets its batchSeq only when it is actually queued (no holes).
@@ -511,6 +450,10 @@ final class RecordingSession: @unchecked Sendable {
             obj["people"] = people
         }
         obj["source"] = "live"
+        if var stats = obj["stats"] as? [String: Any] {
+            stats.removeValue(forKey: "uploadWindowsNotQueued") // local only (D55): not part of §6.1
+            obj["stats"] = stats
+        }
         if let batchCount { obj["batchCount"] = batchCount }
         return try JSONSerialization.data(withJSONObject: obj, options: [.sortedKeys, .withoutEscapingSlashes])
     }
@@ -526,67 +469,6 @@ final class RecordingSession: @unchecked Sendable {
         } catch {
             writer.log(.warn, "could not queue session metadata (\(phase.rawValue)): \(error.localizedDescription)")
         }
-    }
-
-    // MARK: - Labels
-
-    /// One line per label: newlines in free text would break line-based readers and crash repair.
-    static func sanitize(_ s: String?) -> String? {
-        guard let s else { return nil }
-        let flat = s.replacingOccurrences(of: "\r\n", with: " ")
-            .replacingOccurrences(of: "\n", with: " ").replacingOccurrences(of: "\r", with: " ")
-        let trimmed = flat.trimmingCharacters(in: .whitespaces)
-        return trimmed.isEmpty ? nil : trimmed
-    }
-
-    @discardableResult
-    func addLabel(_ type: LabelType, value rawValue: String? = nil, note rawNote: String? = nil) -> LoggedLabel {
-        let value = Self.sanitize(rawValue), note = Self.sanitize(rawNote)
-        let t = timeBase.uptimeNow()
-        let label = LoggedLabel(type: type, value: value, note: note, tUp: t, date: timeBase.date(fromUptime: t))
-        guard !writersClosed.current else {
-            appLogger.error("label \(type.rawValue, privacy: .public) after session close was not recorded")
-            return label
-        }
-        writer.append(.labels, CSV.row([CSV.f6(t), CSV.ms(timeBase.utcMs(fromUptime: t)), type.rawValue,
-                                        CSV.escape(value), CSV.escape(note)]))
-        accumulator.addLabel(t: t, type: type.rawValue, value: value, note: note)
-        labelBox.withLock { $0.count += 1 }
-        return label
-    }
-
-    /// Surfaces are mutually exclusive: starting one ends the previous.
-    @discardableResult
-    func toggleSurface(_ kind: SurfaceKind) -> LoggedLabel {
-        let current = labelBox.current.activeSurface
-        if current == kind {
-            labelBox.withLock { $0.activeSurface = nil }
-            return addLabel(.surfaceEnd, value: kind.rawValue)
-        }
-        if let current {
-            addLabel(.surfaceEnd, value: current.rawValue)
-        }
-        labelBox.withLock { $0.activeSurface = kind }
-        return addLabel(.surfaceStart, value: kind.rawValue)
-    }
-
-    /// Driving segments are independent toggles (e.g. winding + stop&go).
-    @discardableResult
-    func toggleSegment(_ kind: SegmentKind) -> LoggedLabel {
-        let active = labelBox.current.activeSegments.contains(kind)
-        labelBox.withLock { s in
-            if active { s.activeSegments.remove(kind) } else { s.activeSegments.insert(kind) }
-        }
-        return addLabel(active ? .segmentEnd : .segmentStart, value: kind.rawValue)
-    }
-
-    private func endAllToggles(note: String) {
-        let s = labelBox.current
-        if let surface = s.activeSurface { addLabel(.surfaceEnd, value: surface.rawValue, note: note) }
-        for seg in s.activeSegments.sorted(by: { $0.rawValue < $1.rawValue }) {
-            addLabel(.segmentEnd, value: seg.rawValue, note: note)
-        }
-        labelBox.withLock { $0.activeSurface = nil; $0.activeSegments = [] }
     }
 
     // MARK: - Lifecycle
@@ -666,9 +548,10 @@ final class RecordingSession: @unchecked Sendable {
                                          gapsOver1s: t.gapsOver1s, droppedEstimate: t.droppedEstimate,
                                          fileBytes: sizes[id.file.fileName])
         }
-        let l = labelBox.current
-        return .init(durationSec: endUp - startUp, streams: streams, labelsCount: l.count,
+        // No labels since D51; labels.csv keeps its header and the key stays in session.json.
+        return .init(durationSec: endUp - startUp, streams: streams, labelsCount: 0,
                      fileSizes: sizes, totalBytes: total,
-                     writeErrors: writer.writeErrors.count, uploadBatchesCreated: accumulator.batchesCreated)
+                     writeErrors: writer.writeErrors.count, uploadBatchesCreated: accumulator.batchesCreated,
+                     uploadWindowsNotQueued: windowsNotQueued.current > 0 ? windowsNotQueued.current : nil)
     }
 }

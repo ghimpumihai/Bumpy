@@ -75,7 +75,7 @@ export interface SessionSummary {
   durationS: number;
   distanceM: number;
   status: ProcessingStatus;
-  /** Closed without the app's Stop message (crash, dead phone) after 15 min without batches; gaps are marked. */
+  /** Closed after 15 min without batches with the Stop message or some batches missing (crash, dead phone); gaps are marked. */
   incomplete: boolean;
   qualityStatus: QualityStatus;
   /** Fraction (0–1) of moving time that passed the quality checks. */
@@ -128,7 +128,7 @@ export interface SessionQuality {
   gps: GpsQuality;
   validFraction: number | null;
   invalidSeconds: InvalidSeconds;
-  /** Live batches the ingest API rejected for this session. */
+  /** Always 0: the ingest function rejects a bad batch with a 4xx, so it never reaches the database. */
   rejectedBatches: number;
   /** Live batches that arrived after newer ones (archived, not processed). */
   lateBatches: number;
@@ -192,7 +192,7 @@ export interface TrackProperties {
   times: EpochMs[];
   /** m/s per coordinate. */
   speeds: (number | null)[];
-  /** Metres removed at each end for privacy. */
+  /** Always 0: tracks are served whole, with no start/end trim (D40). */
   trimmedM: number;
 }
 

@@ -204,3 +204,31 @@ def test_a_failing_signal_step_keeps_the_batch(db, batch, monkeypatch):
     assert _one(db, "SELECT received_batches FROM sessions")[0] == 1
     assert _one(db, "SELECT count(*) FROM live_state")[0] == 1
     assert _one(db, "SELECT count(*) FROM signal_state")[0] == 0
+
+
+def test_another_devices_batch_or_session_copy_is_ignored(db, batch, session_meta):
+    """Any valid device key can name any sessionId (D54): another device's batch or session.json must
+    neither turn the trip into a replay nor be stored as its data."""
+    s = _store(db)
+    with db.transaction():
+        s.apply_batch(_batch(batch, 0), RECEIVED)
+        s.apply_session(parse_session(session_meta))
+    other = dict(batch, deviceId="OTHER", source="replay")
+    with db.transaction():
+        assert s.apply_batch(_batch(other, 1, lat=10.0), RECEIVED) == "foreign_device"
+        assert s.apply_session(parse_session(dict(
+            session_meta, deviceId="OTHER", replayOf="x", batchCount=1, vehicle={"type": "tram"}))) == "foreign_device"
+    assert _one(db, "SELECT device_id, source, replay_of, received_batches, expected_batch_count, vehicle_type, "
+                    "status FROM sessions") == ("FIXTURE-DEVICE", "live", None, 1, None, "bus", "live")
+    assert _one(db, "SELECT count(*) FROM ingest_batches")[0] == 1
+    assert _one(db, "SELECT count(*) FROM track_points")[0] == 1
+    assert _one(db, "SELECT count(*) FROM live_state WHERE device_id = 'OTHER'")[0] == 0
+
+    with db.transaction():
+        assert s.apply_batch(_batch(batch, 1), RECEIVED) == "new"  # the phone's own batch still counts
+        # tools/replay: a new sessionId under its own deviceId, so a new trip and not affected.
+        replay = dict(batch, sessionId="replay-1", deviceId="replay-FIXTURE-DEVICE", source="replay")
+        assert s.apply_batch(_batch(replay, 0), RECEIVED) == "new"
+    assert _one(db, "SELECT source FROM sessions WHERE session_id = 'replay-1'")[0] == "replay"
+    assert _one(db, "SELECT received_batches, source FROM sessions WHERE session_id = %s",
+                batch["sessionId"]) == (2, "live")

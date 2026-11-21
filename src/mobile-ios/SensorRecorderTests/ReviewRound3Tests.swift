@@ -48,16 +48,6 @@ final class UploadSecurityTests: XCTestCase {
         XCTAssertTrue(q.failedFiles().isEmpty)
         XCTAssertTrue(q.status.lastError?.contains("API URL") == true)
     }
-
-    func testClearPendingOnlyForOneSession() throws {
-        let q = UploadQueue(directory: try makeTempDir().appendingPathComponent("q"), transport: MockTransport(),
-                            config: { .disabled })
-        try q.enqueue(gzippedBody: Data([1]), sessionId: "A", seq: 0, createdUtcMs: 1)
-        try q.enqueue(gzippedBody: Data([1]), sessionId: "B", seq: 0, createdUtcMs: 2)
-        q.clearPending(sessionId: "A")
-        XCTAssertEqual(q.pendingFiles().map { UploadQueue.parse(fileName: $0.lastPathComponent)!.sessionId }, ["B"])
-        XCTAssertEqual(q.status.queueCount, 1)
-    }
 }
 
 // MARK: - Session deletion (GDPR retention)
@@ -203,8 +193,6 @@ final class AllFilesRowShapeTests: XCTestCase {
         let e = expectation(description: "run")
         DispatchQueue.main.async {
             session.start()
-            session.addLabel(.note, note: "a, \"quoted\" note")
-            session.toggleSurface(.gravel)
             DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) { session.stop(); e.fulfill() }
         }
         wait(for: [e], timeout: ciTimeout)

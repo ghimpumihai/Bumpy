@@ -15,10 +15,11 @@ import os
 from contextlib import asynccontextmanager
 
 import fastapi
+import psycopg
 from fastapi import FastAPI, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, Response
 from psycopg import errors as pg_errors
 from psycopg_pool import ConnectionPool, PoolTimeout
 from starlette.exceptions import HTTPException as StarletteHTTPException
@@ -82,6 +83,7 @@ def configure_telemetry() -> bool:
 def create_app(pool: ConnectionPool | None = None) -> FastAPI:
     pool = pool or make_pool()
     stats_cache = q.TripStatsCache()  # per app, so per database
+    heat_cache = q.TripStatsCache()  # its own, so heat lines never evict the stats
 
     @asynccontextmanager
     async def lifespan(_: FastAPI):
@@ -124,6 +126,13 @@ def create_app(pool: ConnectionPool | None = None) -> FastAPI:
     @app.exception_handler(PoolTimeout)
     async def _busy(request: Request, exc: PoolTimeout):
         log.warning("no free database connection for %s", request.url.path)
+        return JSONResponse({"error": "database busy, try again"}, status_code=503)
+
+    # A failover, a connection the server dropped, or a login failure: the next try may well work.
+    # QueryCanceled and PoolTimeout are OperationalErrors too, but keep their own handlers (closest class wins).
+    @app.exception_handler(psycopg.OperationalError)
+    async def _db_down(request: Request, exc: psycopg.OperationalError):
+        log.warning("database error on %s: %s", request.url.path, exc)
         return JSONResponse({"error": "database busy, try again"}, status_code=503)
 
     @app.exception_handler(pg_errors.QueryCanceled)
@@ -186,7 +195,7 @@ def create_app(pool: ConnectionPool | None = None) -> FastAPI:
     @app.get("/api/heat")
     def heat():
         with pool.connection() as conn:
-            return q.heat(conn)
+            return Response(q.heat(conn, heat_cache), media_type="application/json")
 
     @app.get("/api/segments/{h3}")
     def segment(h3: str):

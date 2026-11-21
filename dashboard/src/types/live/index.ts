@@ -6,7 +6,8 @@ export interface LiveDevice {
   deviceId: string;
   sessionId: string;
   source: SessionSource;
-  /** Always `live` from the read API, which drops a device as soon as its trip ends (API.md). */
+  /** `live` while recording; `processing`/`complete` for up to 60 s after the trip ends, until the device
+   *  leaves the list (API.md). */
   sessionStatus: ProcessingStatus;
   vehicleType: VehicleType;
   /** Time of the newest sample processed for this device (phone clock, UTC). */
@@ -45,8 +46,7 @@ export interface LiveFreshness {
   transportDelayMs: number;
   /** The phone is sending a backlog after a dead zone (plan 02 §5, "Gaps and late data"). */
   catchingUp: boolean;
-  /** The trip has ended: silence is expected, not a dead zone. The read API drops ended trips, so this is
-   *  only a safeguard against a status the API might send in future. */
+  /** The trip has ended (the read API keeps it listed for up to 60 s): silence is expected, not a dead zone. */
   ended: boolean;
   status: StreamStatus;
 }

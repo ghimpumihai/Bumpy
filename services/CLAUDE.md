@@ -12,11 +12,11 @@ Python 3.12 everywhere (Function runtime, Dockerfiles, CI); no 3.13+ features.
 - A new `RUN_MODE` needs its app or job in `infra/modules/compute/main.tf` and an image-update step in `.github/workflows/deploy-services.yml`.
 - A batch's rows and its partition's checkpoint (`stream_checkpoints`) commit in one transaction. Never commit one without the other.
 - `dsp.py` must give the same result fed batch by batch as in one pass (`test_chunked_feed_equals_one_pass`). The DSP state is saved as JSON in `signal_state` per trip: new keys need defaults in `Pipeline.__init__`, and changing the filter design or sample grid breaks trips that are in progress during a deploy.
-- The app sends acceleration in g; convert with `G`. The `WF` values are cited ISO 2631-1 constants, not tunables; only the pothole and forward-axis thresholds and the lateral weighting `WY` / `LATERAL_K` (PROVISIONAL in the `dsp.py` docstring) may be tuned.
+- The app sends acceleration in g; convert with `G`. The `WF` values are cited ISO 2631-1 constants, not tunables; only the pothole, speed-bump and forward-axis thresholds and the lateral weighting `WY` / `LATERAL_K` (PROVISIONAL in the `dsp.py` docstring) may be tuned.
 
 ## Ingest
 - Validation order and status codes mirror `src/mobile-ios/tools/mock_ingest_server.py` (`tests/test_parity.py`), except the differences listed in `ingest/README.md`; add any new one there.
-- Answer 200 only after both the Event Hubs send and the `lake` blob write succeed; any Azure failure (Key Vault included) is 503 so the app retries.
+- Answer 200 only after the session owner check (D53), the Event Hubs send and the `lake` blob write succeed; any Azure failure (Key Vault and the owner marker included) is 503 so the app retries.
 
 ## Deploys ship a whitelist
 - Ingest ships only `function_app.py`, `host.json`, `requirements.txt` and `ingest_core/` (`deploy-ingest.yml`).
@@ -25,7 +25,7 @@ Python 3.12 everywhere (Function runtime, Dockerfiles, CI); no 3.13+ features.
 
 ## Read API
 - A route that reads new tables or functions goes into the smoke-check route list in `deploy-services.yml`; that check is the only proof on Azure that the `reader` grants work.
-- Port 8000 is set in three places: the read-api `Dockerfile`, `infra/modules/compute/main.tf` and `READ_API_PORT` in `deploy-services.yml`.
+- Port 8000 is set in two places: the read-api `Dockerfile` and `READ_API_PORT` in `deploy-services.yml`, which switches the ingress to it. Terraform (`infra/modules/compute/main.tf`) creates the ingress on 80 for the placeholder image and ignores `target_port` after that.
 
 ## Tests
 - Processor and read-API integration tests **skip silently** without a database: set `POSTGRES_PASSWORD`, run `docker compose up -d db` from the repo root, set the `PG*` variables listed in `docker-compose.yml`, and run `pytest -q -rs tests` so skips show.

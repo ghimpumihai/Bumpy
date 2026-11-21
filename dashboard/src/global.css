@@ -109,7 +109,7 @@
     --highlight: oklch(0.95 0.06 95);
     --highlight-foreground: oklch(0.3 0.05 95);
     --background-hover: oklch(0.96 0 0);
-    /* Sequential map scale (green = good → red = bad); identical in both themes because the base map is light. */
+    /* Sequential map scale, purple (--scale-1) → orange (--scale-5); the same in both blocks (dark-only app, D52). */
     --scale-1: #9d4dff;
     --scale-2: #c13fd8;
     --scale-3: #ff2e93;

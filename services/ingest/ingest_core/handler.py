@@ -2,7 +2,7 @@
 
 Checks run in the same order as the mock server the app was tested against
 (src/mobile-ios/tools/mock_ingest_server.py):
-  1. x-device-key (401)
+  1. x-device-key (401), then the body as sent: present (400) and at most contract.MAX_BODY (413)
   2. Content-Type application/json (400)
   3. gunzip when the body starts with the gzip magic bytes, whatever Content-Encoding says: the
      Functions host may inflate the body and drop the header (plan §5). Size caps (413 too large,
@@ -12,10 +12,12 @@ Checks run in the same order as the mock server the app was tested against
      A probe that names its deviceId is checked against the key's binding first (403, step 6)
   6. the body's deviceId must be one the key may send as (403, not in the mock: keys.may_send_as)
   7. x-idempotency-key when present (400)
+  8. the session must belong to the body's deviceId (403, not in the mock: owners.py, D53); the first
+     message of a session that gets here records its owner
 Then the message goes to Event Hubs and the raw archive, and the answer is 200. The function can't
 tell a new batch from a retry; repeats are dropped in the database (plan §8), and the archive keeps
-the first copy (a repeat finds the blob already there). If Event Hubs or Blob Storage fails, the
-answer is 503 and the app retries the same batch later.
+the first copy (a repeat finds the blob already there). If Event Hubs or Blob Storage fails (the
+owner marker included), the answer is 503 and the app retries the same batch later.
 """
 
 from __future__ import annotations
@@ -29,6 +31,7 @@ from typing import AbstractSet, Mapping, Protocol
 from . import contract
 from .contract import Invalid, TooLarge
 from .keys import may_send_as
+from .owners import same_device
 
 log = logging.getLogger("ingest")
 
@@ -47,6 +50,10 @@ class Sinks(Protocol):
     def archive(self, blob_name: str, gz_body: bytes) -> bool:
         """Write one blob in the `lake` container unless it already exists. Returns False when it
         existed (a retry of the same message): the first copy is kept, never overwritten."""
+
+    def session_owner(self, session_id: str, device_id: str) -> str:
+        """The deviceId the session belongs to: the recorded one, or `device_id`, recorded now
+        (never overwritten) if the session has none yet. Raises when storage fails."""
 
 
 class KeyChecker(Protocol):
@@ -114,6 +121,21 @@ def _not_this_device(device_ids: AbstractSet[str], device_id: str, info: str,
                        "(Settings) with infra/scripts/add-device-key.ps1", info)
 
 
+def _not_the_owner(sinks: Sinks, session_id: str, device_id: str, info: str) -> Response | None:
+    """Step 8: 403 when the session belongs to another device (D53), so a valid key can't take
+    another phone's archive blobs first or add to its trip. Only a forged message gets here: the
+    app records a whole session under one deviceId, and a replay uses a new sessionId."""
+    try:
+        owner = sinks.session_owner(session_id, device_id)
+    except Exception:  # Blob Storage failed: a server problem, so the app retries
+        log.exception("could not check the session owner %s", info)
+        return _error(503, "could not check the session's device, try again later", info)
+    if same_device(owner, device_id):
+        return None
+    return _error(403, f"session {session_id} belongs to another device: deviceId {device_id!r} "
+                       "can't send batches or metadata for it", f"{info} owner={owner}")
+
+
 def _lower(headers: Mapping[str, str]) -> dict[str, str]:
     return {k.lower(): v for k, v in headers.items()}
 
@@ -151,6 +173,9 @@ def handle_batch(headers: Mapping[str, str], raw: bytes | None, keys: KeyChecker
     idem = headers.get("x-idempotency-key")
     if idem is not None and idem != f"{sid}:{seq}":
         return _error(400, f"x-idempotency-key {idem!r} != '{sid}:{seq}'", ids)
+    forbidden = _not_the_owner(sinks, sid, b["deviceId"], ids)
+    if forbidden:
+        return forbidden
 
     received = _now_iso(now or dt.datetime.now(dt.timezone.utc))
     properties = {"kind": "batch", "sessionId": sid, "deviceId": b["deviceId"],
@@ -189,6 +214,9 @@ def handle_session(path_id: str, headers: Mapping[str, str], raw: bytes | None, 
     if idem is not None and idem != f"{path_id}:meta-{phase}":
         return _error(400, f"x-idempotency-key {idem!r} != '{path_id}:meta-{phase}' "
                            f"(batchCount {'present' if phase == 'stop' else 'absent'})", ids)
+    forbidden = _not_the_owner(sinks, path_id, m["deviceId"], ids)
+    if forbidden:
+        return forbidden
 
     # Same partition as the device's batches, so the Stop copy reaches the processor after the
     # trip's last batch (D33).

@@ -40,10 +40,10 @@ def _tool(name: str):
 uploader, replay = _tool("upload"), _tool("replay")
 
 
-def _row(name, t_up, values):
+def _row(name, t_up, values, step_ms=0.0):
     cols = HEADERS[name].split(",")
     # Every stream's UTC comes from the same clock anchors (spec §5), which drift a little.
-    skew_ms = 0.4 * math.sin((t_up - START_UP) / 5)
+    skew_ms = 0.4 * math.sin((t_up - START_UP) / 5) + step_ms
     vals = {"t_up": f"{t_up:.6f}", "t_utc_ms": str(round(UTC0 + (t_up - START_UP) * 1000 + skew_ms)), **values}
     return ",".join(str(vals.get(c, "")) for c in cols)
 
@@ -75,6 +75,13 @@ def make_folder(root, *, sid=SID, seconds=SECONDS, ended=True):
             "h_acc": "4.7", "v_acc": "3", "speed": "12.000000", "speed_acc": "0.5", "course": "0.0",
             "course_acc": "5", "is_simulated": "0"}))
         rows["altimeter"].append(_row("altimeter", tu, {"rel_alt_m": "0.1", "pressure_kpa": "97.1"}))
+    # Streams no batch carries, with rows first in every window whose UTC is a few ms off (as after a
+    # clock step): the batch times must come from the streams tools/replay reads.
+    rows["mag_raw"] = [_row("mag_raw", START_UP - 0.4 + j / 50, {"x": "1", "y": "2", "z": "3"}, step_ms=3.0)
+                       for j in range(int((seconds + 0.4) * 50))]
+    rows["abs_altitude"] = [_row("abs_altitude", START_UP - 0.4 + s, {"altitude_m": "350", "accuracy_m": "5",
+                                                                       "precision_m": "1"}, step_ms=-4.0)
+                            for s in range(seconds)]
     # Folders from builds before D48 still hold audio files: the processor must ignore them.
     rows["audio_level"] = [_row("audio_level", START_UP + i / 10, {"avg_dbfs": "-40", "peak_dbfs": "-30"})
                            for i in range(seconds * 10)]
@@ -157,6 +164,7 @@ def test_the_folder_gives_the_same_signal_as_the_streamed_trip(folder, uploaded)
         [("pothole", None, None), ("sickness", "3", "a, b"), ("phone_moved", None, None)]
     assert "raterName" not in trip.meta["people"] and not trip.incomplete
     assert trip.streams["accelRaw"]["rows"] == SECONDS * 100 and "audioLevel" not in trip.streams
+    assert trip.streams["mag_raw"]["rows"] == round((SECONDS + 0.4) * 50) and trip.streams["abs_altitude"]["rows"] == SECONDS
 
 
 def _with_speeds(batches):
@@ -223,6 +231,22 @@ def test_unparseable_value_falls_back_to_the_forgiving_reader(folder):
     assert len(fast["t_up"]) == len(slow["t_up"]) == SECONDS * 100  # the torn line is dropped
     assert math.isnan(slow["g_z"][0]) and np.array_equal(fast["g_z"][1:], slow["g_z"][1:])
     assert np.isnan(fast["rr_z"][77])  # an empty field
+
+
+def test_a_torn_last_line_with_every_column_is_dropped(folder):
+    """After a crash the last line can be cut inside its last value (0.987654 written as 0.) and still
+    have every column; without its newline it can't be trusted (the app's CSVRepair drops it too)."""
+    data = (folder / "device_motion.csv").read_bytes()
+    whole = data[: data.rfind(b"\n") + 1]  # without make_folder's short torn line
+    last = whole.splitlines()[-1].decode().split(",")
+    torn = (",".join([f"{float(last[0]) + 0.01:.6f}", *last[1:-1], "0.987654"])[:-6]).encode()
+    assert torn.endswith(b",0.") and len(torn.split(b",")) == len(last)
+    fast = up.read_columns(whole + torn, up.MOTION_COLS + ("yaw",))
+    # An unparseable value sends the file through the forgiving reader.
+    slow = up.read_columns((whole + torn).replace(b",-1.000000,", b",abc,", 1), up.MOTION_COLS + ("yaw",))
+    assert len(fast["t_up"]) == len(slow["t_up"]) == SECONDS * 100
+    assert fast["t_up"][-1] == slow["t_up"][-1] == float(last[0])
+    assert len(up.read_columns(whole, up.MOTION_COLS)["t_up"]) == SECONDS * 100  # a clean end loses nothing
 
 
 def test_an_infinite_value_reads_as_zero_as_the_app_sends_it(tmp_path):
@@ -354,11 +378,15 @@ def test_uploaded_folder_wins_over_a_partly_streamed_trip(db, folder, uploaded, 
     assert (source, status, q["finalizedFrom"]) == ("live", "complete", "upload")
     assert _one(db, "SELECT count(*) FROM labels")[0] == 3
 
-    # The phone comes back and sends its backlog: the trip reopens, and its live message is
-    # finalized from the upload again, not from the shorter live archive.
+    # The phone comes back and sends its backlog: the trip reopens (live until it is quiet again,
+    # D54), and its live message is finalized from the upload again, not from the shorter live archive.
+    from roadride import ready
+
     with db.transaction():
         assert store.apply_batch(parse_batch(batches[10]), got) == "new"
-    assert _one(db, "SELECT status FROM sessions")[0] == "processing"
+    assert _one(db, "SELECT status FROM sessions")[0] == "live"
+    assert ready.close_idle(db, got + dt.timedelta(minutes=20)) == [SID]
+    db.commit()
     _write_archive(lake, batches[10:11])
     assert fz.handle(db, fz.DirArchive(lake), json.dumps({"sessionId": SID}).encode(), uploaded) == ("complete", SID)
     assert _one(db, "SELECT count(*) FROM session_series")[0] == full

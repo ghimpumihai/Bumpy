@@ -9,6 +9,7 @@ struct SettingsView: View {
     @State private var test: UploadQueue.ProbeResult?
     @State private var testing = false
     @State private var waitingTrips = 0
+    @State private var failedUploads = 0
 
     private var parsedURL: URL? { UploadConfig.parseBaseURL(baseURL) }
     private var urlEmpty: Bool { baseURL.trimmingCharacters(in: .whitespaces).isEmpty }
@@ -62,6 +63,26 @@ struct SettingsView: View {
                     statusText
                 }
                 .padding(.top, 4)
+
+                if failedUploads > 0 {
+                    // Parts the server rejected (other 4xx) wait in upload_failed/; once the backend is
+                    // fixed, this sends them again, oldest first.
+                    Button(action: retryFailed) {
+                        HStack {
+                            Text("Retry failed uploads (\(failedUploads))")
+                            Spacer()
+                            Image(systemName: "arrow.clockwise")
+                        }
+                        .font(Theme.font(15))
+                        .foregroundStyle(Theme.warn)
+                        .frame(minHeight: 52)
+                        .overlay(alignment: .bottom) { Rectangle().fill(Theme.line).frame(height: 1) }
+                        .contentShape(Rectangle())
+                    }
+                    .buttonStyle(.plain)
+                    .padding(.top, 8)
+                    .accessibilityIdentifier("retryFailedUploads")
+                }
             }
 
             Spacer(minLength: 0)
@@ -80,7 +101,8 @@ struct SettingsView: View {
             while !Task.isCancelled {
                 let queue = app.uploadQueue
                 // Directory listing: never on the main thread.
-                waitingTrips = await Task.detached(priority: .utility) { queue.waitingTripCount() }.value
+                let counts = await Task.detached(priority: .utility) { (queue.waitingTripCount(), queue.failedFiles().count) }.value
+                (waitingTrips, failedUploads) = counts
                 try? await Task.sleep(nanoseconds: 1_000_000_000)
             }
         }
@@ -143,6 +165,12 @@ struct SettingsView: View {
             test = await UploadQueue.testConnection(config: AppSettings.uploadConfig)
             testing = false
         }
+    }
+
+    private func retryFailed() {
+        let queue = app.uploadQueue
+        failedUploads = 0
+        Task.detached(priority: .userInitiated) { queue.requeueFailed() }
     }
 
     private func save() {

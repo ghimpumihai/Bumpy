@@ -54,10 +54,13 @@ def session_meta(batch):
 
 
 class FakeSinks:
-    def __init__(self, fail=False):
+    def __init__(self, fail=False, owner_fail=False):
         self.events = []
         self.blobs = {}
+        self.owners = {}  # sessionId -> deviceId, as the owners/session=<id>.json markers
+        self.owner_calls = 0
         self.fail = fail
+        self.owner_fail = owner_fail
 
     def publish(self, partition_key, body, properties):
         if self.fail:
@@ -71,6 +74,12 @@ class FakeSinks:
             return False
         self.blobs[blob_name] = gz_body
         return True
+
+    def session_owner(self, session_id, device_id):
+        self.owner_calls += 1
+        if self.fail or self.owner_fail:
+            raise RuntimeError("storage down")
+        return self.owners.setdefault(session_id, device_id)
 
 
 @pytest.fixture

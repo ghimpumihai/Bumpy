@@ -32,8 +32,6 @@
 	<string>Records vehicle motion to measure road quality and ride comfort.</string>
 	<key>NSLocationWhenInUseUsageDescription</key>
 	<string>Maps road quality along the route.</string>
-	<key>NSLocationAlwaysAndWhenInUseUsageDescription</key>
-	<string>Maps road quality along the route, and keeps recording if the app goes to the background.</string>
 	<key>NSLocationTemporaryUsageDescriptionDictionary</key>
 	<dict>
 		<key>RoadMapping</key>

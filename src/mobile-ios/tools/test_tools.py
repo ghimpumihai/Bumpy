@@ -740,6 +740,42 @@ class MockIngestServerTests(unittest.TestCase):
                 m["requestedRatesHz"]["audioLevel"] = 10
                 self.assertStatus(self.srv.put_meta(m), 201)
 
+    def test_huge_integer_is_400_not_a_dropped_connection(self):
+        # 10**400 doesn't fit a float; math.isfinite used to raise and the request got no answer.
+        for mutate in (lambda b: b["accelRaw"]["x"].__setitem__(0, 10**400),
+                       lambda b: b.update(t0Up=10**400), lambda b: b.update(batchSeq=10**400)):
+            b = make_batch()
+            mutate(b)
+            self.assertStatus(self.srv.ingest(b, idem=False), 400)
+        m = make_meta()
+        m["startUptimeSec"] = 10**400
+        self.assertStatus(self.srv.put_meta(m), 400)
+
+    def test_values_the_processor_cant_read_are_400(self):
+        for name, mutate in (
+                ("batchSeq 2^31", lambda b: b.update(batchSeq=2**31)),
+                ("t0Utc 9999", lambda b: b.update(t0Utc="9999-12-31T23:59:59.999Z")),
+                ("t0UtcMs 10^17", lambda b: b.update(t0UtcMs=10**17)),
+                ("location tUtcMs 10^17", lambda b: b["location"][0].update(tUtcMs=10**17)),
+                ("label t 1e300", lambda b: b["labels"][0].update(t=1e300))):
+            with self.subTest(name):
+                b = make_batch()
+                mutate(b)
+                self.assertStatus(self.srv.ingest(b, idem=False), 400)
+        b = make_batch(seq=2**31 - 1)
+        b["t0UtcMs"] = 1763716532120
+        self.assertStatus(self.srv.ingest(b), 201)
+        for k, v in (("startedAtUtc", "yesterday"), ("startedAtUtc", "9999-12-31T23:59:59.999Z")):
+            with self.subTest(k=k, v=v):
+                m = make_meta()
+                m[k] = v
+                self.assertStatus(self.srv.put_meta(m), 400)
+        m = make_meta(batch_count=2**31)
+        self.assertStatus(self.srv.put_meta(m), 400)
+        m = make_meta(batch_count=2**31 - 1)
+        m["endedAtUtc"] = "not a time"
+        self.assertStatus(self.srv.put_meta(m), 400)
+
     def test_empty_batch_is_201(self):
         self.assertStatus(self.srv.ingest(make_batch(n=0)), 201)
 

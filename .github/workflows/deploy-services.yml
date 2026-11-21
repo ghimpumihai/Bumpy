@@ -52,9 +52,9 @@ jobs:
     runs-on: ubuntu-latest
     environment: prod
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
 
-      - uses: azure/login@v2
+      - uses: azure/login@7184910d9eb2b1c5e48f7073824a90609bb9b6d6 # v2.3.1
         with:
           client-id: ${{ vars.AZURE_CLIENT_ID_DEPLOY }}
           tenant-id: ${{ vars.AZURE_TENANT_ID }}
@@ -85,7 +85,7 @@ jobs:
           az containerapp job update -n "$MIGRATE_JOB" -g "$RG" --image "$IMAGE" --output none
           execution=$(az containerapp job start -n "$MIGRATE_JOB" -g "$RG" --query name -o tsv)
           echo "execution: $execution"
-          for i in $(seq 1 60); do
+          for _ in $(seq 1 60); do
             status=$(az containerapp job execution show -n "$MIGRATE_JOB" -g "$RG" \
               --job-execution-name "$execution" --query properties.status -o tsv)
             echo "status: $status"

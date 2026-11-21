@@ -135,17 +135,6 @@ final class MetadataCompatibilityTests: XCTestCase {
     }
 }
 
-// MARK: - Labels: free text stays on one line
-
-final class LabelSanitizeTests: XCTestCase {
-    func testNewlinesAreFlattened() {
-        XCTAssertEqual(RecordingSession.sanitize("tram\ncrossing\r\nrough\r"), "tram crossing rough")
-        XCTAssertNil(RecordingSession.sanitize("  \n "))
-        XCTAssertNil(RecordingSession.sanitize(nil))
-        XCTAssertEqual(RecordingSession.sanitize("a, \"b\""), "a, \"b\"", "commas/quotes are handled by CSV escaping")
-    }
-}
-
 // MARK: - Upload: poison batch, retry logging, http safety, connectivity probe
 
 final class UploadRobustnessTests: XCTestCase {
@@ -268,9 +257,8 @@ final class UploadRobustnessTests: XCTestCase {
 
 @MainActor
 final class FakeAlerter: Alerter {
-    var problems = 0, labels = 0, stops = 0
+    var problems = 0, stops = 0
     func prepare() {}
-    func labelConfirmed() { labels += 1 }
     func newProblem() { problems += 1 }
     func stopped() { stops += 1 }
 }

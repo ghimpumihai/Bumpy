@@ -172,20 +172,39 @@ class TripSignal:
     last_batch_seq: int | None = None
 
 
+def fixes_by_window(batches: list[BatchFacts]) -> list[list[tuple[float, float | None]]]:
+    """Each batch's GPS fixes as (uptime s, speed), moved to the batch whose window holds the fix's
+    time. The app drains fixes by arrival, so a fix that arrives after its window was sent rides in
+    the next batch; fed there, the pipeline would take it at that batch's first sample instead of at
+    its own time. Uploads (cut by t_up) already put every fix in its own window, so moving them makes
+    a trip finalized from the live archive equal the same trip finalized from an upload. A fix
+    before the first window stays in the first batch. The live path can't go back: there a late fix
+    is approximate."""
+    starts = np.array([f.t0_utc.timestamp() - f.clock_offset for f in batches])
+    out: list[list[tuple[float, float | None]]] = [[] for _ in batches]
+    for f in batches:
+        for x in f.fixes:
+            t = x.t.timestamp() - f.clock_offset
+            k = max(0, int(np.searchsorted(starts, t, side="right")) - 1)
+            out[k].append((t, x.speed_ms))
+    return out
+
+
 def run_pipeline(batches: list[BatchFacts]) -> TripSignal:
     """The stream processor's per-batch steps (store.Store._process_signal), without the database:
     the same pipeline, batch by batch, reset at a missing batch, results moved to UTC with each
-    batch's own clock offset. A cleanly streamed trip gives the live numbers again."""
+    batch's own clock offset. A cleanly streamed trip gives the live numbers again, except where a
+    GPS fix arrived after its batch was sent (`fixes_by_window`)."""
     pipe = Pipeline()
     out = TripSignal()
     prev = None
-    for f in batches:
+    for f, fixes in zip(batches, fixes_by_window(batches)):
         off = f.clock_offset
         res = pipe.feed(
             np.asarray(f.motion_t, dtype=float),
             np.asarray(f.motion_ua, dtype=float).reshape(-1, 3),
             np.asarray(f.motion_g, dtype=float).reshape(-1, 3),
-            [(x.t.timestamp() - off, x.speed_ms) for x in f.fixes],
+            fixes,
             reset=prev is not None and f.batch_seq != prev + 1,
             rr=np.asarray(f.motion_rr, dtype=float).reshape(-1, 3),
         )

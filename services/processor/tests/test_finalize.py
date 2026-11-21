@@ -341,7 +341,8 @@ def test_finalize_reproduces_a_clean_live_trip_and_aggregates_it(db, batch, sess
         assert store.apply_batch(parse_batch(late), dt.datetime.fromtimestamp(T0 + 70, dt.timezone.utc)) == "new"
     assert store.ended == [sid]
     assert _one(db, "SELECT status, ready_sent_at FROM sessions") == ("processing", None)
-    assert _one(db, "SELECT count(*) FROM session_series")[0] == counts[0]  # untouched until finalize
+    # The live path goes on on top of the finalized rows (D54); the next finalize replaces them all.
+    assert _one(db, "SELECT count(*) FROM session_series")[0] > counts[0]
     finalized_msdv = _one(db, "SELECT msdv_z FROM sessions")[0]
     later = motion_batch(batch, sid, 31, T0 + 62, _vert(T0 + 999))
     later["deviceId"] = session_meta["deviceId"]
@@ -419,6 +420,103 @@ def test_stop_copy_after_the_idle_close_reopens_the_trip(db, batch, session_meta
     with db.transaction():  # a retried Stop copy doesn't reopen it again
         db.execute("UPDATE sessions SET status = 'complete'")
         store.apply_session(parse_session(stop))
+    assert _one(db, "SELECT status FROM sessions")[0] == "complete"
+
+
+@requires_db
+def test_a_trip_that_streams_on_after_the_idle_close_is_finalized_once(db, batch, session_meta, tmp_path):
+    """A bus reconnects after 15 silent minutes and streams on. The trip goes back to live (the live
+    view and the signal processing go on) and is sent once more after it has gone quiet again, not
+    once per batch (D54)."""
+    import datetime as dt
+
+    import psycopg
+
+    from roadride import ready
+    from roadride.store import Store
+
+    def read(sql):
+        row = _one(db, sql)
+        db.commit()  # end the read: the store's next transaction must commit, not be a savepoint
+        return row
+
+    sid = "resumed"
+    msg = json.dumps({"sessionId": sid}).encode()
+    batches, (start, _) = _trip(batch, session_meta, sid, n=13)
+    _stream(db, batches[:3], [start])
+    t = dt.datetime.fromtimestamp(T0, dt.timezone.utc) + dt.timedelta(minutes=20)
+    sent = []
+    with psycopg.connect(dbname=db.info.dbname, autocommit=True) as conn:
+        assert ready.sweep(conn, sent.append, t) == [sid]  # closed as silent
+        _write_archive(tmp_path, sid, batches[:3], [start])
+        assert fz.handle(db, fz.DirArchive(tmp_path), msg) == ("complete", sid)
+        assert read("SELECT status FROM sessions")[0] == "complete"
+
+        store = Store(db)
+        for k, b in enumerate(batches[3:]):
+            received = t + dt.timedelta(seconds=2 * k)
+            with db.transaction():
+                assert store.apply_batch(parse_batch(b), received) == "new"
+            assert ready.sweep(conn, sent.append, received) == []  # each commit kicks a sweep
+            assert read("SELECT status, ready_sent_at FROM sessions") == ("live", None)
+            assert read("SELECT session_id, received_at FROM live_state") == (sid, received)
+            if k == 5:  # a redelivered copy of the first message: nothing to do while it is live
+                assert fz.handle(db, fz.DirArchive(tmp_path), msg) == ("complete", sid)
+                assert read("SELECT status FROM sessions")[0] == "live"
+        assert len(sent) == 1
+        assert read("SELECT last_batch_seq, gaps FROM signal_state") == (12, 0)
+
+        assert ready.sweep(conn, sent.append, received + dt.timedelta(minutes=16)) == [sid]
+        assert ready.sweep(conn, sent.append, received + dt.timedelta(minutes=17)) == []
+    assert len(sent) == 2
+    _write_archive(tmp_path, sid, batches, [start])
+    assert fz.finalize_session(db, fz.DirArchive(tmp_path), sid)["batches"] == 13
+    assert _one(db, "SELECT status FROM sessions")[0] == "complete"
+
+
+@requires_db
+@pytest.mark.parametrize("arrives, then", [("batch", "live"), ("stop", "processing")])
+def test_data_that_arrives_while_finalize_runs_is_not_overwritten(db, batch, session_meta, tmp_path,
+                                                                  monkeypatch, arrives, then):
+    """The stream processor commits a batch (or the Stop copy) for the trip while finalize is running,
+    after it read the archive: finalize must not mark the trip complete without it."""
+    import datetime as dt
+
+    import psycopg
+
+    from roadride.store import Store
+
+    sid = "racing"
+    batches, (start, stop) = _trip(batch, session_meta, sid, n=6)
+    stop = dict(stop, batchCount=5)
+    _stream(db, batches[:5], [start])
+    db.execute("UPDATE sessions SET status = 'processing', ready_sent_at = now()")  # closed, message sent
+    db.commit()
+    _write_archive(tmp_path, sid, batches[:5], [start])
+    received = dt.datetime.fromtimestamp(T0 + 60, dt.timezone.utc)
+    write_parquet = fz.write_parquet
+
+    def racing(*args):
+        with psycopg.connect(dbname=db.info.dbname) as other, other.transaction():
+            s = Store(other)
+            if arrives == "batch":
+                assert s.apply_batch(parse_batch(batches[5]), received) == "new"
+            else:
+                s.apply_session(parse_session(stop))
+        return write_parquet(*args)
+
+    monkeypatch.setattr(fz, "write_parquet", racing)
+    assert fz.handle(db, fz.DirArchive(tmp_path), json.dumps({"sessionId": sid}).encode()) == ("complete", sid)
+    assert _one(db, "SELECT status, ready_sent_at, finalized_at FROM sessions") == (then, None, None)
+    assert _one(db, "SELECT last_batch_seq FROM signal_state")[0] == (5 if arrives == "batch" else 4)
+    monkeypatch.undo()
+
+    # Once it ends again, the next finalize has everything.
+    db.execute("UPDATE sessions SET status = 'processing'")
+    db.commit()
+    _write_archive(tmp_path, sid, batches[: 6 if arrives == "batch" else 5], [start, stop])
+    summary = fz.finalize_session(db, fz.DirArchive(tmp_path), sid)
+    assert summary["batches"] == (6 if arrives == "batch" else 5)
     assert _one(db, "SELECT status FROM sessions")[0] == "complete"
 
 
@@ -532,7 +630,8 @@ def test_backlog_batches_already_finalized_are_not_counted_twice(db, batch, sess
     assert _one(db, "SELECT msdv_z, (SELECT count(*) FROM session_series) FROM sessions") == (msdv, series)
     assert _one(db, "SELECT count(*) FROM events")[0] == events
     assert _one(db, "SELECT last_batch_seq FROM signal_state")[0] == 19
-    assert _one(db, "SELECT status, ready_sent_at FROM sessions") == ("processing", None)  # finalized again
+    # Back to live, so it is finalized again once it has gone quiet (D54).
+    assert _one(db, "SELECT status, ready_sent_at FROM sessions") == ("live", None)
 
 
 # --- Trip distance and GPS quality -------------------------------------------------------------

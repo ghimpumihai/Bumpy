@@ -36,7 +36,7 @@ from dataclasses import dataclass, field, replace
 from typing import Protocol
 
 import numpy as np
-from psycopg import Connection
+from psycopg import Connection, Rollback
 from psycopg.types.json import Jsonb
 
 from . import aggregate, clock, quality, upload
@@ -541,7 +541,16 @@ def _vehicle_type(conn: Connection, trip: Trip, session_id: str) -> str | None:
 
 def finalize_session(conn: Connection, archive: Archive, session_id: str,
                      uploads: upload.Uploads | None = None, *, require_upload: bool = False) -> dict | None:
-    """Finalizes one trip; returns a short summary, or None if there's nothing to finalize it from."""
+    """Finalizes one trip; returns a short summary, {"superseded": reason} when the trip got new data
+    after the message (it is finalized again once it ends), or None if there's nothing to finalize it from."""
+    with conn.transaction():
+        row = conn.execute("SELECT status, received_batches, expected_batch_count FROM sessions "
+                           "WHERE session_id = %s", (session_id,)).fetchone()
+    status0, *seen = row if row else (None, 0, None)
+    if status0 == "live" and not require_upload:
+        # Reopened since ready.py sent this message (store.Store._reopen): it is sent again once it ends.
+        log.info("not finalizing %s: it is live again", session_id)
+        return {"superseded": "live"}
     trip = pick_trip(archive, uploads, session_id, require_upload=require_upload)
     if not trip.batches:
         return None
@@ -571,6 +580,7 @@ def finalize_session(conn: Connection, archive: Archive, session_id: str,
         log.exception("Parquet output of %s failed; finalizing without it", session_id)
         parquet, parquet_error = [], f"{type(e).__name__}: {e}"[:500]
     store = Store(conn)
+    superseded = False
     with conn.transaction():
         first = trip.batches[0]
         store._touch_device(first.device_id)
@@ -580,6 +590,14 @@ def finalize_session(conn: Connection, archive: Archive, session_id: str,
             "ON CONFLICT (session_id) DO NOTHING",
             (session_id, first.device_id, trip.source or first.source, first.t0_utc),
         )
+        # A batch or the Stop copy that came while this ran reopened the trip (back to `live`) and isn't
+        # in `trip`: marking it complete now would drop that data and the reopen. Locked before any
+        # other row of the trip, in the stream processor's order, and held until the commit.
+        now = conn.execute("SELECT received_batches, expected_batch_count FROM sessions "
+                           "WHERE session_id = %s FOR UPDATE", (session_id,)).fetchone()
+        if list(now) != seen:
+            superseded = True
+            raise Rollback
         for m in trip.meta:  # in case a copy never reached the stream processor
             store.apply_session(parse_session(m))
         if trip.origin == "upload":
@@ -678,6 +696,9 @@ def finalize_session(conn: Connection, archive: Archive, session_id: str,
         )
         store._refresh_exclusions(session_id)
 
+    if superseded:
+        log.info("not finalizing %s: it got new data while this ran; it is sent again once it ends", session_id)
+        return {"superseded": "new data"}
     summary = {"batches": len(trip.batches), "series": len(sig.series), "events": len(events),
                "passes": len(passes), "msdv": round(sig.msdv, 4),
                "msdv_y": round(sig.msdv_y, 4), "quality": status, "from": trip.origin}
@@ -734,6 +755,8 @@ def handle(conn: Connection, archive: Archive, body: bytes,
         if summary is None:
             park(conn, sid)
             return "dead_letter", f"no raw archive for session {sid}"
+    if "superseded" in summary:
+        return "complete", sid
     aggregate.rebuild(conn)
     return "complete", sid
 

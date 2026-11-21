@@ -354,11 +354,15 @@ def test_uploaded_folder_wins_over_a_partly_streamed_trip(db, folder, uploaded, 
     assert (source, status, q["finalizedFrom"]) == ("live", "complete", "upload")
     assert _one(db, "SELECT count(*) FROM labels")[0] == 3
 
-    # The phone comes back and sends its backlog: the trip reopens, and its live message is
-    # finalized from the upload again, not from the shorter live archive.
+    # The phone comes back and sends its backlog: the trip reopens (live until it is quiet again,
+    # D54), and its live message is finalized from the upload again, not from the shorter live archive.
+    from roadride import ready
+
     with db.transaction():
         assert store.apply_batch(parse_batch(batches[10]), got) == "new"
-    assert _one(db, "SELECT status FROM sessions")[0] == "processing"
+    assert _one(db, "SELECT status FROM sessions")[0] == "live"
+    assert ready.close_idle(db, got + dt.timedelta(minutes=20)) == [SID]
+    db.commit()
     _write_archive(lake, batches[10:11])
     assert fz.handle(db, fz.DirArchive(lake), json.dumps({"sessionId": SID}).encode(), uploaded) == ("complete", SID)
     assert _one(db, "SELECT count(*) FROM session_series")[0] == full

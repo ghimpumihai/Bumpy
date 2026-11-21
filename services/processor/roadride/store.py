@@ -113,14 +113,15 @@ class Store:
 
     def _reopen(self, session_id: str) -> None:
         """A trip that already ended (or was finalized) got new data: a batch from the phone's backlog
-        after the 15-minute close, or its Stop copy. Back to `processing` with no message sent, so
-        ready.py sends "session ready" again and the finalize job rebuilds it from the archive."""
+        after the 15-minute close, or its Stop copy. Back to `live` with no message sent, so it ends
+        again by the same rules (every batch in, or 15 silent minutes) once its data has settled, and
+        ready.py then sends "session ready" once (D54). Back to `processing` instead, a phone that
+        streams on after the close started a finalize for every batch."""
         self.conn.execute(
-            "UPDATE sessions SET status = 'processing', ready_sent_at = NULL, updated_at = now() "
+            "UPDATE sessions SET status = 'live', ready_sent_at = NULL, updated_at = now() "
             "WHERE session_id = %s AND status <> 'live'",
             (session_id,),
         )
-        self.ended.append(session_id)
 
     def _refresh_exclusions(self, session_id: str) -> None:
         row = self.conn.execute(
@@ -221,11 +222,7 @@ class Store:
 
         if f.labels:
             self._optional("labels", f.session_id, lambda: self._insert_labels(f))
-        if status == "complete":
-            # Already finalized (e.g. closed after 15 silent minutes, then the phone's backlog came):
-            # the trip was reopened above, and the finalize job recomputes it whole from the archive.
-            pass
-        elif not late:
+        if not late:
             # Late batches skip the signal processing: the filters have moved past them. The
             # finalize job recomputes the whole trip in one pass.
             ok, result = self._optional("signal", f.session_id, lambda: self._process_signal(f))

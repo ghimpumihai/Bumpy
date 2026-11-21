@@ -14,7 +14,8 @@ The dashboard's only backend (plan §5, contract in [`dashboard/API.md`](../../d
 | `/api/sessions/{id}/labels` | The trip's labels. |
 | `/api/events` | Events of **aggregated** (finalized) trips only. |
 | `/api/overview` | Session counts, distance of aggregated trips, segment and pothole counts and the latest aggregation fit (`aggregation_fit`). |
-| `/api/segments`, `/api/segments/{h3}` | `segments` + `segment_agg` (+ `segment_sickness`, `segment_observations`) from the aggregate job. Every pass is served, including ones flagged `in_privacy_zone` before D40. `/api/segments/{h3}` answers 404 for a cell without observations and 400 for anything else. |
+| `/api/segments`, `/api/segments/{h3}` | `segments` + `segment_agg` (+ `segment_sickness`, `segment_observations`) from the aggregate job. Every pass is served, including ones flagged `in_privacy_zone` before D40. `/api/segments/{h3}` answers 404 for a cell without observations and 400 for anything else; `byVehicle` lists only the map filters (`all`, `car`, `bus`, `tram`). |
+| `/api/heat` | One `MultiLineString` per aggregated trip (`include_in_agg`) from its accurate `track_points`, cut where the GPS went quiet for over 10 s or jumped over ~200 m, simplified in PostGIS to within ~2 m (`ST_Simplify`). |
 
 Errors are always `{"error": "..."}`, with the CORS headers like any other answer (a 500 without them looks like a network error to the browser): 404 for an unknown session, segment or route, 400 for a bad query parameter (same allowed values as the mock), 503 when no database connection is free in time or a statement hits its timeout, 500 for anything else (logged with its stack trace). Times are `2026-11-21T09:12:03.512Z`; epoch milliseconds are integers.
 
@@ -28,7 +29,9 @@ Positions are served whole: no start or end zone is hidden, on any route. The on
 
 ## Performance
 
-Every route runs a fixed number of queries, whatever the number of trips. `/api/live` reads only the last 2 minutes of each live track. Track length (until a trip is finalized and has `sessions.distance_m`), GPS accuracy and live stream quality read a whole trip, so they are cached per trip until its `sessions.updated_at` or `status` changes (the processor bumps `updated_at` with every batch and session message; a job that rewrites a trip's track or batches must do the same).
+No route runs a query per trip. `/api/live` reads only the last 2 minutes of each live track. Track length (until a trip is finalized and has `sessions.distance_m`), GPS accuracy, live stream quality and the heat map lines read a whole trip, so they are cached per trip until its `sessions.updated_at` or `status` changes (the processor bumps `updated_at` with every batch and session message; a job that rewrites a trip's track or batches must do the same). On a cold cache they are computed 25 trips per statement (`STATS_CHUNK`), each chunk cached as soon as it is done, so no statement grows with the number of trips and a timeout part-way loses nothing. The heat lines are built as GeoJSON text in PostGIS, so fixes never become Python objects.
+
+`people.raterPosture` (and the posture in `sicknessBySeat`) is `seated` unless the stored value is one of the app's `seated` / `standing`.
 
 | Env var | Default | |
 |---|---|---|

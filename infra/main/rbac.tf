@@ -13,7 +13,6 @@ locals {
     # the management API, which needs the Manage right. Scoped to the one queue.
     worker_queue         = { scope = module.messaging.queue_id, role = "Azure Service Bus Data Owner", principal = local.id["worker"].principal_id }
     worker_sessions_read = { scope = module.storage.sessions_container_id, role = "Storage Blob Data Reader", principal = local.id["worker"].principal_id }
-    # Contributor, not Reader: finalize writes each trip's Parquet files to processed/ (D38).
     worker_lake_write    = { scope = module.storage.lake_container_id, role = "Storage Blob Data Contributor", principal = local.id["worker"].principal_id }
   }
 

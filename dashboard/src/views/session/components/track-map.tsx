@@ -1,4 +1,5 @@
 import { sessionsApi } from "@/api/sessions";
+import { MAP_STYLE_DARK_URL } from "@/constants/map";
 import { ErrorAlert } from "@/components/error-alert";
 import { EventsLayer, eventsCircleLayerId } from "@/components/map/events-layer";
 import { GeoJsonLayer, type SourceLayer } from "@/components/map/geojson-layer";
@@ -42,7 +43,7 @@ export function TrackMap({ session }: TrackMapProps) {
   ];
   return (
     <div className="relative h-96 overflow-hidden rounded-lg border">
-      <MapCanvas ariaLabel="Map of this trip coloured by speed, with detected events" className="absolute inset-0" bounds={bounds} boundsKey={bounds ? session.sessionId : undefined}>
+      <MapCanvas styleUrl={MAP_STYLE_DARK_URL} ariaLabel="Map of this trip coloured by speed, with detected events" className="absolute inset-0" bounds={bounds} boundsKey={bounds ? session.sessionId : undefined}>
         {track.data && (
           <GeoJsonLayer id={TRACK_SOURCE_ID} data={trackPieces(track.data)} layers={layers} beforeId={eventsCircleLayerId(TRACK_EVENTS_SOURCE_ID)} />
         )}

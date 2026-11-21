@@ -51,13 +51,16 @@ export const ROUGHNESS_PERCENTILE_BANDS: ScaleBand[] = [
   { min: 0.8, max: null, label: "Roughest 20 %", colorVar: "--scale-5" },
 ];
 
-/** Predicted motion sickness incidence after one hour of this motion (MSDV / 3, ISO 2631-1). */
+/**
+ * Predicted motion sickness incidence after one hour of this motion: MSDV / 3, ISO 2631-1's rule for
+ * vertical motion, applied to the vertical + sideways dose (D49). A share after an hour, not a rate.
+ */
 export const SICKNESS_BANDS: ScaleBand[] = [
-  { min: 0, max: 2, label: "< 2 % may vomit / h", colorVar: "--scale-1" },
+  { min: 0, max: 2, label: "< 2 % may vomit after 1 h", colorVar: "--scale-1" },
   { min: 2, max: 5, label: "2–5 %", colorVar: "--scale-2" },
   { min: 5, max: 10, label: "5–10 %", colorVar: "--scale-3" },
   { min: 10, max: 20, label: "10–20 %", colorVar: "--scale-4" },
-  { min: 20, max: null, label: "> 20 % may vomit / h", colorVar: "--scale-5" },
+  { min: 20, max: null, label: "> 20 % may vomit after 1 h", colorVar: "--scale-5" },
 ];
 
 export const METRIC_LABELS: Record<MapMetric, string> = {

@@ -95,7 +95,12 @@ jobs:
           APP: ${{ vars.INGEST_FUNCTION_APP }}
           RG: ${{ vars.RESOURCE_GROUP }}
         run: |
-          host=$(az functionapp show -n "$APP" -g "$RG" --query defaultHostName -o tsv)
+          # Flex Consumption apps report the host under properties (the top-level field is empty).
+          host=$(az functionapp show -n "$APP" -g "$RG" --query "properties.defaultHostName || defaultHostName || properties.hostNames[0] || hostNames[0]" -o tsv)
+          if [ -z "$host" ]; then
+            echo "::error::Could not read the default host name of $APP"; exit 1
+          fi
+          echo "ingest host: $host"
           probe="$RUNNER_TEMP/probe.json.gz"
           printf '{"probe":true}' | gzip -c > "$probe"
           check() { # method, path

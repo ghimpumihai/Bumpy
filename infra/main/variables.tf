@@ -2,6 +2,10 @@ variable "project" {
   description = "Must match the bootstrap's project (the resource group is rg-<project>)."
   type        = string
   default     = "roadride"
+  validation {
+    condition     = can(regex("^[a-z0-9]{3,10}$", var.project))
+    error_message = "project must be 3-10 lowercase letters or digits (it ends up in storage account names)."
+  }
 }
 
 variable "location" {

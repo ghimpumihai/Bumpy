@@ -30,12 +30,12 @@ The dashboard reads only the read API. Its contract is [API.md](API.md), with ty
 
 ## Maps and charts
 - `MapCanvas` exposes the map after `style.load` (not `load`, so data doesn't wait for tiles) and falls back to a plain style when offline.
-- Add data only with `GeoJsonLayer`, never `map.addLayer` in views. It creates its source and layers once per style and applies later changes in place (`setPaintProperty`/`setLayoutProperty`/`setFilter`). Segments and tracks go below the event dots (`beforeId`).
+- Add data only with `GeoJsonLayer` (the heat map's image: `HeatCanvasLayer`, a canvas source), never `map.addLayer` in views. It creates its source and layers once per style and applies later changes in place (`setPaintProperty`/`setLayoutProperty`/`setFilter`). Segments and tracks go below the event dots (`beforeId`).
 - Map and chart colours come from CSS tokens via `useThemeColors`, re-read when `<html>`'s class changes, never from theme state.
 - Charts in one view share a uPlot `syncKey`.
 
 ## Conventions
-- Colours only from the semantic tokens in `src/global.css` (incl. `scale-1…5`, `event-*`, `chart-1…5`), never raw palette classes. Inline `style` only for runtime geometry or runtime CSS-variable colours.
+- Colours only from the semantic tokens in `src/global.css` (incl. `scale-1…5`, `event-*`, `heat*`, `chart-1…5`), never raw palette classes. Inline `style` only for runtime geometry or runtime CSS-variable colours.
 - Dates via `@/utils/format-date-time`, numbers and units via `@/utils/format-number`, physical constants in `constants/units.ts`.
 - Constants sit next to where they're used; move one to `constants/` once it's shared.
 - Closed sets are const objects + `typeof` types, not `enum`s. File and folder names kebab-case, except `routes/` and `components/ui/`.
@@ -43,5 +43,5 @@ The dashboard reads only the read API. Its contract is [API.md](API.md), with ty
 
 ## Done means
 - `npm run check` and `npm run build` pass. Run `npm run test:e2e` (slow: every route, console errors, axe on each page in the dark theme) before merging to `main`, not on every change.
-- `e2e/real-api.spec.ts` (project `real-api`, only with `REAL_API_PYTHON` set) runs the dashboard against `services/read-api` on a PostGIS database whose name contains `e2e`, seeded through the processor's write path (`e2e/real-api/seed.py`). CI (`dashboard-ci.yml`) runs both suites on PRs, so they run before merging without anyone running them locally.
+- `e2e/real-api.spec.ts` (project `real-api`, only with `REAL_API_PYTHON` set) runs the dashboard against `services/read-api` on a PostGIS database whose name contains `e2e`, seeded through the processor's write path (`e2e/real-api/seed.py`). CI (`dashboard-ci.yml`) runs both suites on PRs and pushes to `staging`/`main` that touch `dashboard/`, `services/read-api/`, the processor or `db/`, so they run before merging without anyone running them locally.
 - Don't write new tests for views or UI; keep the existing mock-backend tests passing (they pin the plan's rules).

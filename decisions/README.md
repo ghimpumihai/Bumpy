@@ -10,7 +10,7 @@ Plans and the decision log for the Codelap 2026 project: road quality and motion
 
 ## Implementation status
 
-The plan in 02 is being built in its day-1/day-2 order. What's done, deployed and still open is kept in the [root README](../README.md#status-2026-11-21). Where the code differs from the plan (e.g. the read API on port 8000, the Static Web App in East US 2, Service Bus Data Owner for the KEDA scaler), the differences are listed in each part's README: [infra](../infra/README.md#where-this-differs-from-the-plan), [ingest](../services/ingest/README.md#differences-from-the-mock-and-the-plan), [processor](../services/processor/README.md).
+The plan in 02 is being built in its day-1/day-2 order. What's done, deployed and still open is kept in the [root README](../README.md#status-2026-11-22). Where the code differs from the plan (e.g. the read API on port 8000, the Static Web App in East US 2, Service Bus Data Owner for the KEDA scaler), the differences are listed in each part's README: [infra](../infra/README.md#where-this-differs-from-the-plan), [ingest](../services/ingest/README.md#differences-from-the-mock-and-the-plan), [processor](../services/processor/README.md).
 
 ## Decision log
 

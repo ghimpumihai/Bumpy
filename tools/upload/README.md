@@ -6,7 +6,7 @@ Python 3 standard library only. It logs in with your Azure CLI login, so no keys
 
 ## Use
 
-1. Export the session from the app (Sessions → the trip → Export), or copy its folder from the Files app.
+1. Copy the session folder off the phone (Files app or Finder over USB: the app has no export button since D51), or use a `.zip` of it.
 2. Log in and upload:
 
 ```sh
@@ -14,21 +14,23 @@ az login
 python3 tools/upload/upload.py <session folder or .zip> --account <storage_account_name>
 ```
 
-`storage_account_name` is a Terraform output (`./infra/tf.ps1 output`, in `pwsh` on macOS or in Windows PowerShell). On Windows the command is `python` instead of `python3`. Your login needs **Storage Blob Data Contributor** on the `sessions` container. Terraform gives that to everyone in `admin_object_ids`. You can also pass `--endpoint https://<account>.blob.core.windows.net`, or put a token in `UPLOAD_ACCESS_TOKEN` instead of using `az`.
+`storage_account_name` is a Terraform output (`./infra/tf.ps1 output`, in `pwsh` on macOS or in Windows PowerShell). On Windows the command is `python` instead of `python3`. Your login needs **Storage Blob Data Contributor** on the `sessions` container. Terraform gives that to everyone in `admin_object_ids`. Instead of `--account` you can set `UPLOAD_STORAGE_ACCOUNT` or pass `--endpoint https://<account>.blob.core.windows.net`; `--container` defaults to `sessions`. A token in `UPLOAD_ACCESS_TOKEN` is used instead of `az`.
 
 `--dry-run out/` writes what would be uploaded to `out/<sessionId>/` and sends nothing. Point the finalize job's `UPLOAD_DIR` at `out/` to run it locally.
 
 ## What happens
 
-1. Every file at the top of the folder goes to `sessions/<sessionId>/`, with retries. Files over 8 MB go in blocks.
+1. Every file at the top of the folder goes to `sessions/<sessionId>/`. Network errors, `408`, `429`, `500`, `502`, `503` and `504` are retried (6 tries, waiting 1, 2, 4, 8 and 16 s); `401`/`403` stop with a hint about the role. Files over 8 MB go in blocks.
 2. `_complete.json` is written **last**. Event Grid only reacts to that name, so the trip is processed once every file is there.
 3. The finalize job checks every file against the manifest, rebuilds the trip's 2-second batches from the CSVs (the same windows the phone and `tools/replay` use), and runs the same pipeline as for a streamed trip. It writes Parquet to `lake/processed/session=<id>/`, replaces the trip's results and rebuilds the map.
 
 If part of the trip did stream, the uploaded folder wins: the job replaces the live results, keeps `source = live`, and nothing is counted twice. Backlog batches that arrive from the phone later reopen the trip, and it is finalized from the upload again. Running the tool again overwrites the same blobs and finalizes the trip again.
 
-**Not uploaded:** raw audio (`*.m4a`, it never leaves the laptop) and the mount photo (`mount.jpg`, nothing in the cloud uses it). `session.json` is sent without `people.raterName`, as in the app's own cloud copy (spec §6.2).
+**Not uploaded:** raw audio from older app builds (`*.m4a`, it never leaves the laptop), the mount photo (`mount.jpg`, nothing in the cloud uses it) and hidden files. `session.json` is sent without `people.raterName`, as in the app's own cloud copy (spec §6.2).
 
 If the job can't use an upload, it dead-letters the message with the reason: a file missing or changed since the manifest was written, or a `session.json` for another trip. Run the upload again.
+
+Exit code: `0` when done, `1` on an error (with its reason), `130` after Ctrl+C (`_complete.json` not written, so nothing is processed), `2` for bad options.
 
 ## `_complete.json`
 

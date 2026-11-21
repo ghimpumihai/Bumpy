@@ -40,9 +40,9 @@ jobs:
     runs-on: ubuntu-latest
     environment: prod
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
 
-      - uses: azure/login@v2
+      - uses: azure/login@7184910d9eb2b1c5e48f7073824a90609bb9b6d6 # v2.3.1
         with:
           client-id: ${{ vars.AZURE_CLIENT_ID_DEPLOY }}
           tenant-id: ${{ vars.AZURE_TENANT_ID }}
@@ -80,17 +80,20 @@ jobs:
           cp -r ingest_core "$RUNNER_TEMP/pkg/"
           find "$RUNNER_TEMP/pkg" -name __pycache__ -prune -exec rm -rf {} +
 
-      - uses: Azure/functions-action@v1
+      - uses: Azure/functions-action@c5060b3b8bb1ebbcb531abd00c822ecbaa8ea656 # v1.5.7
         with:
           app-name: ${{ vars.INGEST_FUNCTION_APP }}
           package: ${{ runner.temp }}/pkg
           sku: flexconsumption
           remote-build: true
 
-      # No device key in CI on purpose: a request without one must get the function's own 401
-      # ("bad x-device-key"). That answer needs the host running, both routes registered and Key Vault
-      # readable (the keys are loaded before the check). A host that can't start answers 503 or times out.
-      - name: Smoke check (host runs, routes answer)
+      # No real device key in CI on purpose: the request sends a random x-device-key that can't be on file.
+      # An absent key is refused before the keys are loaded (ingest_core/keys.py `identify`), but an
+      # unknown one makes the function read the Key Vault secret first, so its own 401 ("bad x-device-key")
+      # proves the host runs, both routes are registered and Key Vault is readable; its 503 ("device keys
+      # unavailable") means KEY_VAULT_URI or the identity's secret role is broken and every phone would get
+      # 503 too. A host that can't start answers some other 5xx or times out, so only that is retried.
+      - name: Smoke check (host runs, routes answer, Key Vault readable)
         env:
           APP: ${{ vars.INGEST_FUNCTION_APP }}
           RG: ${{ vars.RESOURCE_GROUP }}
@@ -101,18 +104,24 @@ jobs:
             echo "::error::Could not read the default host name of $APP"; exit 1
           fi
           echo "ingest host: $host"
+          key="ci-smoke-$(openssl rand -hex 24)"
           probe="$RUNNER_TEMP/probe.json.gz"
           printf '{"probe":true}' | gzip -c > "$probe"
           check() { # method, path
             curl -s -o "$RUNNER_TEMP/body" -w '%{http_code}' --max-time 60 -X "$1" "https://$host$2" \
               -H 'Content-Type: application/json' -H 'Content-Encoding: gzip' -H 'x-probe: 1' \
-              --data-binary @"$probe" || true
+              -H "x-device-key: $key" --data-binary @"$probe" || true
           }
+          keys_broken() { [ "$1" = "503" ] && grep -q 'device keys unavailable' "$RUNNER_TEMP/body"; }
           ok=0
           for _ in $(seq 1 30); do # cold start after a deploy can take a few minutes
             code=$(check POST /api/ingest)
-            echo "POST /api/ingest without a key -> $code $(head -c 200 "$RUNNER_TEMP/body")"
-            if [ "$code" = "401" ] && grep -q 'x-device-key' "$RUNNER_TEMP/body"; then ok=1; break; fi
+            echo "POST /api/ingest with an unknown key -> $code $(head -c 200 "$RUNNER_TEMP/body")"
+            if keys_broken "$code"; then
+              echo "::error::The ingest function can't read the device keys from Key Vault. Check KEY_VAULT_URI and the function identity's Key Vault Secrets User role, then the function's logs in Application Insights."
+              exit 1
+            fi
+            if [ "$code" = "401" ] && grep -q 'bad x-device-key' "$RUNNER_TEMP/body"; then ok=1; break; fi
             sleep 10
           done
           if [ "$ok" != 1 ]; then
@@ -120,8 +129,8 @@ jobs:
             exit 1
           fi
           code=$(check PUT /api/ingest/sessions/ci-smoke-check)
-          echo "PUT /api/ingest/sessions/ci-smoke-check without a key -> $code $(head -c 200 "$RUNNER_TEMP/body")"
+          echo "PUT /api/ingest/sessions/ci-smoke-check with an unknown key -> $code $(head -c 200 "$RUNNER_TEMP/body")"
           if [ "$code" != "401" ]; then
             echo "::error::PUT /api/ingest/sessions/{id} answered $code, expected 401"; exit 1
           fi
-          echo "ingest function is up at https://$host"
+          echo "ingest function is up at https://$host and reads its device keys"

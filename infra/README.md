@@ -74,7 +74,13 @@ Set once in the repo (Settings → Secrets and variables → Actions):
 | `TFSTATE_RESOURCE_GROUP`, `TFSTATE_STORAGE_ACCOUNT`, `TFSTATE_CONTAINER` | variables | same output (also in `infra/.env`) |
 | `TF_VAR_ADMIN_OBJECT_IDS` | variable | the JSON list from `infra/.env`, exactly (a different list = role assignments added or removed) |
 | `TF_VAR_ALERT_EMAIL` | **secret** | from `infra/.env` (a secret so the public logs mask it) |
-| `TF_VAR_PSQL_NAT_GATEWAY_ENABLED`, `TF_VAR_EVENTHUB_LOCAL_AUTH_ENABLED`, `TF_VAR_BUDGET_AMOUNT`, `TFSTATE_KEY` | variables, optional | only if `infra/.env` overrides them |
+| `TF_VAR_BUDGET_AMOUNT`, `TFSTATE_KEY` | variables, optional | only if `infra/.env` overrides them |
+
+The workflows don't read `psql_nat_gateway_enabled` (~$1/day) or `eventhub_local_auth_enabled` (key login)
+from repo variables, so editing a variable can't switch either on for the next apply. Turning one on takes a
+PR that changes its default in `main/variables.tf`, with the user's OK (root `CLAUDE.md`); then laptop and CI
+applies agree. Setting it only in `infra/.env` works for a laptop apply, but the next terraform-apply run
+turns it off again.
 
 `AZURE_CLIENT_ID_DEPLOY`, `AZURE_TENANT_ID` and `AZURE_SUBSCRIPTION_ID` are already set for the deploys.
 
@@ -128,7 +134,8 @@ Terraform doesn't see the setting (the provider hides it), so deleting it never 
 - The Static Web App is in **East US 2**: Static Web Apps isn't offered in North Europe, and West Europe refused new customers on 2026-11-20. It serves files from a global network anyway.
 - Plan §13 applies on merge to `main` after approval in `prod`; `prod` has no required reviewers (the code deploys use it unattended), so **terraform-apply is manual** instead, and there is no teardown workflow (`tf.ps1 destroy`). The PR plan runs with `-refresh=false` because the plan identity is Reader only (see "CI for Terraform").
 - The read API's ingress port is set by deploy-services together with the image, and the `AzureWebJobsStorage` setting the provider writes is deleted by `tf.ps1 apply` / the workflows: both are outside Terraform on purpose (`ignore_changes`, provider bug).
-- `TF_VAR_psql_nat_gateway_enabled=true` adds a NAT gateway to the database subnet (~$1/day), for when default outbound access can't reach Entra ID.
+- `psql_nat_gateway_enabled = true` adds a NAT gateway to the database subnet (~$1/day), for when default outbound access can't reach Entra ID. It needs the user's OK and goes in as a default change in `main/variables.tf` (see "CI for Terraform").
+- The read API allows only the Static Web App's origin. To develop the dashboard locally against the Azure read API, add `TF_VAR_extra_cors_origins=["http://localhost:5173"]` to `infra/.env` and apply from the laptop (with the user's OK, like any apply); the next terraform-apply run removes it again. The dashboard's own local setup (`dashboard/README.md`) uses mock data or a local read API and needs neither.
 - Bootstrap may not register `microsoft.insights` (Azure lists it in lowercase); if Application Insights fails with `MissingSubscriptionRegistration`, run `az provider register --namespace Microsoft.Insights --wait`.
 - No alert rules yet: the plan wants an email on errors and on processor lag. The email action group and the budget exist.
 
@@ -146,9 +153,9 @@ Terraform doesn't see the setting (the provider hides it), so deleting it never 
 | PostgreSQL | CPU and memory %, CPU credits left (B1ms is burstable), storage %, active and failed connections | platform metrics |
 | Read API | requests by status class, average response time, restarts, error lines; platform warnings (crash loops, failed image pulls) for the processor, read API and finalize job | Container Apps metrics, `ContainerAppConsoleLogs_CL`, `ContainerAppSystemLogs_CL` |
 
-The log tiles parse the services' log lines (`<date> <time> LEVEL logger message`, `services/processor/roadride/stream.py` and `finalize.py`); a change to those lines needs the matching change in `workbook.tf`. The read API has no Application Insights SDK, so its requests come from the Container Apps `Requests` metric. A tile shows an error instead of an empty chart until its table has its first row (for example `ContainerAppConsoleLogs_CL` before any app has logged).
+The log tiles parse the services' log lines (`<date> <time> LEVEL logger message`, `services/processor/roadride/stream.py` and `finalize.py`); a change to those lines needs the matching change in `workbook.tf`. The read API also sends its requests, logs and traces to Application Insights (`azure-monitor-opentelemetry`, `services/read-api/app/main.py`), but its section uses the Container Apps `Requests` metric, which counts every request at the ingress, including those that never reach the app. A tile shows an error instead of an empty chart until its table has its first row (for example `ContainerAppConsoleLogs_CL` before any app has logged).
 
 ## Known risks to check on the first apply
 
 - The `plan` identity for pull requests only has Reader, so terraform-plan runs with `-refresh=false` (see "CI for Terraform"). If a full refresh is ever wanted in CI, it needs a custom role with the provider's "list" actions, which would also expose keys to PR workflows.
-- If Event Hubs Basic refuses managed-identity login (plan §16 day-0 test), set `TF_VAR_eventhub_local_auth_enabled=true` in `.env` and apply.
+- If Event Hubs Basic refuses managed-identity login (plan §16 day-0 test), the fallback is `eventhub_local_auth_enabled = true`: key login, so ask the user first (root `CLAUDE.md`). With their OK, change its default in `main/variables.tf` in a PR and apply it (with their OK too); a value in `.env` alone is undone by the next terraform-apply run.

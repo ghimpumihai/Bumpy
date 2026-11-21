@@ -14,8 +14,9 @@ name: terraform-plan
 #   TFSTATE_STORAGE_ACCOUNT, TFSTATE_CONTAINER (all from `terraform -chdir=infra/bootstrap output
 #   github_variables`) and TF_VAR_ADMIN_OBJECT_IDS (the JSON list from infra/.env);
 #   repo secret TF_VAR_ALERT_EMAIL (from infra/.env; a secret so it is masked in the public logs).
-# Optional repo variables, only if infra/.env overrides them: TF_VAR_PSQL_NAT_GATEWAY_ENABLED,
-# TF_VAR_EVENTHUB_LOCAL_AUTH_ENABLED, TF_VAR_BUDGET_AMOUNT, TFSTATE_KEY.
+# Optional repo variables, only if infra/.env overrides them: TF_VAR_BUDGET_AMOUNT, TFSTATE_KEY.
+# psql_nat_gateway_enabled and eventhub_local_auth_enabled are deliberately not read from repo variables:
+# turning either on takes a PR that changes its default in infra/main/variables.tf (infra/README.md).
 
 on:
   pull_request:
@@ -40,9 +41,9 @@ jobs:
   check:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
 
-      - uses: hashicorp/setup-terraform@v3
+      - uses: hashicorp/setup-terraform@b9cd54a3c349d3f38e8881555d616ced269862dd # v3.1.2
         with:
           terraform_version: ${{ env.TF_VERSION }}
           terraform_wrapper: false
@@ -80,9 +81,9 @@ jobs:
       ARM_TENANT_ID: ${{ vars.AZURE_TENANT_ID }}
       ARM_SUBSCRIPTION_ID: ${{ vars.AZURE_SUBSCRIPTION_ID }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
 
-      - uses: hashicorp/setup-terraform@v3
+      - uses: hashicorp/setup-terraform@b9cd54a3c349d3f38e8881555d616ced269862dd # v3.1.2
         with:
           terraform_version: ${{ env.TF_VERSION }}
           terraform_wrapper: false
@@ -101,8 +102,6 @@ jobs:
         env:
           ALERT_EMAIL: ${{ secrets.TF_VAR_ALERT_EMAIL }}
           ADMIN_OBJECT_IDS: ${{ vars.TF_VAR_ADMIN_OBJECT_IDS }}
-          NAT: ${{ vars.TF_VAR_PSQL_NAT_GATEWAY_ENABLED }}
-          EH_LOCAL_AUTH: ${{ vars.TF_VAR_EVENTHUB_LOCAL_AUTH_ENABLED }}
           BUDGET: ${{ vars.TF_VAR_BUDGET_AMOUNT }}
           STATE_RG: ${{ vars.TFSTATE_RESOURCE_GROUP }}
           STATE_ACCOUNT: ${{ vars.TFSTATE_STORAGE_ACCOUNT }}
@@ -119,8 +118,6 @@ jobs:
           put() { if [ -n "$2" ]; then echo "$1=$2" >> "$GITHUB_ENV"; fi; }
           put TF_VAR_alert_email "$ALERT_EMAIL"
           put TF_VAR_admin_object_ids "$ADMIN_OBJECT_IDS"
-          put TF_VAR_psql_nat_gateway_enabled "$NAT"
-          put TF_VAR_eventhub_local_auth_enabled "$EH_LOCAL_AUTH"
           put TF_VAR_budget_amount "$BUDGET"
           if [ -z "$ADMIN_OBJECT_IDS" ]; then
             echo "::warning::TF_VAR_ADMIN_OBJECT_IDS is not set: the plan will remove the team's role assignments if infra/.env lists any."

@@ -27,7 +27,7 @@ flowchart TB
       proc["Stream processor<br/>signal processing: roughness,<br/>potholes, motion-sickness dose"]
       migrate["Migrate job<br/>runs before each services deploy"]
       read["Read API<br/>FastAPI, 12 read-only routes"]
-      finalize["Finalize + aggregate jobs<br/>H3 segments, crowd-confirmed potholes<br/>(deployed, code not written yet)"]
+      finalize["Finalize + aggregate jobs<br/>whole-trip rerun, H3 segments,<br/>crowd-confirmed potholes"]
     end
 
     pg[("PostgreSQL 17 + PostGIS<br/>private subnet, Entra logins only")]
@@ -48,21 +48,21 @@ flowchart TB
   migrate --> pg
   pg --> read -->|"JSON / GeoJSON"| web
 
-  proc -.->|"trip ended"| sb
+  proc -->|"trip ended"| sb
   laptop -.-> sessions --> eg --> sb
-  sb -.-> finalize
-  lake -.-> finalize
-  finalize -.-> pg
+  sb --> finalize
+  lake --> finalize
+  finalize --> pg
 
   gh -->|"push images"| acr
   acr --> CAE
   gh -.->|"deploys"| AZURE
 
   classDef planned stroke-dasharray: 5 5
-  class finalize,laptop planned
+  class laptop planned
 ```
 
-Solid boxes and arrows run today. Dashed ones are not working yet: the finalize and aggregate jobs exist in Azure but their code isn't written, the processor doesn't put "trip ended" on the queue yet, and the laptop upload script doesn't exist. The Event Grid → Service Bus wiring for fallback uploads is deployed.
+Solid boxes and arrows are built. Dashed ones are not: the laptop upload script doesn't exist, and the finalize job dead-letters upload messages until it can read an uploaded folder. The Event Grid → Service Bus wiring for fallback uploads is deployed.
 
 - Plans and decision log: [decisions/](decisions/README.md)
 - iPhone recorder spec: [decisions/01-initial-plan.md](decisions/01-initial-plan.md)
@@ -76,9 +76,10 @@ Solid boxes and arrows run today. Dashed ones are not working yet: the finalize 
 |---|---|---|
 | **Infrastructure (Terraform)** | [`infra/`](infra/README.md) | The whole stack in North Europe from one Terraform config: VNet, PostgreSQL 17 + PostGIS (private, Entra login only), Event Hubs, Service Bus, Blob Storage, Key Vault, Container Registry, Container Apps, the ingest Function app, Static Web App, Log Analytics, budget alerts. GitHub OIDC identities, no stored Azure secrets. |
 | **Ingest function** | [`services/ingest/`](services/ingest/README.md) | `POST /api/ingest` and `PUT /api/ingest/sessions/{id}`. Checks the device key, then validates gzip, size, JSON and schema in the same order as the app's mock server. Sends each batch to Event Hubs (one partition per phone) and the raw archive. |
-| **Database** | [`db/migrations/`](db/migrations) | Sessions, devices, batches, GPS track, labels, live state, stream checkpoints, chart series, events, pipeline state. A migrate job applies them on every deploy and creates the read/write database roles for the services. |
+| **Database** | [`db/migrations/`](db/migrations) | Sessions, devices, batches, GPS track, labels, live state, stream checkpoints, chart series, events, pipeline state, segment passes and the aggregated map. A migrate job applies them on every deploy and creates the read/write database roles for the services. |
 | **Stream processor** | [`services/processor/`](services/processor/README.md) | Reads Event Hubs and writes the tables above. Drops duplicates, keeps late batches off the live map, and marks a trip as ended once its Stop message and all batches are in. Each write commits together with the stream checkpoint, so a restart loses and repeats nothing. |
 | **Signal processing** | [`services/processor/roadride/dsp.py`](services/processor/README.md#signal-processing-roadridedsppy) | Per batch: vertical acceleration, road roughness (1–30 Hz), the ISO 2631-1 Wf motion-sickness dose (MSDV), pothole detection above 15 km/h, and a 5 Hz chart series. It gives the same results fed batch by batch or as one whole trip. |
+| **Finalize + aggregate jobs** | [`services/processor/`](services/processor/README.md#finalize-job-roadridefinalizepy) | When a trip ends (Stop + all batches, or 15 minutes of silence) the processor queues it; the finalize job reruns the whole trip from the raw archive, replaces the live results, scores its data quality, splits it into H3 road-segment passes and rebuilds the shared map: vehicle-normalized roughness, crowd-confirmed potholes, sickness by seat. |
 | **Read API** | [`services/read-api/`](services/read-api/README.md) | All 12 routes of [`dashboard/API.md`](dashboard/API.md), read-only. Hides the first and last 200 m of every trip for privacy. |
 | **Replay tool** | [`tools/replay/`](tools/replay/README.md) | Re-sends a recorded trip through the live path as a new trip (`source=replay`, never aggregated), at real speed or faster. Used for the end-to-end test without driving, for the demo, and for tuning the pothole threshold on real data. |
 | **CI/CD** | [`.github/workflows/`](.github/workflows) | Tests on every PR, including integration tests against a real PostGIS. Merges to `main` deploy the ingest function and the processor + read API (migrations first, then a check that every API route answers). |
@@ -96,9 +97,8 @@ Solid boxes and arrows run today. Dashed ones are not working yet: the finalize 
 In the plan's build order:
 
 1. **Speed bumps**: need the vehicle's pitch axis.
-2. **Finalize job + road segments (H3) + aggregation**: turns finished trips into the shared roughness map and crowd-confirmed potholes. The Map page stays empty until this exists.
-3. **Trip end on silence**: a trip whose Stop message never arrives stays "recording" for now; the plan closes it after 15 minutes.
-4. From the plan's cut list: laptop upload fallback, monitoring workbook, Terraform plan on PRs.
+2. **Finalize for uploaded folders, Parquet output, detection scoring against manual taps, phone-moved / gravity-drift quality checks.**
+3. From the plan's cut list: laptop upload fallback, monitoring workbook, Terraform plan on PRs.
 
 ## Repository
 
@@ -106,7 +106,7 @@ In the plan's build order:
 decisions/            plans, decision log, research notes
 infra/                Terraform: bootstrap (state, OIDC) + main stack + modules; tf.ps1 runs it
 services/ingest/      Azure Function (Python): the phone's front door
-services/processor/   stream processor, signal processing, migrate job (one image)
+services/processor/   stream processor, signal processing, migrate/finalize/aggregate jobs (one image)
 services/read-api/    FastAPI read API for the dashboard
 db/migrations/        SQL migrations
 dashboard/            React + MapLibre + uPlot web app (mock backend built in)

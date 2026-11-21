@@ -174,6 +174,8 @@ def test_chunked_feed_equals_one_pass():
         assert a.t == pytest.approx(b.t, abs=1e-9)
         assert a.a_vert == pytest.approx(b.a_vert, abs=1e-6)
         assert a.msdv == pytest.approx(b.msdv, rel=1e-6, abs=1e-9)
+        assert a.rough_rms == pytest.approx(b.rough_rms, rel=1e-6, abs=1e-9)
+        assert a.dose_inc == pytest.approx(b.dose_inc, rel=1e-6, abs=1e-12)
         assert (a.speed is None) == (b.speed is None)
     assert [(round(e.t, 6), e.type) for e in events] == [(round(e.t, 6), e.type) for e in whole.events]
     assert len(events) == 2
@@ -210,6 +212,17 @@ def test_clock_jumping_back_resets():
     p.feed(t, ua, grav, fixes)
     out = p.feed(t - 2.0, ua, grav, [])
     assert out.reset
+
+
+def test_window_sums_add_up_to_the_trip():
+    """The per-window outputs the finalize job builds segment passes from must agree with the trip
+    totals: Σ dose_inc = MSDV², and a 10 Hz sine's window RMS is its RMS."""
+    amp = 3.0
+    t, ua, grav, fixes = synth(60, vert=lambda t: amp * np.sin(2 * np.pi * 10 * t) + np.sin(0.9 * t))
+    out, _ = run_whole(t, ua, grav, fixes)
+    assert sum(p.dose_inc for p in out.series) == pytest.approx(out.msdv ** 2, rel=0.01)
+    steady = [p.rough_rms for p in out.series if p.t > T0 + 5]
+    assert np.median(steady) == pytest.approx(amp / math.sqrt(2), rel=0.05)
 
 
 def test_state_is_json():

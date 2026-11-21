@@ -1,4 +1,4 @@
-# One image for the stream processor and the migrate job (RUN_MODE picks the role).
+# One image for the stream processor and the migrate, finalize and aggregate jobs (RUN_MODE picks the role).
 # Build from the repository root so the SQL migrations are included:
 #   docker build -f services/processor/Dockerfile -t processor .
 FROM python:3.12-slim

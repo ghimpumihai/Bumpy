@@ -1,13 +1,15 @@
 """SQL and row → JSON for every route of dashboard/API.md.
 
-Tables that the processing step will add (segments, events, session_series, segment_agg) don't exist
-yet, so those routes answer with valid, empty shapes. Field names, defaults and rules follow the
-dashboard's types (src/types/) and its mock backend (src/mock/), which is the working spec.
+Aggregates (segments, segment_agg, segment_sickness, aggregation_fit) are written by the finalize and
+aggregate jobs; until a trip is finalized those routes answer with valid, empty shapes. Field names,
+defaults and rules follow the dashboard's types (src/types/) and its mock backend (src/mock/), which is
+the working spec.
 """
 
 from __future__ import annotations
 
 import datetime as dt
+import json
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
@@ -45,10 +47,6 @@ def enum_param(value: str | None, name: str, allowed: tuple[str, ...]) -> str | 
     if value not in allowed:
         raise BadRequest(f"{name} must be one of {', '.join(allowed)}")
     return value
-
-
-def empty_feature_collection() -> dict:
-    return {"type": "FeatureCollection", "features": []}
 
 
 # --- Tracks and privacy ------------------------------------------------------------------
@@ -95,7 +93,7 @@ SELECT s.session_id, s.source, s.replay_of, s.device_id, s.status, s.incomplete,
        s.include_in_agg, s.exclusion_reasons, s.context_known, s.vehicle_type, s.vehicle_make_model,
        s.vehicle_line, s.mount, s.people, s.audio_enabled, s.synthetic_sensors,
        COALESCE(s.started_at, s.created_at) AS started_at, s.ended_at,
-       s.late_batches, s.duplicate_batches, s.msdv_z,
+       s.late_batches, s.duplicate_batches, s.msdv_z, s.valid_fraction, s.quality, s.finalized_at,
        (SELECT max(b.end_utc) FROM ingest_batches b WHERE b.session_id = s.session_id) AS last_sample_at,
        COALESCE((SELECT ST_Length(ST_MakeLine(tp.geom::geometry ORDER BY tp.t)::geography)
                  FROM track_points tp WHERE tp.session_id = s.session_id), 0) AS distance_m,
@@ -134,7 +132,7 @@ def _summary(r: dict, event_counts: dict | None = None) -> dict:
         "status": r["status"],
         "incomplete": bool(r["incomplete"]),
         "qualityStatus": r["quality_status"],
-        "validFraction": None,  # comes with the quality checks (plan §9 step 3)
+        "validFraction": rnd(r["valid_fraction"], 4),  # set by the finalize job's quality checks
         "includeInAgg": bool(r["include_in_agg"]),
         "exclusionReasons": list(r["exclusion_reasons"] or []),
         "roughnessEligible": roughness_eligible,
@@ -169,11 +167,14 @@ def _quality(conn: Connection, r: dict) -> dict:
         """,
         (r["session_id"],),
     ).fetchone()
+    stored = r["quality"] if isinstance(r["quality"], dict) else {}  # written by the finalize job
+    invalid = {"phone_moved": 0, "gravity_drift": 0, "gyro_gps_mismatch": 0, "gps_poor": 0}
+    invalid.update({k: v for k, v in (stored.get("invalidSeconds") or {}).items() if k in invalid})
     return {
-        "streams": {},  # per-stream rates come with the finalize job (it has the full trip)
+        "streams": stored.get("streams") or {},  # per-stream rates need the full trip: finalize job
         "gps": {"fixes": int(fixes), "medianHAccM": rnd(median, 2), "p95HAccM": rnd(p95, 2)},
-        "validFraction": None,
-        "invalidSeconds": {"phone_moved": 0, "gravity_drift": 0, "gyro_gps_mismatch": 0, "gps_poor": 0},
+        "validFraction": rnd(r["valid_fraction"], 4),
+        "invalidSeconds": invalid,
         "rejectedBatches": 0,  # rejected batches never reach the database (the ingest function answers 4xx)
         "lateBatches": int(r["late_batches"]),
         "duplicateBatches": int(r["duplicate_batches"]),
@@ -219,7 +220,7 @@ def session_detail(conn: Connection, session_id: str) -> dict:
         "sickness": {"msdvZ": rnd(r["msdv_z"], 4),
                      "msiPct": None if r["msdv_z"] is None else round(r["msdv_z"] / 3, 4),
                      "ratings": _ratings(conn, session_id), "spearman": None},
-        "processedAt": None,
+        "processedAt": iso(r["finalized_at"]),
         "processorVersion": None,
     }
 
@@ -381,32 +382,116 @@ def live(conn: Connection, now: dt.datetime) -> dict:
     return {"serverTime": iso(now), "devices": devices}
 
 
-# --- Aggregates (empty until the processing step exists) ---------------------------------
+# --- Aggregates (written by the finalize and aggregate jobs) ------------------------------
+
+def _aggregation_info(conn: Connection) -> dict:
+    row = conn.execute("SELECT method, beta, vehicle_effects, fitted_at FROM aggregation_fit").fetchone()
+    if row is None:
+        return {"method": "none", "beta": None, "refSpeedKmh": REF_SPEED_KMH, "vehicleEffects": {},
+                "fittedAt": None}
+    method, beta, effects, fitted_at = row
+    return {"method": method, "beta": rnd(beta, 4), "refSpeedKmh": REF_SPEED_KMH,
+            "vehicleEffects": {k: rnd(v, 4) for k, v in (effects or {}).items()}, "fittedAt": iso(fitted_at)}
+
 
 def overview(conn: Connection) -> dict:
-    total, upload, live_n, replay, included, mock = conn.execute("""
+    total, upload, live_n, replay, included, mock, distance_m, last_processed = conn.execute("""
         SELECT count(*), count(*) FILTER (WHERE source = 'upload'), count(*) FILTER (WHERE source = 'live'),
                count(*) FILTER (WHERE source = 'replay'), count(*) FILTER (WHERE include_in_agg),
-               count(*) FILTER (WHERE synthetic_sensors)
+               count(*) FILTER (WHERE synthetic_sensors),
+               COALESCE(sum(distance_m) FILTER (WHERE include_in_agg), 0), max(finalized_at)
         FROM sessions
         """).fetchone()
+    segments, confirmed = conn.execute(
+        "SELECT count(*), count(*) FILTER (WHERE pothole_confirmed) FROM segment_agg WHERE vehicle_type = 'all'"
+    ).fetchone()
+    speed_bumps = conn.execute(
+        "SELECT count(*) FROM events e JOIN sessions s USING (session_id) "
+        "WHERE s.include_in_agg AND e.type = 'speed_bump'").fetchone()[0]
     return {
         "sessions": {"total": total, "upload": upload, "live": live_n, "replay": replay,
                      "includedInAgg": included, "mock": mock},
-        "distanceKm": 0.0,  # distance of aggregated (finalized) trips; none yet
-        "segments": 0,
-        "confirmedPotholes": 0,
-        "speedBumps": 0,
-        "lastProcessedAt": None,
-        "aggregation": {"method": "none", "beta": None, "refSpeedKmh": REF_SPEED_KMH,
-                        "vehicleEffects": {}, "fittedAt": None},
+        "distanceKm": round(float(distance_m) / 1000, 1),  # finalized trips in the aggregates
+        "segments": segments,
+        "confirmedPotholes": confirmed,
+        "speedBumps": speed_bumps,
+        "lastProcessedAt": iso(last_processed),
+        "aggregation": _aggregation_info(conn),
     }
 
 
-def segment_detail(h3: str) -> dict:
+AGG_COLUMNS = """a.h3, a.vehicle_type, a.n_sessions, a.n_passes, a.mean_speed_kmh, a.roughness, a.roughness_pctl,
+       a.roughness_method, a.pothole_hits, a.pothole_passes, a.pothole_ratio, a.pothole_confirmed,
+       a.sickness_aw_rms, a.msi_1h_pct, a.sickness_sessions"""
+
+
+def _aggregate(r: dict) -> dict:
+    """One segment_agg row as API.md SegmentAggregate."""
+    return {
+        "h3": r["h3"],
+        "vehicleType": r["vehicle_type"],
+        "nSessions": r["n_sessions"],
+        "nPasses": r["n_passes"],
+        "meanSpeedKmh": rnd(r["mean_speed_kmh"], 1),
+        "roughness": rnd(r["roughness"], 4),
+        "roughnessPctl": rnd(r["roughness_pctl"], 4),
+        "roughnessMethod": r["roughness_method"],
+        "potholeHits": r["pothole_hits"],
+        "potholePasses": r["pothole_passes"],
+        "potholeRatio": rnd(r["pothole_ratio"], 4),
+        "potholeConfirmed": bool(r["pothole_confirmed"]),
+        "sicknessAwRms": rnd(r["sickness_aw_rms"], 4),
+        "msi1hPct": rnd(r["msi_1h_pct"], 4),
+        "sicknessSessions": r["sickness_sessions"],
+    }
+
+
+def segments(conn: Connection, vehicle: str | None) -> dict:
+    rows = _rows(conn, f"""
+        SELECT {AGG_COLUMNS}, ST_AsGeoJSON(g.boundary::geometry, 6) AS boundary
+        FROM segment_agg a JOIN segments g USING (h3)
+        WHERE a.vehicle_type = %s ORDER BY a.h3
+        """, (vehicle or "all",))
+    return {"type": "FeatureCollection", "features": [
+        {"type": "Feature", "geometry": json.loads(r["boundary"]), "properties": _aggregate(r)} for r in rows]}
+
+
+def segment_detail(conn: Connection, h3: str) -> dict:
     if not is_h3_cell(h3):
         raise BadRequest(f"{h3} is not an H3 cell")
-    raise NotFound(f"segment {h3} has no observations")
+    center = conn.execute("SELECT ST_X(center::geometry), ST_Y(center::geometry) FROM segments WHERE h3 = %s",
+                          (h3,)).fetchone()
+    if center is None:
+        raise NotFound(f"segment {h3} has no observations")
+    order = "CASE a.vehicle_type WHEN 'all' THEN 0 WHEN 'car' THEN 1 WHEN 'bus' THEN 2 WHEN 'tram' THEN 3 ELSE 4 END"
+    by_vehicle = [_aggregate(r) for r in _rows(
+        conn, f"SELECT {AGG_COLUMNS} FROM segment_agg a WHERE a.h3 = %s ORDER BY {order}", (h3,))]
+    sickness = [{
+        "vehicleType": vt, "raterSeat": seat, "raterPosture": posture, "sicknessAwRms": rnd(aw, 4),
+        "msi1hPct": rnd(msi, 4), "nSessions": n,
+    } for vt, seat, posture, aw, msi, n in conn.execute(
+        "SELECT vehicle_type, rater_seat, rater_posture, sickness_aw_rms, msi_1h_pct, n_sessions "
+        "FROM segment_sickness WHERE h3 = %s ORDER BY vehicle_type, rater_seat, rater_posture", (h3,)).fetchall()]
+    # Every pass outside the private first/last 200 m; trips not (yet) in the aggregates are flagged.
+    observations = [{
+        "sessionId": sid, "vehicleType": vt or "unknown", "tStart": iso(t), "speedKmh": None if v is None else round(v * 3.6, 1),
+        "roughnessRms": rnd(rough, 4), "awRms": rnd(aw, 4), "potholeCount": potholes, "includedInAgg": bool(inc),
+    } for sid, vt, t, v, rough, aw, potholes, inc in conn.execute(
+        """
+        SELECT o.session_id, s.vehicle_type, o.t_start, o.mean_speed_ms, o.roughness_rms, o.aw_rms,
+               o.pothole_count, s.include_in_agg
+        FROM segment_observations o JOIN sessions s USING (session_id)
+        WHERE o.h3 = %s AND NOT o.in_privacy_zone ORDER BY o.t_start
+        """, (h3,)).fetchall()]
+    fitted = conn.execute("SELECT fitted_at FROM aggregation_fit").fetchone()
+    return {
+        "h3": h3,
+        "center": {"lon": rnd(center[0]), "lat": rnd(center[1])},
+        "byVehicle": by_vehicle,
+        "sicknessBySeat": sickness,
+        "observations": observations,
+        "updatedAt": iso(fitted[0]) if fitted else None,
+    }
 
 
 def is_h3_cell(value: str) -> bool:

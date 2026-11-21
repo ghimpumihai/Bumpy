@@ -26,6 +26,7 @@ from azure.identity import DefaultAzureCredential
 
 from .db import connect
 from .live import parse_batch, parse_iso, parse_session
+from .ready import ReadyNotifier, ServiceBusSender
 from .store import Store
 
 log = logging.getLogger(__name__)
@@ -53,8 +54,9 @@ def handle_event(store: Store, event: EventData) -> str:
 class PartitionWriter:
     """One database connection per partition: the client calls back from one thread per partition."""
 
-    def __init__(self, eventhub: str):
+    def __init__(self, eventhub: str, on_trip_end=None):
         self.eventhub = eventhub
+        self.on_trip_end = on_trip_end  # called after a commit that ended at least one trip
         self._conns: dict[str, psycopg.Connection] = {}
         self._lock = threading.Lock()
 
@@ -107,6 +109,8 @@ class PartitionWriter:
             last = events[-1]
             store.save_checkpoint(self.eventhub, CONSUMER_GROUP, partition_id, last.sequence_number,
                                   last.enqueued_time)
+        if store.ended and self.on_trip_end:
+            self.on_trip_end()  # after the commit: the notifier reads the committed `processing` rows
         lag = (dt.datetime.now(dt.timezone.utc) - last.enqueued_time).total_seconds() \
             if last.enqueued_time else None
         log.info("partition=%s events=%d seq=%d lag_s=%s %s", partition_id, len(events),
@@ -130,7 +134,12 @@ def run() -> None:
     starting = {pid: saved.get(pid, "-1") for pid in client.get_partition_ids()}
     log.info("starting from %s", starting)
 
-    writer = PartitionWriter(eventhub)
+    notifier = ReadyNotifier(
+        ServiceBusSender(os.environ["SERVICEBUS_FULLY_QUALIFIED_NAMESPACE"], os.environ["SERVICEBUS_QUEUE_NAME"]),
+        connect,
+    )
+    notifier.start()
+    writer = PartitionWriter(eventhub, on_trip_end=notifier.kick)
 
     def on_event_batch(partition_context, events):
         if events:

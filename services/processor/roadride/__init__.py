@@ -1,1 +1,1 @@
-"""Road & Ride processing: stream processor, migrate job (and later finalize and aggregate)."""
+"""Road & Ride processing: stream processor and the migrate, finalize and aggregate jobs."""

@@ -31,7 +31,8 @@ Terraform creates every resource; the GitHub Actions deploys ship the code. Terr
 | Container app `ca-roadride-processor` | the stream processor + signal processing | `deploy-services` on merge to `main` |
 | Container app `ca-roadride-read-api` | the read API (port 8000) | `deploy-services` |
 | Job `caj-roadride-migrate` | database migrations + Entra roles | `deploy-services`, before the apps are updated |
-| Jobs `caj-roadride-finalize`, `caj-roadride-aggregate` | still Microsoft's quickstart image: not written yet | — |
+| Job `caj-roadride-finalize` | the finalize job (started by the `session-ready` queue) | `deploy-services` |
+| Job `caj-roadride-aggregate` | the aggregation step, started by hand | `deploy-services` |
 | Static Web App `stapp-roadride-dashboard` | nothing yet: run **deploy-dashboard** (manual) | `deploy-dashboard` |
 
 The deploys use the `prod` GitHub environment and these repo variables: `AZURE_CLIENT_ID_DEPLOY`, `AZURE_TENANT_ID`, `AZURE_SUBSCRIPTION_ID`, `INGEST_FUNCTION_APP`, `ACR_NAME`, `RESOURCE_GROUP`. CI's test database uses the `POSTGRES_PASSWORD` repo secret.

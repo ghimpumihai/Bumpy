@@ -1,7 +1,7 @@
 name: deploy-services
 
 # Builds the processor and read API images, runs the migrate job and waits for it, then updates the
-# stream processor and the read API (plan §13). Migrations always run before new code sees the database.
+# finalize and aggregate jobs, the stream processor and the read API (plan §13). Migrations always run before new code sees the database.
 # Needs the `prod` environment and the repo variables AZURE_CLIENT_ID_DEPLOY, AZURE_TENANT_ID,
 # AZURE_SUBSCRIPTION_ID, ACR_NAME and RESOURCE_GROUP.
 
@@ -25,6 +25,8 @@ concurrency:
 
 env:
   MIGRATE_JOB: caj-roadride-migrate
+  FINALIZE_JOB: caj-roadride-finalize
+  AGGREGATE_JOB: caj-roadride-aggregate
   PROCESSOR_APP: ca-roadride-processor
   READ_API_APP: ca-roadride-read-api
   READ_API_PORT: "8000" # also infra/modules/compute target_port
@@ -80,11 +82,15 @@ jobs:
           echo "::error::migrate job did not succeed (status: $status). Logs: Log Analytics, ContainerAppConsoleLogs_CL where ContainerJobName_s == '$MIGRATE_JOB'"
           exit 1
 
-      - name: Update the stream processor
+      - name: Update the stream processor and the finalize and aggregate jobs
         env:
           RG: ${{ vars.RESOURCE_GROUP }}
           IMAGE: ${{ steps.image.outputs.processor }}
-        run: az containerapp update -n "$PROCESSOR_APP" -g "$RG" --image "$IMAGE" --output none
+        run: |
+          # Jobs first: the processor starts sending "session ready" as soon as it runs the new code.
+          az containerapp job update -n "$FINALIZE_JOB" -g "$RG" --image "$IMAGE" --output none
+          az containerapp job update -n "$AGGREGATE_JOB" -g "$RG" --image "$IMAGE" --output none
+          az containerapp update -n "$PROCESSOR_APP" -g "$RG" --image "$IMAGE" --output none
 
       - name: Update the read API
         env:
@@ -105,7 +111,7 @@ jobs:
             sleep 10
           done
           failed=0
-          for route in /api/overview /api/sessions /api/quality /api/live; do
+          for route in /api/overview /api/sessions /api/quality /api/live "/api/segments?vehicle=all"; do
             code=$(curl -s -o /tmp/body -w '%{http_code}' "https://$fqdn$route" || true)
             echo "GET $route -> $code"
             if [ "$code" != "200" ]; then

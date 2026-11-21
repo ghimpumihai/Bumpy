@@ -20,6 +20,7 @@ def from_epoch(seconds: float) -> dt.datetime:
 class Store:
     def __init__(self, conn: Connection):
         self.conn = conn
+        self.ended: list[str] = []  # trips this store moved to `processing` (ready.py sends for them)
 
     # --- checkpoints ---------------------------------------------------------------------
 
@@ -58,17 +59,31 @@ class Store:
 
     def _mark_processing_when_complete(self, session_id: str) -> None:
         """A trip has ended when its Stop copy has arrived and every batch up to batchCount is in
-        (plan §5 "Trip end"). Sending "session ready" to the queue comes with the finalize job."""
-        self.conn.execute(
+        (plan §5 "Trip end"). ready.py puts "session ready" on the queue once this commits."""
+        row = self.conn.execute(
             """
             UPDATE sessions s SET status = 'processing', updated_at = now()
             WHERE s.session_id = %s AND s.status = 'live' AND s.expected_batch_count IS NOT NULL
               AND (SELECT count(*) FROM ingest_batches b
                    WHERE b.session_id = s.session_id AND b.batch_seq < s.expected_batch_count)
                   >= s.expected_batch_count
+            RETURNING s.session_id
             """,
             (session_id,),
+        ).fetchone()
+        if row:
+            self.ended.append(row[0])
+
+    def _reopen(self, session_id: str) -> None:
+        """A trip that already ended (or was finalized) got new data: a batch from the phone's backlog
+        after the 15-minute close, or its Stop copy. Back to `processing` with no message sent, so
+        ready.py sends "session ready" again and the finalize job rebuilds it from the archive."""
+        self.conn.execute(
+            "UPDATE sessions SET status = 'processing', ready_sent_at = NULL, updated_at = now() "
+            "WHERE session_id = %s AND status <> 'live'",
+            (session_id,),
         )
+        self.ended.append(session_id)
 
     def _refresh_exclusions(self, session_id: str) -> None:
         row = self.conn.execute(
@@ -103,9 +118,9 @@ class Store:
             """,
             (f.session_id, f.device_id, f.source, f.t0_utc),
         )
-        last_seq = self.conn.execute(
-            "SELECT last_batch_seq FROM sessions WHERE session_id = %s FOR UPDATE", (f.session_id,)
-        ).fetchone()[0]
+        last_seq, status = self.conn.execute(
+            "SELECT last_batch_seq, status FROM sessions WHERE session_id = %s FOR UPDATE", (f.session_id,)
+        ).fetchone()
         late = last_seq is not None and f.batch_seq < last_seq
 
         inserted = self.conn.execute(
@@ -126,6 +141,8 @@ class Store:
                 (f.session_id,),
             )
             return "duplicate"
+        if status != "live":
+            self._reopen(f.session_id)  # new data for an ended trip: finalize it again
 
         if f.fixes:
             with self.conn.cursor() as cur:
@@ -159,7 +176,11 @@ class Store:
             (int(late), f.batch_seq, received_at, received_at, f.session_id),
         )
 
-        if not late:
+        if status == "complete":
+            # Already finalized (e.g. closed after 15 silent minutes, then the phone's backlog came):
+            # the trip was reopened above, and the finalize job recomputes it whole from the archive.
+            pass
+        elif not late:
             # Late batches skip the signal processing: the filters have moved past them. The
             # finalize job recomputes the whole trip in one pass.
             roughness_now, msdv = self._process_signal(f)
@@ -265,10 +286,10 @@ class Store:
             "ON CONFLICT (session_id) DO NOTHING",
             (s.session_id, s.device_id, s.started_at),
         )
-        has_stop = self.conn.execute(
-            "SELECT expected_batch_count IS NOT NULL FROM sessions WHERE session_id = %s FOR UPDATE",
+        has_stop, status = self.conn.execute(
+            "SELECT expected_batch_count IS NOT NULL, status FROM sessions WHERE session_id = %s FOR UPDATE",
             (s.session_id,),
-        ).fetchone()[0]
+        ).fetchone()
         if s.phase == "start" and has_stop:
             return "stale_start"
 
@@ -294,6 +315,8 @@ class Store:
              s.audio_enabled, s.synthetic_sensors, s.recovered, Jsonb(s.metadata),
              s.started_at, s.ended_at, s.batch_count, s.replay_of, s.replay_of, s.session_id),
         )
+        if s.phase == "stop" and not has_stop and status != "live":
+            self._reopen(s.session_id)  # the Stop copy came after the 15-minute close
         self._mark_processing_when_complete(s.session_id)
         self._refresh_exclusions(s.session_id)
         return "applied"

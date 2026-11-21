@@ -181,6 +181,37 @@ def test_chunked_feed_equals_one_pass():
     assert last.roughness_now == pytest.approx(whole.roughness_now, rel=1e-6)
 
 
+def test_overlapping_batches_are_not_interleaved():
+    """A batch that starts 25 ms before the previous one ended (clock re-anchoring) must not feed
+    out-of-order times to the interpolation: no false events, same roughness as aligned batches."""
+    # 3 Hz: well inside the band, and slow enough that the half-sample shift below costs no amplitude
+    # in linear interpolation (at 10 Hz it would lose ≈ 4 %, which is interpolation, not the overlap).
+    amp = 2.0
+    t, ua, grav, fixes = synth(20, vert=lambda t: amp * np.sin(2 * np.pi * 3 * t), jitter=False)
+    half = len(t) // 2
+    aligned = dsp.Pipeline()
+    aligned.feed(t[:half], ua[:half], grav[:half], [f for f in fixes if f[0] < t[half]])
+    ref = aligned.feed(t[half:], ua[half:], grav[half:], [f for f in fixes if f[0] >= t[half]])
+
+    p = dsp.Pipeline()
+    first = p.feed(t[:half], ua[:half], grav[:half], [f for f in fixes if f[0] < t[half]])
+    back = half - 3  # the second batch repeats the last 3 samples with times shifted 5 ms earlier
+    out = p.feed(t[back:] - 0.005, ua[back:], grav[back:], [f for f in fixes if f[0] >= t[half]])
+
+    assert not out.reset and out.events == [] and first.events == []
+    times = [s.t for s in first.series + out.series]
+    assert all(b > a for a, b in zip(times, times[1:]))
+    assert out.roughness_now == pytest.approx(ref.roughness_now, rel=0.02)
+
+
+def test_clock_jumping_back_resets():
+    t, ua, grav, fixes = synth(4)
+    p = dsp.Pipeline()
+    p.feed(t, ua, grav, fixes)
+    out = p.feed(t - 2.0, ua, grav, [])
+    assert out.reset
+
+
 def test_state_is_json():
     t, ua, grav, fixes = synth(5)
     p = dsp.Pipeline()

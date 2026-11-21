@@ -177,11 +177,14 @@ class Store:
         # A missing batch means the filters would see a jump: restart them (the dose is kept).
         reset = row is not None and f.batch_seq != row[1] + 1
         pipeline = Pipeline(row[0] if row else None)
+        # The pipeline runs on the phone's uptime clock; GPS fixes (UTC) are moved onto it and the
+        # outputs back to UTC with this batch's offset.
+        off = f.clock_offset
         out = pipeline.feed(
             np.asarray(f.motion_t, dtype=float),
             np.asarray(f.motion_ua, dtype=float).reshape(-1, 3),
             np.asarray(f.motion_g, dtype=float).reshape(-1, 3),
-            [(x.t.timestamp(), x.speed_ms) for x in f.fixes],
+            [(x.t.timestamp() - off, x.speed_ms) for x in f.fixes],
             reset=reset,
         )
         if out.series:
@@ -189,10 +192,11 @@ class Store:
                 cur.executemany(
                     "INSERT INTO session_series (session_id, t, a_vert, a_lat, a_lon, speed_ms, msdv) "
                     "VALUES (%s, %s, %s, %s, %s, %s, %s) ON CONFLICT (session_id, t) DO NOTHING",
-                    [(f.session_id, from_epoch(p.t), p.a_vert, p.a_lat, p.a_lon, p.speed, p.msdv)
+                    [(f.session_id, from_epoch(p.t + off), p.a_vert, p.a_lat, p.a_lon, p.speed, p.msdv)
                      for p in out.series],
                 )
         for e in out.events:
+            e.t += off
             # Position of the nearest GPS fix of this trip (≈ 1 Hz, so within about half a second).
             self.conn.execute(
                 """

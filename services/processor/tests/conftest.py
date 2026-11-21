@@ -59,7 +59,9 @@ def motion_batch(template: dict, session_id: str, seq: int, t0_epoch: float, ver
           "rr_x": zeros, "rr_y": zeros, "rr_z": zeros,
           "q_w": [1.0] * 200, "q_x": zeros, "q_y": zeros, "q_z": zeros}
     t0_ms = int(round(t0_epoch * 1000))
-    b.update(sessionId=session_id, batchSeq=seq, t0UtcMs=t0_ms, labels=[], deviceMotion=dm)
+    # Uptime advances with the batches, as on the phone (2 s windows since an arbitrary boot time).
+    b.update(sessionId=session_id, batchSeq=seq, t0UtcMs=t0_ms, t0Up=5000.0 + 2 * seq, labels=[],
+             deviceMotion=dm)
     b["location"] = [dict(template["location"][0], tUtcMs=t0_ms + 300, lat=lat0 + seq * step_deg,
                           speed=speed)]
     return b

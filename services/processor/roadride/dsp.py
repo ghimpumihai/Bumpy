@@ -225,7 +225,8 @@ class Pipeline:
         if reset:
             self.grid = None
             out.reset = True
-        if len(t) and self.grid is not None and t[0] - self.grid["prev"][0] > MAX_GAP_S:
+        if len(t) and self.grid is not None and abs(t[0] - self.grid["prev"][0]) > MAX_GAP_S:
+            # A hole, or the clock jumped backwards: either way the filters can't continue.
             self.grid = None
             out.reset = True
         if len(t) == 0:
@@ -240,7 +241,10 @@ class Pipeline:
         # Resample onto the uniform grid, interpolating from the last sample of the previous feed.
         src_t = np.concatenate([[gr["prev"][0]], t])
         src = np.vstack([np.array(gr["prev"][1:])[None, :], samples])
-        keep = np.concatenate([[True], np.diff(src_t) > 0])
+        # np.interp needs strictly increasing x and doesn't check it. Keep only samples later than
+        # everything before them (an overlap with the previous batch is dropped, not interleaved).
+        running_max = np.maximum.accumulate(src_t)
+        keep = np.concatenate([[True], src_t[1:] > running_max[:-1]])
         src_t, src = src_t[keep], src[keep]
         k0 = gr["k"]
         k1 = int(math.floor((src_t[-1] - gr["origin"]) / DT + 1e-9))

@@ -63,7 +63,10 @@ class BatchFacts:
     battery: float | None = None
     thermal: str | None = None
     low_power: bool | None = None
-    # deviceMotion for the signal processing: epoch seconds, user acceleration and gravity in g
+    # deviceMotion for the signal processing, on the phone's uptime clock (t0Up + t, seconds): it only
+    # moves forward during a recording, while each batch's UTC mapping comes from the app's latest
+    # clock anchor and can overlap the previous batch by a few ms. UTC = uptime + clock_offset.
+    clock_offset: float = 0.0
     motion_t: list[float] = field(default_factory=list)
     motion_ua: list[tuple[float, float, float]] = field(default_factory=list)
     motion_g: list[tuple[float, float, float]] = field(default_factory=list)
@@ -105,13 +108,14 @@ def parse_batch(b: dict) -> BatchFacts:
     source = b.get("source") if b.get("source") in SOURCES else "live"
     device = b["device"]
     dm = b["deviceMotion"]
-    t0_s = t0.timestamp()
+    t0_up = float(b["t0Up"])
     return BatchFacts(
         session_id=b["sessionId"], device_id=b["deviceId"], batch_seq=b["batchSeq"], source=source,
         t0_utc=t0, end_utc=end, sample_counts=counts, fixes=fixes, labels=labels,
         battery=_non_negative(device.get("battery")), thermal=device.get("thermal"),
         low_power=device.get("lowPower"),
-        motion_t=[t0_s + float(x) for x in dm["t"]],
+        clock_offset=t0.timestamp() - t0_up,
+        motion_t=[t0_up + float(x) for x in dm["t"]],
         motion_ua=list(zip(dm["ua_x"], dm["ua_y"], dm["ua_z"])),
         motion_g=list(zip(dm["g_x"], dm["g_y"], dm["g_z"])),
     )

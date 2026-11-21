@@ -15,6 +15,7 @@ Settings (set by Terraform, infra/modules/compute):
 
 from __future__ import annotations
 
+import datetime as dt
 import json
 import logging
 import os
@@ -27,7 +28,7 @@ from azure.identity import DefaultAzureCredential
 from azure.keyvault.secrets import SecretClient
 from azure.storage.blob import BlobServiceClient, ContentSettings
 
-from ingest_core import contract
+from ingest_core import contract, owners
 from ingest_core.handler import Response, handle_batch, handle_session
 from ingest_core.keys import KeyStore, parse_secret
 
@@ -53,6 +54,7 @@ class AzureSinks:
         self._producer_lock = threading.Lock()  # the producer client is not thread-safe
         self._lake = BlobServiceClient(os.environ["STORAGE_BLOB_ENDPOINT"], credential=_credential) \
             .get_container_client(os.environ.get("LAKE_CONTAINER", "lake"))
+        self._owners = owners.OwnerCache(self._claim_owner)
 
     def publish(self, partition_key: str, body: bytes, properties: dict) -> None:
         event = EventData(body)
@@ -74,6 +76,21 @@ class AzureSinks:
         except ResourceExistsError:
             return False
         return True
+
+    def session_owner(self, session_id: str, device_id: str) -> str:
+        return self._owners.owner(session_id, device_id)
+
+    def _claim_owner(self, session_id: str, device_id: str) -> str:
+        # overwrite=False makes the first writer the owner, also when two workers race; the loser
+        # reads the winner's marker. Any other failure raises (503, the phone retries).
+        name = owners.blob_name(session_id)
+        received = dt.datetime.now(dt.timezone.utc).isoformat(timespec="milliseconds").replace("+00:00", "Z")
+        try:
+            self._lake.upload_blob(name, owners.encode(session_id, device_id, received), overwrite=False,
+                                   content_settings=ContentSettings(content_type="application/json"))
+            return device_id
+        except ResourceExistsError:
+            return owners.decode(self._lake.download_blob(name).readall())
 
 
 def _load_device_key_hashes() -> dict[str, frozenset[str]]:
@@ -130,3 +147,6 @@ class _LazySinks:
 
     def archive(self, blob_name: str, gz_body: bytes) -> bool:
         return _get_sinks().archive(blob_name, gz_body)
+
+    def session_owner(self, session_id: str, device_id: str) -> str:
+        return _get_sinks().session_owner(session_id, device_id)

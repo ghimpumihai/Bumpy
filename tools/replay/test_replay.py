@@ -185,6 +185,7 @@ class _Sinks:
     def __init__(self):
         self.events: list[tuple[dict, dict]] = []
         self.fail_next = 1  # the first publish fails: the replay must retry
+        self.owners: dict[str, str] = {}
 
     def publish(self, partition_key, body, properties):
         if self.fail_next:
@@ -194,6 +195,9 @@ class _Sinks:
 
     def archive(self, blob_name, gz_body):
         return True
+
+    def session_owner(self, session_id, device_id):  # the first deviceId seen owns the session (D53)
+        return self.owners.setdefault(session_id, device_id)
 
 
 @pytest.fixture

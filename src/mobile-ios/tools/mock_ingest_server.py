@@ -50,6 +50,8 @@ Both are checked in the same order as the ingest function:
        stored under; the mock has a single key and skips that check.)
     6. x-idempotency-key, when present: POST "<sessionId>:<batchSeq>"; PUT "<sessionId>:meta-start"
        (no batchCount) or "<sessionId>:meta-stop" (with batchCount) (400 otherwise)
+       (The function then answers 403 when the session was first sent by another deviceId, D53;
+       the mock doesn't record session owners.)
   201 first time a (sessionId, batchSeq) or (sessionId, start|stop) is seen | --dup-status
   (default 200, as the backend: it dedupes later in the database) for a repeat.
 

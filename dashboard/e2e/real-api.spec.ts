@@ -43,7 +43,8 @@ test("the live view shows the phone that is recording, polled from the real API"
 
 test("the sessions list shows each trip's real state", async ({ page }) => {
   await page.goto("/sessions");
-  for (const id of [LIVE, ENDED, NO_CONTEXT]) await expect(page.locator(`a[href$="/sessions/${id}"]`).first()).toBeVisible();
+  const table = page.getByRole("table");
+  for (const id of [LIVE, ENDED, NO_CONTEXT]) await expect(table.locator(`a[href$="/sessions/${id}"]`)).toBeVisible();
 });
 
 test("an ended trip reads as processing, with its track and context", async ({ page }) => {
@@ -54,7 +55,7 @@ test("an ended trip reads as processing, with its track and context", async ({ p
 
 test("a trip without session.json says its context is unknown instead of inventing one", async ({ page }) => {
   await page.goto(`/sessions/${NO_CONTEXT}`);
-  await expect(page.getByText("unknown (session.json not received)").first()).toBeVisible();
+  await expect(page.getByText(/Context unknown \(session\.json never arrived\)/)).toBeVisible();
   await expect(page.getByText("Experimental: mount unknown")).toBeVisible();
   await expect(page.getByText("(not rigid)")).toHaveCount(0);
 });

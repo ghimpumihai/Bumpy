@@ -22,7 +22,7 @@ test("the start page is the live view (plan 02 §5)", async ({ page }) => {
 test("map shows the aggregated segments and the overview", async ({ page }) => {
   const errors = trackErrors(page);
   await page.goto("/map");
-  await expect(page.getByRole("region", { name: "Dataset overview" })).toContainText("Confirmed potholes");
+  await expect(page.getByRole("region", { name: "Dataset overview" })).toContainText("Potholes");
   await expect(page.getByRole("region", { name: /Heat map of trips/ })).toBeVisible();
   await expect(page.locator(".maplibregl-canvas")).toBeVisible();
   await expect(page.getByRole("region", { name: "Map legend" })).toBeVisible();
@@ -36,7 +36,8 @@ test("sessions page links to a session with its data-quality panel", async ({ pa
   await expect(page.getByRole("heading", { name: "Sessions" })).toBeVisible();
   const rows = page.getByRole("row");
   await expect(rows).toHaveCount(20); // header + 19 mock sessions
-  await expect(page.getByText("Incomplete").first()).toBeVisible();
+  // The phone layout (a list) is hidden at desktop width: assert on the table.
+  await expect(page.getByRole("table").getByText("Incomplete").first()).toBeVisible();
 
   await page.goto(`/sessions/${RECORDED_SESSION}`);
   await expect(page.getByText("Detection vs. manual taps")).toBeVisible();
@@ -66,7 +67,7 @@ test("sessions page shows the data-quality table", async ({ page }) => {
   const errors = trackErrors(page);
   await page.goto("/sessions");
   await expect(page.getByRole("heading", { name: "Sessions" })).toBeVisible();
-  await expect(page.getByText("Degraded").first()).toBeVisible();
+  await expect(page.getByRole("table").getByText("Degraded").first()).toBeVisible();
   expect(errors).toEqual([]);
 });
 

@@ -11,7 +11,7 @@ test("reads config.json and talks to the read API over HTTP, without loading the
   });
   await page.goto("/map");
   await expect(page.getByRole("button", { name: /Read API: data source settings/ })).toBeVisible();
-  await expect(page.getByRole("region", { name: "Dataset overview" })).toContainText("Confirmed potholes");
+  await expect(page.getByRole("region", { name: "Dataset overview" })).toContainText("Potholes");
   expect(apiRequests).toEqual(expect.arrayContaining(["/api/overview", "/api/segments", "/api/events"]));
   expect(mockChunks).toEqual([]);
 });

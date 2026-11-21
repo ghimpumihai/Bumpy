@@ -6,11 +6,13 @@ on:
       - "services/processor/**"
       - "db/**"
       - ".github/workflows/processor-ci.yml"
+      - "!**/*.md"
   push:
     branches: [main]
     paths:
       - "services/processor/**"
       - "db/**"
+      - "!**/*.md"
 
 permissions:
   contents: read

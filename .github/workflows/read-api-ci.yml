@@ -7,11 +7,13 @@ on:
       - "services/processor/roadride/**"
       - "db/**"
       - ".github/workflows/read-api-ci.yml"
+      - "!**/*.md"
   push:
     branches: [main]
     paths:
       - "services/read-api/**"
       - "db/**"
+      - "!**/*.md"
 
 permissions:
   contents: read

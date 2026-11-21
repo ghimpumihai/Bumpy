@@ -2,9 +2,16 @@ name: iOS app
 
 on:
   push:
-    paths: ["src/mobile-ios/**", ".github/workflows/ios-app.yml"]
+    branches: [main]
+    paths:
+      - "src/mobile-ios/**"
+      - "!src/mobile-ios/**/*.md"
+      - ".github/workflows/ios-app.yml"
   pull_request:
-    paths: ["src/mobile-ios/**", ".github/workflows/ios-app.yml"]
+    paths:
+      - "src/mobile-ios/**"
+      - "!src/mobile-ios/**/*.md"
+      - ".github/workflows/ios-app.yml"
   workflow_dispatch:
 
 permissions:
@@ -69,15 +76,7 @@ jobs:
           sudo xcode-select -s "$XCODE"
           xcodebuild -version
 
-      - name: Build for device (unsigned, Release)
-        run: |
-          set -o pipefail
-          mkdir -p build-logs
-          xcodebuild -project SensorRecorder.xcodeproj -scheme SensorRecorder \
-            -configuration Release -sdk iphoneos -destination 'generic/platform=iOS' \
-            CODE_SIGNING_ALLOWED=NO build 2>&1 | tee build-logs/build-device.log
-
-      - name: Pick a simulator
+      - name: Pick a simulator and start booting it
         id: sim
         run: |
           set -o pipefail
@@ -88,6 +87,18 @@ jobs:
           c.sort(key=lambda t: [int(p) for p in t[0].split("iOS-")[-1].split("-")])
           print(c[-1][1])')
           echo "udid=$UDID" >> "$GITHUB_OUTPUT"
+          # Boots while the next steps compile; xcodebuild waits for it if it isn't ready yet.
+          nohup xcrun simctl bootstatus "$UDID" -b > /dev/null 2>&1 &
+
+      # Pull requests skip the Release device build to save a minute; main still checks it.
+      - name: Build for device (unsigned, Release)
+        if: github.event_name != 'pull_request'
+        run: |
+          set -o pipefail
+          mkdir -p build-logs
+          xcodebuild -project SensorRecorder.xcodeproj -scheme SensorRecorder \
+            -configuration Release -sdk iphoneos -destination 'generic/platform=iOS' \
+            COMPILER_INDEX_STORE_ENABLE=NO CODE_SIGNING_ALLOWED=NO build 2>&1 | tee build-logs/build-device.log
 
       - name: Unit tests
         run: |
@@ -95,7 +106,8 @@ jobs:
           mkdir -p build-logs
           xcodebuild -project SensorRecorder.xcodeproj -scheme SensorRecorder \
             -destination "id=${{ steps.sim.outputs.udid }}" \
-            -only-testing:SensorRecorderTests -resultBundlePath TestResults.xcresult test 2>&1 \
+            -only-testing:SensorRecorderTests -resultBundlePath TestResults.xcresult \
+            COMPILER_INDEX_STORE_ENABLE=NO test 2>&1 \
             | tee build-logs/unit-tests.log
 
       # The unit tests regenerate tools/fixtures/ingest_batch_v1.json.gz from the app's real

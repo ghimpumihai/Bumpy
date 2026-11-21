@@ -8,10 +8,12 @@ on:
       - "services/processor/roadride/live.py"
       - "src/mobile-ios/tools/fixtures/**"
       - ".github/workflows/replay-ci.yml"
+      - "!**/*.md"
   push:
     branches: [main]
     paths:
       - "tools/replay/**"
+      - "!**/*.md"
 
 permissions:
   contents: read

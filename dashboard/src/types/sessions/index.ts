@@ -206,7 +206,7 @@ export interface RoadEventProperties {
   type: RoadEventType;
   tUtc: IsoDateTime;
   speedKmh: number | null;
-  /** Peak high-passed vertical acceleration (pothole) or pitch rate (speed bump). */
+  /** m/s²: peak |band-passed (1–30 Hz) vertical acceleration|, at the jolt (pothole) or at either axle (speed bump). */
   magnitude: number;
   /** 0–1. */
   confidence: number;

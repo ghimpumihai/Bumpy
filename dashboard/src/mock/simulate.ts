@@ -47,6 +47,8 @@ const SPEED_BUMP_MAX_DETECT_MS = 40 / MS_TO_KMH;
 const RAIL_JOINT_SPACING_M = 25;
 const RAIL_JOINT_DETECT_PROBABILITY = 0.12;
 const FALSE_POSITIVES_PER_KM = 0.25;
+// services/processor dsp.py POTHOLE_THRESHOLD_MS2: the backend never reports a smaller pothole.
+const POTHOLE_THRESHOLD_MS2 = 5;
 
 export interface SimulatedEvent {
   id: string;
@@ -299,12 +301,13 @@ function addEventsAndTaps(sim: SimulatedSession, random: Random, dyn: VehicleDyn
           const magnitude = random.range(6, 12) * dyn.roughnessFactor;
           sim.aVert[k] += magnitude * (random.chance(0.5) ? 1 : -1);
           if (v > POTHOLE_MIN_SPEED_MS && random.chance(handheld ? 0.45 : 0.86)) {
-            pushEvent(k, "pothole", magnitude, random.range(0.65, 0.98));
+            pushEvent(k, "pothole", Math.max(POTHOLE_THRESHOLD_MS2, magnitude), random.range(0.65, 0.98));
           }
           if (random.chance(v > POTHOLE_MIN_SPEED_MS ? 0.8 : 0.4)) sim.taps.push({ type: "pothole", sampleIndex: k + tapDelay() });
         } else {
-          const pitchRate = random.range(0.2, 0.5);
-          if (v < SPEED_BUMP_MAX_DETECT_MS && random.chance(0.82)) pushEvent(k, "speed_bump", pitchRate, random.range(0.6, 0.95));
+          // Like the backend: the largest band-passed vertical jolt of the two axles, m/s².
+          const jolt = random.range(4, 10) * dyn.roughnessFactor;
+          if (v < SPEED_BUMP_MAX_DETECT_MS && random.chance(0.82)) pushEvent(k, "speed_bump", jolt, random.range(0.6, 0.95));
           if (random.chance(0.85)) sim.taps.push({ type: "speed_bump", sampleIndex: k + tapDelay() });
         }
       }
@@ -314,7 +317,7 @@ function addEventsAndTaps(sim: SimulatedSession, random: Random, dyn: VehicleDyn
     }
     const metres = (grid - Math.max(previousGrid, 0)) * ROUTE_STEP_M;
     if (v > POTHOLE_MIN_SPEED_MS && random.chance((FALSE_POSITIVES_PER_KM * metres) / 1000)) {
-      pushEvent(k, "pothole", random.range(3.5, 5.5), random.range(0.3, 0.55));
+      pushEvent(k, "pothole", random.range(POTHOLE_THRESHOLD_MS2, 6.5), random.range(0.3, 0.55));
     }
     previousGrid = grid;
   }

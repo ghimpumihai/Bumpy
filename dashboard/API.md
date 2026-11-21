@@ -84,6 +84,7 @@ says so and shows each card's last data time, instead of reporting the phones as
 | `msdvZ`, `msiPct` | MSDV of the whole session (ISO 2631-1 Wf, vertical); `msiPct = msdvZ / 3` |
 | `quality.*` | per-stream rows/rates/gaps, GPS accuracy, invalid windows, `rejected/late/duplicate` live batches |
 | `detection` | detections vs. manual taps within ±1.5 s (precision, recall) |
+| `RoadEvent.magnitude` | m/s²: peak \|band-passed (1–30 Hz) vertical acceleration\| at the jolt (pothole, never below the 5 m/s² detection threshold) or at either axle (speed bump) |
 | `SessionSeries` | `session_series` (≈ 5 Hz vertical/lateral/longitudinal acceleration, speed, MSDV so far) |
 | `SegmentAggregate` | `segment_agg` table, rebuilt by the aggregation step (segment × vehicle type, plus an `all` row) |
 | `roughness` | `exp(mean(log r − vehicle effect − β·log(v / 10 m/s)))`: what a car would feel at 36 km/h |

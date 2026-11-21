@@ -177,6 +177,13 @@ in the repo.
 - Background modes `location` + `audio` keep recording alive if the app is backgrounded (WARN).
 - Every warning rule of spec §7 is implemented in `Core/HealthEvaluator.swift`. New PROBLEMs
   trigger a haptic, a sound and an `app_log.txt` entry.
+- The dashboard's live numbers use the backend's definitions, so the phone and the web dashboard
+  agree (`Recording/LiveSignals.swift`):
+  - **Roughness now:** RMS of the 1–30 Hz band-passed vertical acceleration (the backend's filter
+    coefficients), averaged exponentially over about 5 s.
+  - **MSDV so far:** ISO 2631-1 Wf on 0.1 s block means, with the blocks on a fixed 10 Hz grid.
+  - **Signs:** CoreMotion's `userAcceleration` is minus the phone's acceleration, so it is flipped:
+    vertical is positive up, lateral sway positive to the vehicle's left.
 
 ## Code map
 

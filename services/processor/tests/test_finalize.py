@@ -406,3 +406,52 @@ def test_finalize_scores_detections_and_marks_handled_and_drifting_windows(db, b
     rough_windows = _one(db, "SELECT sum(n_windows) FILTER (WHERE roughness_rms IS NOT NULL) FROM segment_observations")[0]
     all_windows = _one(db, "SELECT sum(n_windows) FROM segment_observations")[0]
     assert all_windows - rough_windows >= 50
+
+
+# --- Trip distance and GPS quality -------------------------------------------------------------
+
+def _fix(t, lat, lon, h_acc=5.0, speed=10.0):
+    import datetime as dt
+
+    from roadride.live import Fix
+    return Fix(t=dt.datetime.fromtimestamp(t, dt.timezone.utc), lat=lat, lon=lon, speed_ms=speed,
+               course_deg=None, h_acc_m=h_acc)
+
+
+def test_parked_gps_jitter_adds_no_distance():
+    rng = np.random.default_rng(0)
+    lat = 45 + rng.normal(0, 3.5 / 111_000, 600)
+    lon = 21 + rng.normal(0, 3.5 / 78_600, 600)
+    parked = [_fix(1000 + i, lat[i], lon[i], speed=rng.uniform(0, 0.3)) for i in range(600)]
+    assert fz.trip_distance_m(parked) < 5  # was ≈ 3 km
+
+
+def test_straight_drive_keeps_its_length_and_skips_inaccurate_fixes():
+    drive = [_fix(1000 + i, 45 + i * 10 / 111_195, 21.0) for i in range(601)]  # 10 m/s north for 10 min
+    assert fz.trip_distance_m(drive) == pytest.approx(6000, rel=0.01)
+    drive[300] = _fix(1300, 45.003, 21.0, h_acc=300.0)  # a 300 m outlier with its accuracy says so
+    assert fz.trip_distance_m(drive) == pytest.approx(6000, rel=0.01)
+    no_acc = [_fix(1000 + i, 45 + i * 10 / 111_195, 21.0, h_acc=None) for i in range(10)]
+    assert fz.trip_distance_m(no_acc) == 0.0  # the read API's track never shows such fixes either
+    no_speed = [_fix(1000 + i, 45 + i * 10 / 111_195, 21.0, speed=None) for i in range(11)]
+    assert fz.trip_distance_m(no_speed) == pytest.approx(100, rel=0.01)
+
+
+def _assess_trip(fixes, seconds=600):
+    from types import SimpleNamespace
+
+    batch = SimpleNamespace(motion_t=list(np.arange(0, seconds, 0.01)), batch_seq=0)
+    series = [SeriesPoint(t=1000 + 0.2 * (i + 1), a_vert=0, a_lat=0, a_lon=0, speed=10, msdv=0)
+              for i in range(int(seconds / 0.2))]
+    return fz.assess(fz.Trip("s", [batch], []), fz.TripSignal(series=series), 1, fixes)
+
+
+def test_fix_without_accuracy_is_unknown_not_poor():
+    status, valid, q = _assess_trip([(1000 + i, 45.0, 21.0, None) for i in range(601)])
+    assert (status, valid, q["invalidSeconds"]["gps_poor"]) == ("ok", 1.0, 0.0)  # was valid 0.0, 600 s poor
+
+
+def test_poor_gps_is_reported_but_does_not_invalidate_the_motion():
+    status, valid, q = _assess_trip([(1000 + i, 45.0, 21.0, 35.0) for i in range(601)])
+    assert valid == 1.0 and q["invalidSeconds"]["gps_poor"] == 600.0
+    assert status == "degraded"  # mostly poor GPS still degrades the trip

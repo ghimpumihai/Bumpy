@@ -210,6 +210,23 @@ final class UploadQueueTests: XCTestCase {
             .ingestURL?.absoluteString, "http://localhost:8080/api/ingest")
     }
 
+    /// The infra output `ingest_base_url` used to include `/api/ingest`; pasting it must not double the path.
+    func testParseBaseURLStripsAPastedIngestEndpoint() {
+        for (raw, base) in [("https://fn.azurewebsites.net/api/ingest", "https://fn.azurewebsites.net"),
+                            ("https://fn.azurewebsites.net/api/ingest/", "https://fn.azurewebsites.net"),
+                            (" https://fn.azurewebsites.net/API/Ingest ", "https://fn.azurewebsites.net"),
+                            ("https://host.test/prod/api/ingest", "https://host.test/prod"),
+                            ("http://192.168.1.20:8765/api/ingest", "http://192.168.1.20:8765"),
+                            ("https://fn.azurewebsites.net", "https://fn.azurewebsites.net"),
+                            ("https://api/ingest", "https://api/ingest")] { // host "api", path "/ingest": kept
+            XCTAssertEqual(UploadConfig.parseBaseURL(raw)?.absoluteString, base, raw)
+        }
+        let cfg = UploadConfig(baseURL: UploadConfig.parseBaseURL("https://fn.test/api/ingest"), deviceKey: "k")
+        XCTAssertEqual(cfg.ingestURL?.absoluteString, "https://fn.test/api/ingest")
+        XCTAssertEqual(cfg.sessionURL("S")?.absoluteString, "https://fn.test/api/ingest/sessions/S")
+        XCTAssertNil(UploadConfig.parseBaseURL("https://fn.test/api/ingest?code=x"), "query strings stay refused")
+        XCTAssertNil(UploadConfig.parseBaseURL("/api/ingest"))
+    }
 }
 
 /// Records background-time requests instead of calling UIKit.

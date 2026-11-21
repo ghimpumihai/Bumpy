@@ -85,7 +85,7 @@ final class AppModel {
     }
 
     /// Deletes a recorded session. Refuses the session being recorded, and any session the cloud is
-    /// not known to have in full (`TripCloudCopy.deleteRefusal`, D56): nothing is deleted on the
+    /// not known to have in full (`TripCloudCopy.deleteRefusal`, D55): nothing is deleted on the
     /// phone until its trip is in the cloud. The session ID comes from the folder's own session.json.
     func deleteSession(folder: URL) async throws {
         if let active = recording?.session.folder, active.standardizedFileURL == folder.standardizedFileURL,

@@ -1,6 +1,6 @@
 import Foundation
 
-/// How much of one trip is known to be in the cloud (D56): every batch the trip queued, the 2 s
+/// How much of one trip is known to be in the cloud (D55): every batch the trip queued, the 2 s
 /// windows that never entered the queue, and the Stop copy each count as one part. Only parts the
 /// backend acknowledged count as sent, so "complete" means the cloud has the whole trip.
 struct TripCloudCopy: Equatable {

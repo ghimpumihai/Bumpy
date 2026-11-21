@@ -62,7 +62,7 @@ struct UploadStatus: Equatable, Sendable {
 ///   is moved to `upload_failed/` so it never blocks the queue.
 /// - Idempotency key = `sessionId:batchSeq` (also inside the body).
 /// - Every 2xx/409 is recorded in `upload_acked/<sessionId>.txt` before the queue file is deleted,
-///   so the app knows which parts of a trip reached the cloud (Recap, delete guard; D56).
+///   so the app knows which parts of a trip reached the cloud (Recap, delete guard; D55).
 final class UploadQueue: Sendable {
     enum Outcome: Equatable {
         case uploaded(status: Int)
@@ -286,7 +286,7 @@ final class UploadQueue: Sendable {
         kick()
     }
 
-    // MARK: Acknowledged parts (D56)
+    // MARK: Acknowledged parts (D55)
 
     /// Where one trip stands in the upload, from the queue, `upload_failed/` and the ack record.
     struct TripState: Equatable, Sendable {

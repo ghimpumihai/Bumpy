@@ -451,7 +451,7 @@ final class RecordingSession: @unchecked Sendable {
         }
         obj["source"] = "live"
         if var stats = obj["stats"] as? [String: Any] {
-            stats.removeValue(forKey: "uploadWindowsNotQueued") // local only (D56): not part of §6.1
+            stats.removeValue(forKey: "uploadWindowsNotQueued") // local only (D55): not part of §6.1
             obj["stats"] = stats
         }
         if let batchCount { obj["batchCount"] = batchCount }

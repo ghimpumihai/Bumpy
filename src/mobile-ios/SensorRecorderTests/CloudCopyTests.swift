@@ -1,7 +1,7 @@
 import XCTest
 @testable import SensorRecorder
 
-/// D56: which parts of a trip the backend acknowledged, what the Recap shows, when a trip may be
+/// D55: which parts of a trip the backend acknowledged, what the Recap shows, when a trip may be
 /// deleted, and retrying rejected parts.
 final class CloudCopyTests: XCTestCase {
     private var transport: MockTransport!

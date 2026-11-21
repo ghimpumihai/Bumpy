@@ -15,7 +15,7 @@ resource "azurerm_storage_account" "data" {
   public_network_access_enabled   = true # login-protected public endpoint, no private endpoints (plan §6)
   tags                            = var.tags
 
-  # D57: a deleted or overwritten trip blob can be restored for 14 days. Ingest never overwrites, but
+  # D56: a deleted or overwritten trip blob can be restored for 14 days. Ingest never overwrites, but
   # finalize rewrites its parquet, so no immutability policy; old versions expire (management policy).
   blob_properties {
     versioning_enabled = true

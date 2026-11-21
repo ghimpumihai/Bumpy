@@ -63,7 +63,7 @@ jobs:
       - name: Select latest stable Xcode
         run: |
           set -euo pipefail
-          XCODE=$(ls -d /Applications/Xcode_*.app 2>/dev/null | grep -vi beta | sort -V | tail -1 || true)
+          XCODE=$(find /Applications -maxdepth 1 -name 'Xcode_*.app' 2>/dev/null | grep -vi beta | sort -V | tail -1 || true)
           if [ -z "$XCODE" ] && [ -d /Applications/Xcode.app ]; then
             XCODE=/Applications/Xcode.app
           fi

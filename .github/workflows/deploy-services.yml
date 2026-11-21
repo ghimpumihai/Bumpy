@@ -85,7 +85,7 @@ jobs:
           az containerapp job update -n "$MIGRATE_JOB" -g "$RG" --image "$IMAGE" --output none
           execution=$(az containerapp job start -n "$MIGRATE_JOB" -g "$RG" --query name -o tsv)
           echo "execution: $execution"
-          for i in $(seq 1 60); do
+          for _ in $(seq 1 60); do
             status=$(az containerapp job execution show -n "$MIGRATE_JOB" -g "$RG" \
               --job-execution-name "$execution" --query properties.status -o tsv)
             echo "status: $status"

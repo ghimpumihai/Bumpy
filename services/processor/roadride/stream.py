@@ -84,9 +84,11 @@ class PartitionWriter:
     from several threads)."""
 
     def __init__(self, eventhub: str,
-                 connect_fn: Callable[[str], psycopg.Connection] | None = None, on_trip_end=None):
+                 connect_fn: Callable[[str], psycopg.Connection] | None = None, on_trip_end=None,
+                 partitions: list[str] | None = None):
         self.eventhub = eventhub
         self.on_trip_end = on_trip_end  # called after a commit that ended at least one trip
+        self.partitions = list(partitions or [])  # every partition of the hub, for read_up_to
         self._connect = connect_fn or (
             lambda pid: connect(application_name=f"roadride-stream-{pid}"))
         self._conns: dict[str, psycopg.Connection] = {}
@@ -178,6 +180,25 @@ class PartitionWriter:
         """The SDK found nothing new on the partition: it is read to its end."""
         enqueued, _ = self._progress.get(partition_id, (None, False))
         self._progress[partition_id] = (enqueued, True)
+
+    def read_up_to(self) -> dt.datetime | None:
+        """Everything ingest enqueued before this time has been applied: the oldest partition's last
+        committed event, or now for a partition read to its end. None until every partition has
+        reported since the start, so a restart after an outage doesn't measure silence against now
+        while the backlog is still unread."""
+        now = dt.datetime.now(UTC)
+        progress = dict(self._progress)
+        marks = []
+        for pid in set(self.partitions) | set(progress):
+            enqueued, caught_up = progress.get(pid, (None, False))
+            if caught_up:
+                marks.append(now)
+            elif enqueued is None:
+                return None
+            else:
+                marks.append(enqueued)
+        return min(marks) if marks else None
+
     def lag_seconds(self) -> dict[str, float]:
         """Processor lag per partition (plan §5): now minus the enqueued time of the last processed
         event, or 0 when the partition is read to its end."""
@@ -261,15 +282,16 @@ def run() -> None:
         saved = Store(conn).load_checkpoint_rows(eventhub, CONSUMER_GROUP)
     # Resume after each saved checkpoint (unless the hub was recreated); read unseen partitions from
     # the start ("-1"), since Event Hubs keeps only a day and every batch counts.
-    _, starting = starting_positions(client, saved)
+    partitions, starting = starting_positions(client, saved)
     log.info("starting from %s", starting)
 
+    writer = PartitionWriter(eventhub, partitions=partitions)
     notifier = ReadyNotifier(
         ServiceBusSender(os.environ["SERVICEBUS_FULLY_QUALIFIED_NAMESPACE"], os.environ["SERVICEBUS_QUEUE_NAME"]),
-        connect,
+        connect, writer.read_up_to,
     )
+    writer.on_trip_end = notifier.kick
     notifier.start()
-    writer = PartitionWriter(eventhub, on_trip_end=notifier.kick)
     telemetry.observe_lag(writer.lag_seconds)
 
     on_event_batch, on_error = callbacks(writer)

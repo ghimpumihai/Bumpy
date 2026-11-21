@@ -1,6 +1,8 @@
 import gzip
 import json
 
+import pytest
+
 from conftest import DEVICE_KEY, FakeSinks, gz, headers
 from ingest_core import contract
 from ingest_core.handler import handle_batch, handle_session
@@ -60,27 +62,66 @@ def test_probe_header_with_bad_body_names_the_probe(batch, keys, sinks):
     assert resp.body["error"].startswith("probe request (x-probe: 1) with a non-probe body")
 
 
-def test_wrong_content_encoding_and_type(batch, keys, sinks):
-    assert handle_batch(headers(**{"Content-Encoding": "x-gzip"}), gz(batch), keys, sinks).status == 400
+def test_wrong_content_type(batch, keys, sinks):
     assert handle_batch(headers(**{"Content-Type": "text/plain"}), gz(batch), keys, sinks).status == 400
 
 
-def test_body_already_inflated_by_host_is_accepted(batch, keys, sinks):
+@pytest.mark.parametrize("enc", ["gzip", "x-gzip", "identity", None])
+def test_gzip_is_decided_by_magic_bytes_not_content_encoding(enc, batch, keys, sinks):
+    h = headers(**{"Content-Encoding": enc})
+    if enc is None:
+        del h["Content-Encoding"]
+    assert handle_batch(h, gz(batch), keys, sinks).status == 200
+
+
+@pytest.mark.parametrize("keep_header", [True, False])
+def test_body_already_inflated_by_host_is_accepted(keep_header, batch, keys, sinks):
+    """The host may inflate the body and keep or drop Content-Encoding (plan §5)."""
+    h = headers()
+    if not keep_header:
+        del h["Content-Encoding"]
     raw = json.dumps(batch).encode()
-    assert handle_batch(headers(), raw, keys, sinks).status == 200
+    assert handle_batch(h, raw, keys, sinks).status == 200
     (blob,) = sinks.blobs.values()
     assert json.loads(gzip.decompress(blob)) == batch
+
+
+def test_body_neither_gzip_nor_json_is_400(keys, sinks):
+    resp = handle_batch(headers(**{"Content-Encoding": "br"}), b"\x8b\x0b\x80binary", keys, sinks)
+    assert resp.status == 400
+    assert resp.body["error"].startswith("body is neither gzip")
 
 
 def test_too_large_is_413(batch, keys, sinks):
     batch["padding"] = "x" * (contract.MAX_INFLATED + 1)
     assert handle_batch(headers(), gz(batch), keys, sinks).status == 413
+    assert handle_batch(headers(), json.dumps(batch).encode(), keys, sinks).status == 413
 
 
 def test_broken_gzip_and_json_are_400(keys, sinks):
     assert handle_batch(headers(), b"\x1f\x8b\x08\x00broken", keys, sinks).status == 400
     assert handle_batch(headers(), gzip.compress(b"{nope"), keys, sinks).status == 400
     assert handle_batch(headers(), gzip.compress(b'{"a": NaN}'), keys, sinks).status == 400
+    assert handle_batch(headers(), gzip.compress(b"[" * 100000), keys, sinks).status == 400  # not 500
+
+
+@pytest.mark.parametrize("mutate", [
+    lambda b: b["labels"].append({"t": 1, "type": "x" * 4096, "value": None, "note": None}),
+    lambda b: b["labels"].append({"t": 1, "type": "pothole", "value": None, "note": "a\u0000b"}),
+    lambda b: b["labels"].append({"t": 1, "type": "pothole", "value": None, "note": "\ud800"}),
+    lambda b: b.update(deviceId="D" * 129),
+    lambda b: b["device"].update(thermal="x" * (contract.MAX_TEXT_LEN + 1)),
+])
+def test_strings_the_database_cant_store_are_400(mutate, batch, keys, sinks):
+    mutate(batch)
+    resp = handle_batch(headers(), gz(batch), keys, sinks)
+    assert resp.status == 400, resp.body
+    assert not sinks.events and not sinks.blobs
+
+
+def test_a_long_note_is_still_accepted(batch, keys, sinks):
+    batch["labels"].append({"t": 1, "type": "note", "value": None, "note": "é" * contract.MAX_TEXT_LEN})
+    assert handle_batch(headers(), gz(batch), keys, sinks).status == 200
 
 
 def test_idempotency_key_mismatch_is_400(batch, keys, sinks):
@@ -118,11 +159,22 @@ def test_start_and_stop_are_archived_separately(session_meta, keys, sinks):
     assert all(e[0] == session_meta["deviceId"] for e in sinks.events)  # same partition as batches
 
 
-def test_session_without_device_id_uses_session_as_partition(session_meta, keys, sinks):
-    session_meta["deviceId"] = ""
+def test_session_without_device_id_is_400(session_meta, keys, sinks):
+    """The key is bound to a deviceId, so metadata without one can't be attributed to a device."""
     sid = session_meta["sessionId"]
-    assert handle_session(sid, headers(), gz(session_meta), keys, sinks).status == 200
-    assert sinks.events[0][0] == sid
+    session_meta["deviceId"] = ""
+    assert handle_session(sid, headers(), gz(session_meta), keys, sinks).status == 400
+    del session_meta["deviceId"]
+    assert handle_session(sid, headers(), gz(session_meta), keys, sinks).status == 400
+    assert not sinks.events
+
+
+def test_session_strings_are_capped(session_meta, keys, sinks):
+    sid = session_meta["sessionId"]
+    session_meta["vehicle"]["notes"] = "x" * (contract.MAX_TEXT_LEN + 1)
+    assert handle_session(sid, headers(), gz(session_meta), keys, sinks).status == 400
+    session_meta["vehicle"]["notes"] = "nul\u0000"
+    assert handle_session(sid, headers(), gz(session_meta), keys, sinks).status == 400
 
 
 def test_bad_session_path_is_404(session_meta, keys, sinks):

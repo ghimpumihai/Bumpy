@@ -3,10 +3,12 @@
 Checks run in the same order as the mock server the app was tested against
 (src/mobile-ios/tools/mock_ingest_server.py):
   1. x-device-key (401)
-  2. Content-Encoding exactly "gzip", Content-Type application/json (400)
-  3. gunzip with size caps (413 too large, 400 broken gzip)
+  2. Content-Type application/json (400)
+  3. gunzip when the body starts with the gzip magic bytes, whatever Content-Encoding says: the
+     Functions host may inflate the body and drop the header (plan §5). Size caps (413 too large,
+     400 broken gzip)
   4. JSON (400)
-  5. schema (400; the app's {"probe": true} lands here: "reachable, key accepted")
+  5. schema and string limits (400; the app's {"probe": true} lands here: "reachable, key accepted")
   6. x-idempotency-key when present (400)
 Then the message goes to Event Hubs and the raw archive, and the answer is 200. The function can't
 tell a new batch from a retry; repeats are dropped in the database (plan §8). If Event Hubs or Blob
@@ -67,31 +69,21 @@ def _decode(headers: Mapping[str, str], raw: bytes | None, keys: KeyChecker):
         return _error(400, "missing/invalid Content-Length")
     if len(raw) > contract.MAX_BODY:
         return _error(413, f"body larger than {contract.MAX_BODY} bytes")
-    enc = headers.get("content-encoding")
-    if enc != "gzip":
-        return _error(400, f"Content-Encoding must be exactly 'gzip', got {enc!r}")
     if not (headers.get("content-type") or "").lower().startswith("application/json"):
         return _error(400, "Content-Type must be application/json")
-    # The Functions host doesn't document whether it inflates gzip bodies itself (plan §5), so
-    # decompress only when the gzip magic bytes are there.
-    if contract.is_gzip(raw):
-        try:
-            body = contract.gunzip_one_member(raw)
-        except TooLarge as e:
-            return _error(413, str(e))
-        except ValueError as e:
-            return _error(400, str(e))
-        gz = raw
-    else:
-        if len(raw) > contract.MAX_INFLATED:
-            return _error(413, f"decompressed body larger than {contract.MAX_INFLATED} bytes")
-        body = raw
-        gz = gzip.compress(raw)
+    # The Functions host doesn't document whether it inflates gzip bodies itself, or whether it
+    # then drops Content-Encoding (plan §5), so the magic bytes decide, not the header.
+    try:
+        body, was_gzip = contract.decode_body(raw)
+    except TooLarge as e:
+        return _error(413, str(e))
+    except ValueError as e:
+        return _error(400, str(e))
     try:
         parsed = contract.parse_json(body)
     except ValueError as e:
-        return _error(400, str(e))
-    return parsed, body, gz
+        return _error(400, str(e) if was_gzip else contract.not_gzip_reason(str(e)))
+    return parsed, body, raw if was_gzip else gzip.compress(body)
 
 
 def _lower(headers: Mapping[str, str]) -> dict[str, str]:
@@ -155,8 +147,8 @@ def handle_session(path_id: str, headers: Mapping[str, str], raw: bytes | None, 
                            f"(batchCount {'present' if phase == 'stop' else 'absent'})", ids)
 
     # Same partition as the device's batches, so the Stop copy reaches the processor after the
-    # trip's last batch (D33). Older app builds may leave deviceId empty: fall back to the session.
-    device_id = m.get("deviceId") if isinstance(m.get("deviceId"), str) and m.get("deviceId") else path_id
+    # trip's last batch (D33).
+    device_id = m["deviceId"]
     received = _now_iso(now or dt.datetime.now(dt.timezone.utc))
     properties = {"kind": "session", "sessionId": path_id, "deviceId": device_id,
                   "phase": phase, "receivedAtUtc": received}

@@ -7,7 +7,12 @@ The phone's front door (plan §5, "Azure Functions"). Python 3.12 on Flex Consum
 | `POST /api/ingest` | one gzipped 2-second batch | `200 {"ok":true,"sessionId","batchSeq"}` |
 | `PUT /api/ingest/sessions/{sessionId}` | gzipped `session.json`, at Start and at Stop | `200 {"ok":true,"sessionId","phase"}` |
 
-Every request is checked in the same order as [`mock_ingest_server.py`](../../src/mobile-ios/tools/mock_ingest_server.py), the server the app was built against: device key (401) → headers (400) → gunzip and size (413/400) → JSON (400) → schema (400) → idempotency header (400). The app's connectivity probe `{"probe":true}` gets a 400 that means "reachable, key accepted". Then the message:
+Every request is checked in the same order as [`mock_ingest_server.py`](../../src/mobile-ios/tools/mock_ingest_server.py), the server the app was built against: device key (401) → Content-Type (400) → gunzip and size (413/400) → JSON (400) → schema and string limits (400) → idempotency header (400). The app's connectivity probe `{"probe":true}` gets a 400 that means "reachable, key accepted".
+
+- **Gzip is decided by the magic bytes** `1f 8b`, not by `Content-Encoding`: the Functions host may inflate the body itself and drop the header (plan §5). A body without them is taken as JSON the host already inflated, within the same size limit.
+- **Strings:** `deviceId` at most 128 characters, `labels[].type` at most 64, every other string and object key at most 2000; no NUL character or unpaired surrogate anywhere (PostgreSQL text/jsonb can't store them; IDs and label types are in primary keys). The app sends UUIDs, label types of at most 15 characters and short notes.
+
+Then the message:
 
 1. goes to Event Hubs `ingest` as plain JSON, with the device ID as the partition key and the properties `kind` (`batch`/`session`), `sessionId`, `deviceId`, `batchSeq` or `phase`, and `receivedAtUtc`;
 2. is archived to `lake/raw/session=<sessionId>/<batchSeq:08d>.json.gz` (batches) or `session-start.json.gz` / `session-stop.json.gz` (metadata);

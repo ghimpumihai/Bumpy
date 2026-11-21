@@ -113,14 +113,21 @@ class Store:
 
     def _reopen(self, session_id: str) -> None:
         """A trip that already ended (or was finalized) got new data: a batch from the phone's backlog
-        after the 15-minute close, or its Stop copy. Back to `processing` with no message sent, so
-        ready.py sends "session ready" again and the finalize job rebuilds it from the archive."""
+        after the 15-minute close, or its Stop copy. Back to `live` with no message sent, so it ends
+        again by the same rules (every batch in, or 15 silent minutes) once its data has settled, and
+        ready.py then sends "session ready" once (D54). Back to `processing` instead, a phone that
+        streams on after the close started a finalize for every batch."""
         self.conn.execute(
-            "UPDATE sessions SET status = 'processing', ready_sent_at = NULL, updated_at = now() "
+            "UPDATE sessions SET status = 'live', ready_sent_at = NULL, updated_at = now() "
             "WHERE session_id = %s AND status <> 'live'",
             (session_id,),
         )
-        self.ended.append(session_id)
+
+    def _foreign(self, kind: str, session_id: str, device_id: str | None, owner: str) -> str:
+        # Any valid device key can name any sessionId (D54): this device's message is not the trip's data.
+        log.warning("ignoring a %s for session %s from device %s: the session belongs to device %s",
+                    kind, session_id, device_id, owner)
+        return "foreign_device"
 
     def _refresh_exclusions(self, session_id: str) -> None:
         row = self.conn.execute(
@@ -143,7 +150,8 @@ class Store:
 
     def apply_batch(self, f: BatchFacts, received_at: dt.datetime) -> str:
         """Returns "new", "late" (older than a batch already processed), "duplicate" (the phone sent
-        it again) or "replayed" (the same Event Hubs event read a second time by the processor).
+        it again), "replayed" (the same Event Hubs event read a second time by the processor) or
+        "foreign_device" (another device's batch under this sessionId: ignored).
 
         The batch itself (ingest_batches row, session counters, track) is all or nothing; labels,
         the signal processing and the live state are optional parts in their own savepoints, so a
@@ -157,12 +165,16 @@ class Store:
               device_id = COALESCE(sessions.device_id, EXCLUDED.device_id),
               source = CASE WHEN EXCLUDED.source = 'replay' THEN 'replay' ELSE sessions.source END,
               started_at = COALESCE(sessions.started_at, EXCLUDED.started_at)
+            WHERE sessions.device_id IS NULL OR sessions.device_id = EXCLUDED.device_id
             """,
             (f.session_id, f.device_id, f.source, f.t0_utc),
         )
-        last_seq, status = self.conn.execute(
-            "SELECT last_batch_seq, status FROM sessions WHERE session_id = %s FOR UPDATE", (f.session_id,)
+        owner, last_seq, status = self.conn.execute(
+            "SELECT device_id, last_batch_seq, status FROM sessions WHERE session_id = %s FOR UPDATE",
+            (f.session_id,),
         ).fetchone()
+        if owner != f.device_id:
+            return self._foreign("batch", f.session_id, f.device_id, owner)
         late = last_seq is not None and f.batch_seq < last_seq
 
         inserted = self.conn.execute(
@@ -221,11 +233,7 @@ class Store:
 
         if f.labels:
             self._optional("labels", f.session_id, lambda: self._insert_labels(f))
-        if status == "complete":
-            # Already finalized (e.g. closed after 15 silent minutes, then the phone's backlog came):
-            # the trip was reopened above, and the finalize job recomputes it whole from the archive.
-            pass
-        elif not late:
+        if not late:
             # Late batches skip the signal processing: the filters have moved past them. The
             # finalize job recomputes the whole trip in one pass.
             ok, result = self._optional("signal", f.session_id, lambda: self._process_signal(f))
@@ -359,17 +367,26 @@ class Store:
     # --- session metadata ----------------------------------------------------------------
 
     def apply_session(self, s: SessionFacts) -> str:
-        """Returns "applied", or "stale_start" for a Start copy that arrived after the Stop copy."""
+        """Returns "applied", "stale_start" for a Start copy that arrived after the Stop copy, or
+        "foreign_device" for another device's copy (ignored)."""
         self._touch_device(s.device_id)
         self.conn.execute(
             "INSERT INTO sessions (session_id, device_id, started_at) VALUES (%s, %s, %s) "
             "ON CONFLICT (session_id) DO NOTHING",
             (s.session_id, s.device_id, s.started_at),
         )
-        has_stop, status = self.conn.execute(
-            "SELECT expected_batch_count IS NOT NULL, status FROM sessions WHERE session_id = %s FOR UPDATE",
+        owner, has_stop, status = self.conn.execute(
+            "SELECT device_id, expected_batch_count IS NOT NULL, status FROM sessions "
+            "WHERE session_id = %s FOR UPDATE",
             (s.session_id,),
         ).fetchone()
+        # Ingest requires a deviceId; only an uploaded or archived copy can lack one.
+        if owner is not None and s.device_id is not None and owner != s.device_id:
+            return self._foreign("session copy", s.session_id, s.device_id, owner)
+        # An uploaded session.json has no batchCount either, so it lands here as a Start copy. That
+        # loses nothing: the app writes it from the same metadata as the Stop copy
+        # (RecordingSession.stop) and rewrites it later only to mark a crashed trip recovered
+        # (SessionStore.recoverUnfinishedSessions), and a crashed trip never sent a Stop copy.
         if s.phase == "start" and has_stop:
             return "stale_start"
 

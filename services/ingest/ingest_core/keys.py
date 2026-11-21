@@ -63,6 +63,10 @@ def may_send_as(names: Iterable[str], device_id: str) -> bool:
     return False
 
 
+class StaleKeys(RuntimeError):
+    """The cached keys are too old to trust and Key Vault can't be read (503)."""
+
+
 class KeyStore:
     """Caches the hashes and their device IDs, so the secret isn't read on every request.
 
@@ -75,14 +79,18 @@ class KeyStore:
     - in any case every `max_age_s`, so a revoked key stops working without a restart.
     A reload that fails raises (the caller answers 503 and the app retries), except the periodic one
     for a key that is already known: it keeps the cached keys, so a Key Vault blip doesn't turn every
-    phone's batches into 503s, and is tried again after `min_reload_s`.
+    phone's batches into 503s, and is tried again after `min_reload_s`. Cached keys older than
+    `max_stale_s` are no longer used (StaleKeys, so 503): a key revoked during a long Key Vault
+    outage stops working after that long at most, and the app's batches wait on the phone.
     """
 
     def __init__(self, loader: Callable[[], Mapping[str, Iterable[str]]], min_reload_s: float = 60.0,
-                 max_age_s: float = 300.0, clock: Callable[[], float] = time.monotonic):
+                 max_age_s: float = 300.0, max_stale_s: float = 6 * 3600.0,
+                 clock: Callable[[], float] = time.monotonic):
         self._loader = loader
         self._min_reload_s = min_reload_s
         self._max_age_s = max_age_s
+        self._max_stale_s = max_stale_s
         self._clock = clock
         self._lock = threading.Lock()
         self._entries: tuple[tuple[str, frozenset[str]], ...] | None = None
@@ -128,6 +136,10 @@ class KeyStore:
                 self._reload_if_older_than(self._min_reload_s, keep_on_failure=False)
             else:
                 self._reload_if_older_than(self._max_age_s, keep_on_failure=True)
+            age = self._clock() - self._loaded_at
+            if age > self._max_stale_s:
+                raise StaleKeys(f"device keys last loaded {age:.0f} s ago (Key Vault failing), "
+                                f"more than {self._max_stale_s:.0f} s")
             found = self._match(presented_hash)
             if found is None:
                 self._reload_if_older_than(self._min_reload_s, keep_on_failure=False)

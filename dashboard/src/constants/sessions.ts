@@ -1,14 +1,5 @@
-import type { ProcessingStatus, QualityStatus, RoadEventType, SessionSource, VehicleType } from "@/types/common";
+import type { ProcessingStatus, QualityStatus, RoadEventType, SessionSource } from "@/types/common";
 import type { ExclusionReason } from "@/types/sessions";
-
-export const VEHICLE_LABELS: Record<VehicleType, string> = {
-  car: "Car",
-  bus: "Bus",
-  tram: "Tram",
-  bike: "Bike",
-  boat: "Boat",
-  unknown: "Unknown",
-};
 
 /** How the trip reached the cloud. Streaming is the normal path, so it is labelled plainly. */
 export const SOURCE_LABELS: Record<SessionSource, string> = {

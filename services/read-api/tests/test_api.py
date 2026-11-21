@@ -95,6 +95,38 @@ def test_bad_parameters_are_400(client, path, params):
 def test_segment_detail(client):
     assert "not an H3 cell" in _err(client, "/api/segments/hello", 400)
     _err(client, "/api/segments/8a1fb46622dffff", 404)
+    for bad in ("8a1fb_46622dfff", "8a1fb46622dfff%20"):  # int(x, 16) let these through to a 404
+        assert "not an H3 cell" in _err(client, f"/api/segments/{bad}", 400)
+
+
+def test_segment_detail_lists_only_the_map_filters(client, dbname):
+    """SegmentAggregate.vehicleType is a VehicleFilter; postures are the app's two (RaterPosture)."""
+    import psycopg
+
+    cell = "8b1e00000000fff"
+    with psycopg.connect(dbname=dbname) as conn:
+        conn.execute("INSERT INTO segments (h3, center, boundary) VALUES (%s, "
+                     "ST_SetSRID(ST_MakePoint(23.62, 46.77), 4326)::geography, "
+                     "ST_Buffer(ST_SetSRID(ST_MakePoint(23.62, 46.77), 4326)::geography, 20))", (cell,))
+        for vt in ("bike", "bus", "all", "car"):
+            conn.execute("INSERT INTO segment_agg (h3, vehicle_type, n_sessions, n_passes, roughness_method,"
+                         " pothole_hits, pothole_passes, pothole_confirmed, sickness_sessions)"
+                         " VALUES (%s, %s, 1, 1, 'none', 0, 0, false, 0)", (cell, vt))
+        for posture in ("standing", "lying"):
+            conn.execute("INSERT INTO segment_sickness (h3, vehicle_type, rater_seat, rater_posture, n_sessions)"
+                         " VALUES (%s, 'bus', 'rear', %s, 1)", (cell, posture))
+    detail = _ok(client, f"/api/segments/{cell}")
+    assert [a["vehicleType"] for a in detail["byVehicle"]] == ["all", "car", "bus"]
+    assert sorted(x["raterPosture"] for x in detail["sicknessBySeat"]) == ["seated", "standing"]
+
+
+def test_rater_posture_is_one_of_the_apps(client, seed, fixture_batch):
+    other = "99999999-2222-4333-8444-555555555555"
+    people = {"operatorSeat": "front", "raterSeat": "rear left", "passengerCount": 2}
+    seed(meta=[session_meta(SID, people={**people, "raterPosture": "lying"}),
+               session_meta(other, device_id="PHONE-2", people={**people, "raterPosture": "standing"})])
+    by_id = {s["sessionId"]: s["people"]["raterPosture"] for s in _ok(client, "/api/sessions")["sessions"]}
+    assert by_id == {SID: "seated", other: "standing"}
 
 
 def test_unknown_route_is_404_with_error_body(client):
@@ -365,6 +397,23 @@ def cors_client(dbname, monkeypatch):
 ORIGIN = {"Origin": "https://dash.example"}
 
 
+def test_dropped_connection_is_503_with_cors(cors_client, monkeypatch):
+    """A failover or a connection the server closed is an OperationalError: retryable, so 503, not 500."""
+    import app.queries as q
+
+    real = q.overview
+
+    def dropped(conn):
+        monkeypatch.setattr(q, "overview", real)
+        conn.execute("SELECT pg_terminate_backend(pg_backend_pid())")
+
+    monkeypatch.setattr(q, "overview", dropped)
+    r = cors_client.get("/api/overview", headers=ORIGIN)
+    assert r.status_code == 503 and r.json() == {"error": "database busy, try again"}
+    assert r.headers.get("access-control-allow-origin") == "https://dash.example"
+    assert cors_client.get("/api/overview").status_code == 200  # the pool replaced the dead connection
+
+
 def test_500_is_json_with_cors_and_logged(cors_client, monkeypatch, caplog):
     # Without CORS headers on a 500, the browser reports a network error ("API unreachable").
     import app.queries as q
@@ -447,8 +496,13 @@ def test_live_distance_ignores_parked_jitter_and_inaccurate_fixes(client, seed, 
     assert 1000 < _ok(client, f"/api/sessions/{other}")["distanceM"] < 1100  # the outlier is skipped: still ≈ 19 × 55.6 m
 
 
-def test_lists_keep_each_session_apart(client, seed, fixture_batch):
-    """The list routes compute every session in one pass; each still gets its own numbers."""
+@pytest.mark.parametrize("chunk", [None, 1])
+def test_lists_keep_each_session_apart(client, seed, fixture_batch, monkeypatch, chunk):
+    """The list routes compute many sessions per statement (or one, chunk=1); each gets its own numbers."""
+    import app.queries as q
+
+    if chunk:
+        monkeypatch.setattr(q, "STATS_CHUNK", chunk)
     other = "99999999-2222-4333-8444-555555555555"
     seed(meta=[session_meta(SID)], batches=_trip(fixture_batch, 20))
     seed(meta=[session_meta(other, device_id="PHONE-2", vehicle="tram")],
@@ -495,3 +549,38 @@ def test_detection_scores_come_from_the_finalize_job(client, seed, dbname, fixtu
     with psycopg.connect(dbname=dbname) as conn:  # an older or broken shape is not passed on
         conn.execute("UPDATE sessions SET quality = %s", (Jsonb({"detection": {"pothole": score}}),))
     assert _ok(client, f"/api/sessions/{SID}")["detection"] is None
+
+
+# --- Heat map -------------------------------------------------------------------------------
+
+def test_heat_lines_of_aggregated_trips(client, seed, dbname, fixture_batch, monkeypatch):
+    """One MultiLineString per aggregated trip, cut at a GPS silence, without inaccurate fixes, simplified
+    (a straight drive keeps its two ends), and cached per trip version."""
+    import psycopg
+
+    import app.queries as q
+
+    monkeypatch.setattr(q, "STATS_CHUNK", 1)  # one statement per trip, as on a cold cache over many trips
+    other, single = "99999999-2222-4333-8444-555555555555", "55555555-2222-4333-8444-555555555555"
+    start = dt.datetime.now(UTC) - dt.timedelta(minutes=5)
+    gap = dt.timedelta(seconds=30)
+    batches = [make_batch(fixture_batch, SID, i, start + (gap if i >= 10 else dt.timedelta()),
+                          46.77 + i * STEP_DEG, 23.62) for i in range(20)]
+    batches[5]["location"][0].update(lat=46.78, hAcc=300.0)
+    seed(meta=[session_meta(SID)], batches=batches)
+    seed(meta=[session_meta(other, device_id="PHONE-2")], batches=_trip(fixture_batch, 5, sid=other, device="PHONE-2"))
+    seed(meta=[session_meta(single, device_id="PHONE-3")], batches=_trip(fixture_batch, 1, sid=single, device="PHONE-3"))
+
+    assert _ok(client, "/api/heat") == {"type": "FeatureCollection", "features": []}  # nothing aggregated yet
+    with psycopg.connect(dbname=dbname) as conn:
+        conn.execute("UPDATE sessions SET include_in_agg = true, updated_at = now() WHERE session_id <> %s", (other,))
+    lat = [round(46.77 + i * STEP_DEG, 5) for i in range(20)]
+    first = {"type": "Feature", "properties": {}, "geometry": {"type": "MultiLineString", "coordinates": [
+        [[23.62, lat[0]], [23.62, lat[9]]], [[23.62, lat[10]], [23.62, lat[19]]]]}}
+    assert _ok(client, "/api/heat") == {"type": "FeatureCollection", "features": [first]}  # one fix: no line
+
+    with psycopg.connect(dbname=dbname) as conn:
+        conn.execute("UPDATE sessions SET include_in_agg = true, updated_at = now() WHERE session_id = %s", (other,))
+    features = _ok(client, "/api/heat")["features"]
+    assert features[0] == first
+    assert features[1]["geometry"]["coordinates"] == [[[23.62, lat[0]], [23.62, lat[4]]]]

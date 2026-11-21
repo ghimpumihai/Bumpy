@@ -9,7 +9,8 @@ import pytest
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1]))
 
 from app.fmt import epoch_ms, iso  # noqa: E402
-from app.queries import BadRequest, enum_param, is_h3_cell  # noqa: E402
+from app import queries  # noqa: E402
+from app.queries import BadRequest, TripStatsCache, enum_param, is_h3_cell  # noqa: E402
 
 UTC = dt.timezone.utc
 
@@ -36,6 +37,36 @@ def test_h3_cell():
     assert is_h3_cell("8a1fb46622dffff")
     assert not is_h3_cell("8a1fb46622dfff") and not is_h3_cell("7a1fb46622dffff")
     assert not is_h3_cell("8a1fb46622dfffz")
+    assert is_h3_cell("8A1FB46622DFFFF")  # int(x, 16) took it before; it stays a 404, not a 400
+    # Only hex digits: int(x, 16) also took underscores, whitespace and non-ASCII digits.
+    for bad in ("8a1fb_46622dfff", "8a1fb46622dfff ", " 8a1fb46622dfff", "8a1fb46622dfff\n", "+8a1fb46622dfff",
+                "8a1fb46622dfff\u0661"):
+        assert not is_h3_cell(bad), repr(bad)
+
+
+def test_cold_cache_is_filled_chunk_by_chunk(monkeypatch):
+    """A statement per STATS_CHUNK trips, each cached when done: a failure part-way (statement timeout)
+    keeps what was computed, so the next request only does the rest."""
+    monkeypatch.setattr(queries, "STATS_CHUNK", 2)
+    rows = [{"session_id": f"s{i}", "version_at": 1, "status": "complete"} for i in range(5)]
+    calls = []
+
+    def compute(ids):
+        calls.append(ids)
+        if ids == ["s2", "s3"] and len(calls) == 2:
+            raise TimeoutError
+        return {sid: sid.upper() for sid in ids}
+
+    cache = TripStatsCache()
+    with pytest.raises(TimeoutError):
+        cache.get_many("track", rows, compute)
+    assert cache.get_many("track", rows, compute) == {f"s{i}": f"S{i}" for i in range(5)}
+    assert calls == [["s0", "s1"], ["s2", "s3"], ["s2", "s3"], ["s4"]]
+    assert cache.get_many("track", rows, compute) and len(calls) == 4  # all cached now
+
+    rows[4] = {**rows[4], "version_at": 2}  # a trip that changed is the only one recomputed
+    cache.get_many("track", rows, compute)
+    assert calls[4:] == [["s4"]]
 
 
 

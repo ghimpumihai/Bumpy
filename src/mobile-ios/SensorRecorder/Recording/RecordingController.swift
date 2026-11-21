@@ -35,9 +35,6 @@ final class RecordingController {
     private(set) var snapshot = DashboardSnapshot()
     private(set) var issues: [HealthIssue] = []
     private(set) var overall: HealthLevel = .ok
-    private(set) var toast: String?
-    private(set) var activeSurface: SurfaceKind?
-    private(set) var activeSegments: Set<SegmentKind> = []
     private(set) var finished: SessionMetadata?
     private(set) var trackPoints: [TrackBuffer.Point] = []
     /// "GPS back · 12 s gap", shown for a few seconds after GPS recovers.
@@ -45,7 +42,6 @@ final class RecordingController {
 
     @ObservationIgnored private var timer: Timer?
     @ObservationIgnored private var issueTracker = IssueTracker()
-    @ObservationIgnored private var toastExpiry: Date?
     @ObservationIgnored private var trackVersion = -1
     @ObservationIgnored private var tickCount = 0
     @ObservationIgnored private let alerter: Alerter
@@ -86,33 +82,6 @@ final class RecordingController {
 
     var isFinished: Bool { finished != nil }
 
-    // MARK: Labels
-
-    func label(_ type: LabelType, value: String? = nil, note: String? = nil, toastText: String) {
-        let l = session.addLabel(type, value: value, note: note)
-        confirm(toastText, at: l.date)
-    }
-
-    func toggleSurface(_ s: SurfaceKind) {
-        let l = session.toggleSurface(s)
-        activeSurface = session.labels.activeSurface
-        confirm(l.type == .surfaceStart ? "Surface: \(s.shortName) START" : "Surface: \(s.shortName) END", at: l.date)
-    }
-
-    func toggleSegment(_ s: SegmentKind) {
-        let l = session.toggleSegment(s)
-        activeSegments = session.labels.activeSegments
-        confirm(l.type == .segmentStart ? "\(s.shortName) START" : "\(s.shortName) END", at: l.date)
-    }
-
-    private func confirm(_ text: String, at date: Date) {
-        alerter.labelConfirmed()
-        let f = DateFormatter()
-        f.dateFormat = "HH:mm:ss"
-        toast = "\(text) · \(f.string(from: date))"
-        toastExpiry = Date().addingTimeInterval(2.5)
-    }
-
     // MARK: Refresh (8 Hz)
 
     /// Internal (not private) so tests can drive refresh ticks deterministically.
@@ -127,7 +96,6 @@ final class RecordingController {
         issues = newIssues
         overall = HealthEvaluator.overall(newIssues)
 
-        if let exp = toastExpiry, Date() > exp { toast = nil; toastExpiry = nil }
         if let exp = recoveryExpiry, Date() > exp { recoveryNote = nil; recoveryExpiry = nil }
 
         snapshot = buildSnapshot(now: now, inputs: inputs)
@@ -260,7 +228,6 @@ final class RecordingController {
 @MainActor
 protocol Alerter {
     func prepare()
-    func labelConfirmed()
     func newProblem()
     func stopped()
 }
@@ -268,10 +235,8 @@ protocol Alerter {
 @MainActor
 final class SystemAlerter: Alerter {
     private let haptics = UINotificationFeedbackGenerator()
-    private let impact = UIImpactFeedbackGenerator(style: .heavy)
 
-    func prepare() { haptics.prepare(); impact.prepare() }
-    func labelConfirmed() { impact.impactOccurred() }
+    func prepare() { haptics.prepare() }
     func newProblem() {
         // spec: strong haptic + sound on PROBLEM
         haptics.notificationOccurred(.error)

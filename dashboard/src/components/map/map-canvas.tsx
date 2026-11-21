@@ -102,7 +102,7 @@ export function MapCanvas({ ariaLabel, className, bounds, boundsKey, fitPadding,
       setState(null);
       instance.remove();
     };
-  }, []);
+  }, [styleUrl]);
 
   // The offline background follows theme changes like the data layers do.
   useEffect(() => {

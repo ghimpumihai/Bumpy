@@ -2,6 +2,10 @@ variable "project" {
   description = "Must match the bootstrap's project (the resource group is rg-<project>)."
   type        = string
   default     = "roadride"
+  validation {
+    condition     = can(regex("^[a-z0-9]{3,10}$", var.project))
+    error_message = "project must be 3-10 lowercase letters or digits (it ends up in storage account names)."
+  }
 }
 
 variable "location" {
@@ -52,7 +56,7 @@ variable "eventhub_local_auth_enabled" {
 }
 
 variable "extra_cors_origins" {
-  description = "Extra origins allowed to call the read API, e.g. the local Vite dev server."
+  description = "Origins allowed to call the read API besides the Static Web App. Empty in production; e.g. http://localhost:5173 (the Vite dev server) only while developing against the Azure read API."
   type        = list(string)
-  default     = ["http://localhost:5173"]
+  default     = []
 }

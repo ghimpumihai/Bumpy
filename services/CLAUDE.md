@@ -25,7 +25,7 @@ Python 3.12 everywhere (Function runtime, Dockerfiles, CI); no 3.13+ features.
 
 ## Read API
 - A route that reads new tables or functions goes into the smoke-check route list in `deploy-services.yml`; that check is the only proof on Azure that the `reader` grants work.
-- Port 8000 is set in three places: the read-api `Dockerfile`, `infra/modules/compute/main.tf` and `READ_API_PORT` in `deploy-services.yml`.
+- Port 8000 is set in two places: the read-api `Dockerfile` and `READ_API_PORT` in `deploy-services.yml`, which switches the ingress to it. Terraform (`infra/modules/compute/main.tf`) creates the ingress on 80 for the placeholder image and ignores `target_port` after that.
 
 ## Tests
 - Processor and read-API integration tests **skip silently** without a database: set `POSTGRES_PASSWORD`, run `docker compose up -d db` from the repo root, set the `PG*` variables listed in `docker-compose.yml`, and run `pytest -q -rs tests` so skips show.

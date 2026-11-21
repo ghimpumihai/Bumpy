@@ -7,6 +7,8 @@ name: terraform-apply
 #
 # Same settings as terraform-plan.yml (repo variables + the TF_VAR_ALERT_EMAIL secret, infra/README.md
 # "CI for Terraform"), but logs in as the deploy identity (Contributor + RBAC Administrator on the stack).
+# The NAT gateway and the Event Hubs key fallback always come from the code (variables.tf), never from a
+# repo variable, so nobody can switch on a cost or a key login for the next apply without a PR.
 # It refuses to delete or replace a resource that holds data unless allow_data_loss is ticked, and after
 # the apply removes the provider-written AzureWebJobsStorage setting (infra/README.md "Function host storage").
 #
@@ -46,15 +48,15 @@ jobs:
       ARM_TENANT_ID: ${{ vars.AZURE_TENANT_ID }}
       ARM_SUBSCRIPTION_ID: ${{ vars.AZURE_SUBSCRIPTION_ID }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
 
-      - uses: hashicorp/setup-terraform@v3
+      - uses: hashicorp/setup-terraform@b9cd54a3c349d3f38e8881555d616ced269862dd # v3.1.2
         with:
           terraform_version: ${{ env.TF_VERSION }}
           terraform_wrapper: false
 
       # For the az clean-up after the apply; Terraform logs in by itself (ARM_USE_OIDC).
-      - uses: azure/login@v2
+      - uses: azure/login@7184910d9eb2b1c5e48f7073824a90609bb9b6d6 # v2.3.1
         with:
           client-id: ${{ vars.AZURE_CLIENT_ID_DEPLOY }}
           tenant-id: ${{ vars.AZURE_TENANT_ID }}
@@ -64,8 +66,6 @@ jobs:
         env:
           ALERT_EMAIL: ${{ secrets.TF_VAR_ALERT_EMAIL }}
           ADMIN_OBJECT_IDS: ${{ vars.TF_VAR_ADMIN_OBJECT_IDS }}
-          NAT: ${{ vars.TF_VAR_PSQL_NAT_GATEWAY_ENABLED }}
-          EH_LOCAL_AUTH: ${{ vars.TF_VAR_EVENTHUB_LOCAL_AUTH_ENABLED }}
           BUDGET: ${{ vars.TF_VAR_BUDGET_AMOUNT }}
           STATE_RG: ${{ vars.TFSTATE_RESOURCE_GROUP }}
           STATE_ACCOUNT: ${{ vars.TFSTATE_STORAGE_ACCOUNT }}
@@ -81,8 +81,6 @@ jobs:
           put() { if [ -n "$2" ]; then echo "$1=$2" >> "$GITHUB_ENV"; fi; }
           put TF_VAR_alert_email "$ALERT_EMAIL"
           put TF_VAR_admin_object_ids "$ADMIN_OBJECT_IDS"
-          put TF_VAR_psql_nat_gateway_enabled "$NAT"
-          put TF_VAR_eventhub_local_auth_enabled "$EH_LOCAL_AUTH"
           put TF_VAR_budget_amount "$BUDGET"
 
       - name: init

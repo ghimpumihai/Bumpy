@@ -70,11 +70,7 @@ function enumParam<T extends string>(query: URLSearchParams, name: string, allow
 }
 
 function vehicleFilterOf(query: URLSearchParams): VehicleFilter {
-  const value = query.get("vehicle") ?? VehicleFilters.ALL;
-  if (!(Object.values(VehicleFilters) as string[]).includes(value)) {
-    throw new MockHttpError(400, `vehicle must be one of ${Object.values(VehicleFilters).join(", ")}`);
-  }
-  return value as VehicleFilter;
+  return enumParam(query, "vehicle", Object.values(VehicleFilters)) ?? VehicleFilters.ALL;
 }
 
 

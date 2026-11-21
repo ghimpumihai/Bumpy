@@ -53,6 +53,16 @@ HEADING_NUM = ["magHeading", "trueHeading", "headingAcc", "x", "y", "z"]
 ACTIVITY_BOOL = ["stationary", "walking", "running", "automotive", "cycling", "unknown"]
 T0_UTC_RE = re.compile(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$")
 
+# Ranges (400). The processor turns these values into datetimes and keeps batchSeq/batchCount in
+# integer columns (db/migrations/0002_live_path.sql); a value outside them makes it skip the message
+# as unreadable, so the data would exist only in the archive. Far wider than any recording.
+MIN_UTC = dt.datetime(1970, 1, 1, tzinfo=dt.timezone.utc)  # every absolute time: t0Utc, t0UtcMs,
+MAX_UTC = dt.datetime(2100, 1, 1, tzinfo=dt.timezone.utc)  # location[].tUtcMs, startedAtUtc, endedAtUtc
+MIN_UTC_MS = 0
+MAX_UTC_MS = 4_102_444_800_000  # MAX_UTC in Unix ms (exclusive)
+MAX_REL_T_S = 30 * 86_400  # |t| of a sample or label, seconds from the batch start (a batch spans 2 s)
+MAX_SEQ = 2**31 - 1  # batchSeq, batchCount: PostgreSQL integer
+
 PROBE_PREFIX = "probe request"
 
 
@@ -65,7 +75,23 @@ class TooLarge(ValueError):
 
 
 def is_num(v) -> bool:
-    return isinstance(v, (int, float)) and not isinstance(v, bool) and math.isfinite(v)
+    if not isinstance(v, (int, float)) or isinstance(v, bool):
+        return False
+    try:
+        return math.isfinite(v)
+    except OverflowError:  # an integer too large for a float, e.g. 400 digits
+        return False
+
+
+def is_utc_ms(v) -> bool:
+    return is_int(v) and MIN_UTC_MS <= v < MAX_UTC_MS
+
+
+def parse_utc(value: str) -> dt.datetime:
+    """As the processor reads startedAtUtc/endedAtUtc (roadride/live.py parse_iso): ISO-8601, no
+    zone = UTC. Raises ValueError or OverflowError."""
+    t = dt.datetime.fromisoformat(value.replace("Z", "+00:00"))
+    return (t if t.tzinfo else t.replace(tzinfo=dt.timezone.utc)).astimezone(dt.timezone.utc)
 
 
 def is_int(v) -> bool:
@@ -197,13 +223,17 @@ def validate_batch(b) -> None:
         raise Invalid("sessionId must be 1-128 characters from A-Z a-z 0-9 _ -")
     if not is_int(b["batchSeq"]) or b["batchSeq"] < 0:
         raise Invalid(f"batchSeq must be a non-negative integer, got {b['batchSeq']!r}")
+    if b["batchSeq"] > MAX_SEQ:
+        raise Invalid(f"batchSeq must be at most {MAX_SEQ}, got {b['batchSeq']!r}")
     if not T0_UTC_RE.match(b["t0Utc"]):
         raise Invalid(f"t0Utc must be ISO-8601 UTC with milliseconds "
                       f"(e.g. 2026-11-21T09:15:32.120Z), got {b['t0Utc']!r}")
     try:
-        dt.datetime.strptime(b["t0Utc"], "%Y-%m-%dT%H:%M:%S.%fZ")
+        t0 = dt.datetime.strptime(b["t0Utc"], "%Y-%m-%dT%H:%M:%S.%fZ").replace(tzinfo=dt.timezone.utc)
     except ValueError:
         raise Invalid(f"t0Utc is not a valid date/time: {b['t0Utc']!r}")
+    if not MIN_UTC <= t0 < MAX_UTC:
+        raise Invalid(f"t0Utc must be from 1970 to 2099, got {b['t0Utc']!r}")
     if not is_num(b["t0Up"]):
         raise Invalid("t0Up must be a finite number")
     # The four units the backend relies on must match; extra keys are allowed (spec §6.2: no fixed literal).
@@ -214,6 +244,8 @@ def validate_batch(b) -> None:
             raise Invalid(f"{k} must be a non-empty string when present")
     if "t0UtcMs" in b and not is_int(b["t0UtcMs"]):
         raise Invalid("t0UtcMs must be an integer (Unix ms) when present")
+    if "t0UtcMs" in b and not is_utc_ms(b["t0UtcMs"]):
+        raise Invalid(f"t0UtcMs must be Unix ms from 1970 to 2099, got {b['t0UtcMs']!r}")
     if "fieldUnits" in b and (not isinstance(b["fieldUnits"], dict)
                               or not all(isinstance(k, str) and isinstance(v, str)
                                          for k, v in b["fieldUnits"].items())):
@@ -236,6 +268,8 @@ def validate_batch(b) -> None:
                 raise Invalid(f"{block}.{c} has length {len(arr)} but {block}.t has {n}")
             if not all(is_num(v) for v in arr):
                 raise Invalid(f"{block}.{c} contains non-numeric values")
+        if not all(-MAX_REL_T_S <= v <= MAX_REL_T_S for v in blk["t"]):
+            raise Invalid(f"{block}.t must be seconds from the batch start, within ±{MAX_REL_T_S}")
 
     for block, cols in OPTIONAL_COLUMNAR.items():
         if block not in b:
@@ -278,6 +312,8 @@ def validate_batch(b) -> None:
         if not is_int(loc.get("tUtcMs")):
             raise Invalid(f"location[{i}].tUtcMs missing or not an integer (Unix ms), "
                           f"got {loc.get('tUtcMs')!r}")
+        if not is_utc_ms(loc["tUtcMs"]):
+            raise Invalid(f"location[{i}].tUtcMs must be Unix ms from 1970 to 2099, got {loc['tUtcMs']!r}")
         for k in LOCATION_KEYS:
             if not is_num(loc.get(k)):
                 raise Invalid(f"location[{i}].{k} missing or not a number")
@@ -294,6 +330,8 @@ def validate_batch(b) -> None:
                 raise Invalid(f"labels[{i}].{k} missing (use explicit null)")
         if not is_num(lab["t"]) or not isinstance(lab["type"], str):
             raise Invalid(f"labels[{i}]: t must be a number and type a string")
+        if not -MAX_REL_T_S <= lab["t"] <= MAX_REL_T_S:
+            raise Invalid(f"labels[{i}].t must be seconds from the batch start, within ±{MAX_REL_T_S}")
         if len(lab["type"]) > MAX_LABEL_TYPE_LEN:
             raise Invalid(f"labels[{i}].type must be at most {MAX_LABEL_TYPE_LEN} characters")
         for k in ("value", "note"):
@@ -307,6 +345,15 @@ def validate_batch(b) -> None:
             or not isinstance(d.get("lowPower"), bool):
         raise Invalid("device must have battery (number), thermal (string), lowPower (bool)")
     check_strings(b)
+
+
+def _check_utc(m: dict, k: str) -> None:
+    try:
+        t = parse_utc(m[k])
+    except (ValueError, OverflowError):
+        raise Invalid(f"{k} must be an ISO-8601 date/time (e.g. 2026-11-21T09:15:32.120Z), got {m[k]!r}")
+    if not MIN_UTC <= t < MAX_UTC:
+        raise Invalid(f"{k} must be from 1970 to 2099, got {m[k]!r}")
 
 
 def validate_session_meta(m, path_id: str) -> str:
@@ -325,12 +372,15 @@ def validate_session_meta(m, path_id: str) -> str:
         raise Invalid(f"deviceId must be at most {MAX_ID_LEN} characters")
     if not isinstance(m.get("startedAtUtc"), str) or not m["startedAtUtc"]:
         raise Invalid("startedAtUtc must be a non-empty string")
+    _check_utc(m, "startedAtUtc")
     if not is_num(m.get("startUptimeSec")):
         raise Invalid("startUptimeSec must be a finite number")
     if "endedAtUtc" not in m:
         raise Invalid("endedAtUtc missing (use explicit null while recording)")
     if m["endedAtUtc"] is not None and (not isinstance(m["endedAtUtc"], str) or not m["endedAtUtc"]):
         raise Invalid("endedAtUtc must be a non-empty string or null")
+    if m["endedAtUtc"] is not None:
+        _check_utc(m, "endedAtUtc")
     if not isinstance(m.get("recovered"), bool):
         raise Invalid("recovered must be true/false")
     for k in ("vehicle", "mount", "people"):
@@ -339,6 +389,8 @@ def validate_session_meta(m, path_id: str) -> str:
     if "batchCount" in m:
         if not is_int(m["batchCount"]) or m["batchCount"] < 0:
             raise Invalid(f"batchCount must be a non-negative integer, got {m['batchCount']!r}")
+        if m["batchCount"] > MAX_SEQ:
+            raise Invalid(f"batchCount must be at most {MAX_SEQ}, got {m['batchCount']!r}")
         if m["endedAtUtc"] is None and m["recovered"] is not True:
             raise Invalid("Stop copy (batchCount present) needs endedAtUtc set or recovered true")
     check_strings(m)

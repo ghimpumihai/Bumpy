@@ -216,4 +216,9 @@ describe("mock dataset", () => {
     expect(() => get("/api/sessions", "vehicle=plane")).toThrow(/vehicle must be/);
     expect(() => get("/api/events", "type=meteor")).toThrow(/type must be/);
   });
+
+  it("treats an empty vehicle filter as all, like the read API", () => {
+    expect(get("/api/segments", "vehicle=")).toEqual(get("/api/segments", "vehicle=all"));
+    expect(get("/api/events", "vehicle=")).toEqual(get("/api/events", "vehicle=all"));
+  });
 });

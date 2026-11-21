@@ -17,7 +17,7 @@ scripts/     add-device-key.ps1 (device key hashes into Key Vault)
 4. `cd infra; .\tf.ps1 bootstrap`. It writes the state settings into `.env` and prints the GitHub repo variables for CI.
 5. `.\tf.ps1 plan`, then `.\tf.ps1 apply` (about 15 minutes; PostgreSQL is the slow part).
 6. `.\scripts\add-device-key.ps1 -DeviceId <phone-name>` for each phone and for the replay tool, then restart the function app.
-7. `.\tf.ps1 output` prints the ingest URL for the app and the read API URL for `dashboard/public/config.json`.
+7. `.\tf.ps1 output` prints `ingest_base_url` (`https://<function host>`, no path: paste it into the iPhone app's upload settings and into `REPLAY_API_URL`; both add `/api/ingest` themselves) and `read_api_url`. `ingest_batch_url` is the full `POST` endpoint, for manual checks.
 
 After the hackathon: `.\tf.ps1 destroy` (the bootstrap resource groups are deleted by hand).
 

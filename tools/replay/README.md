@@ -30,6 +30,9 @@ Python 3, standard library only.
    python tools/replay/replay.py <session folder or .zip>
    ```
 
+   `REPLAY_API_URL` is `ingest_base_url` from `./infra/tf.ps1 output`: the function's host with no path,
+   the same value as in the app. A URL that already ends in `/api/ingest` works too (the tool strips it).
+
 | Option | What it does |
 |---|---|
 | `--speed 4` | 4× faster (`0` = as fast as possible). Default is real time. |

@@ -332,6 +332,15 @@ def test_finalized_trip_reaches_the_map(client, seed, dbname, fixture_batch, tmp
     # Finalized, so its pothole is on the shared map now.
     assert len(_ok(client, "/api/events", vehicle="all")["features"]) == 1
 
+    # Speed bumps are counted like /api/events: only with a position.
+    with psycopg.connect(dbname=dbname) as conn:
+        for sec, geom in ((10, "ST_SetSRID(ST_MakePoint(23.62, 46.771), 4326)::geography"), (12, "NULL")):
+            conn.execute(f"INSERT INTO events (session_id, type, t, geom, magnitude, confidence) "
+                         f"VALUES (%s, 'speed_bump', %s, {geom}, 6.0, 0.8)",
+                         (SID, start + dt.timedelta(seconds=sec)))
+    bumps = len(_ok(client, "/api/events", vehicle="all", type="speed_bump")["features"])
+    assert bumps == 1 and _ok(client, "/api/overview")["speedBumps"] == bumps
+
 
 def test_cors_only_for_configured_origin(dbname, monkeypatch):
     from fastapi.testclient import TestClient

@@ -525,3 +525,14 @@ def test_poor_gps_is_reported_but_does_not_invalidate_the_motion():
     status, valid, q = _assess_trip([(1000 + i, 45.0, 21.0, 35.0) for i in range(601)])
     assert valid == 1.0 and q["invalidSeconds"]["gps_poor"] == 600.0
     assert status == "degraded"  # mostly poor GPS still degrades the trip
+
+
+def test_a_window_is_placed_at_its_middle():
+    """A series point's t is its window's end; placing the window there shifted every pass by half a
+    window. Lat grows 1° per second here, and the cell boundary is at t = 1.15 s."""
+    series = [SeriesPoint(t=0.2 * (k + 1), a_vert=0.0, a_lat=0.0, a_lon=0.0, speed=10.0, msdv=0.0)
+              for k in range(10)]
+    fixes = [(float(s), float(s), 0.0) for s in range(4)]
+    passes = fz.build_passes(series, fixes, [], cell_of=lambda lat, lon: "A" if lat < 1.15 else "B")
+    # Windows ending at 0.2 … 1.2 s have their middles at 0.1 … 1.1 s, all before the boundary.
+    assert [(p.h3, p.n_windows) for p in passes] == [("A", 6), ("B", 4)]

@@ -60,3 +60,12 @@ def test_spearman_ranks_with_ties_like_the_mock():
     assert spearman([1.0, 2.0, 2.0, 3.0], [0, 1, 2, 3]) == pytest.approx(4.5 / (4.5 * 5.0) ** 0.5)
     assert spearman([1.0, 2.0], [1, 2]) is None  # fewer than 3 ratings
     assert spearman([1.0, 2.0, 3.0], [4, 4, 4]) is None  # constant ratings: undefined
+
+
+def test_epoch_ms_and_iso_name_the_same_millisecond():
+    """iso() truncates to the ms; epoch_ms rounded, so an event's id/series ms and its tUtc could
+    differ by 1 ms."""
+    t = dt.datetime(2026, 11, 21, 9, 12, 3, 512999, tzinfo=UTC)
+    assert iso(t) == "2026-11-21T09:12:03.512Z" and epoch_ms(t) == 1795252323512
+    ms = epoch_ms(t)
+    assert dt.datetime.fromtimestamp(ms / 1000, UTC).strftime("%S.%f")[:6] == iso(t)[17:23]

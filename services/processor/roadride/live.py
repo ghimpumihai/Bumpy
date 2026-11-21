@@ -20,7 +20,9 @@ SOURCES = {"live", "upload", "replay"}
 def parse_iso(value: str | None) -> dt.datetime | None:
     if not value:
         return None
-    return dt.datetime.fromisoformat(value.replace("Z", "+00:00")).astimezone(UTC)
+    t = dt.datetime.fromisoformat(value.replace("Z", "+00:00"))
+    # Spec §3.8 times are UTC; without a zone, astimezone() would take it as the server's local time.
+    return (t if t.tzinfo else t.replace(tzinfo=UTC)).astimezone(UTC)
 
 
 def from_ms(ms: int | float) -> dt.datetime:

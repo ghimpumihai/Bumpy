@@ -33,6 +33,7 @@ REF_SPEED_KMH = 36.0
 SOURCES = ("upload", "live", "replay")
 VEHICLE_TYPES = ("car", "bus", "tram", "bike", "boat", "unknown")
 VEHICLE_FILTERS = ("all", "car", "bus", "tram")
+RATER_POSTURES = ("seated", "standing")  # the app's choices (SessionMetadata.swift People.postures)
 EVENT_TYPES = ("pothole", "speed_bump", "rail_joint")
 
 MOUNT_DEFAULTS = {"location": "", "phoneOrientation": "", "rigid": False, "handheld": False}
@@ -332,6 +333,16 @@ def _merge(defaults: dict, stored) -> dict:
     return out
 
 
+def _posture(value) -> str:
+    """session.json is stored as sent, so anything but the app's two postures gets the app's default."""
+    return value if value in RATER_POSTURES else PEOPLE_DEFAULTS["raterPosture"]
+
+
+def _people(stored) -> dict:
+    people = _merge(PEOPLE_DEFAULTS, stored)
+    return {**people, "raterPosture": _posture(people["raterPosture"])}
+
+
 def _sickness(r: dict) -> dict:
     """D49: the dose is vertical plus lateral, as energies, so the combined MSDV is the root sum of
     squares. A trip processed before the lateral dose existed has msdv_y null: vertical only."""
@@ -358,7 +369,7 @@ def _summary(r: dict) -> dict:
         "vehicle": {"type": r["vehicle_type"] or "unknown", "makeModel": r["vehicle_make_model"] or "",
                     "line": r["vehicle_line"]},
         "mount": mount,
-        "people": _merge(PEOPLE_DEFAULTS, r["people"]),
+        "people": _people(r["people"]),
         "startedAt": iso(r["started_at"]),
         "endedAt": iso(r["ended_at"]),
         "durationS": max(0.0, round((end - r["started_at"]).total_seconds(), 3)),
@@ -726,11 +737,12 @@ def segment_detail(conn: Connection, h3: str) -> dict:
                           (h3,)).fetchone()
     if center is None:
         raise NotFound(f"segment {h3} has no observations")
-    order = "CASE a.vehicle_type WHEN 'all' THEN 0 WHEN 'car' THEN 1 WHEN 'bus' THEN 2 WHEN 'tram' THEN 3 ELSE 4 END"
+    # SegmentAggregate.vehicleType is a map filter: rows for other vehicle types would not match the type.
     by_vehicle = [_aggregate(r) for r in _rows(
-        conn, f"SELECT {AGG_COLUMNS} FROM segment_agg a WHERE a.h3 = %s ORDER BY {order}", (h3,))]
+        conn, f"SELECT {AGG_COLUMNS} FROM segment_agg a WHERE a.h3 = %(h3)s AND a.vehicle_type = ANY(%(vt)s) "
+              "ORDER BY array_position(%(vt)s, a.vehicle_type)", {"h3": h3, "vt": list(VEHICLE_FILTERS)})]
     sickness = [{
-        "vehicleType": vt, "raterSeat": seat, "raterPosture": posture, "sicknessAwRms": rnd(aw, 4),
+        "vehicleType": vt, "raterSeat": seat, "raterPosture": _posture(posture), "sicknessAwRms": rnd(aw, 4),
         "msi1hPct": rnd(msi, 4), "nSessions": n,
     } for vt, seat, posture, aw, msi, n in conn.execute(
         "SELECT vehicle_type, rater_seat, rater_posture, sickness_aw_rms, msi_1h_pct, n_sessions "

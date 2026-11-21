@@ -99,6 +99,36 @@ def test_segment_detail(client):
         assert "not an H3 cell" in _err(client, f"/api/segments/{bad}", 400)
 
 
+def test_segment_detail_lists_only_the_map_filters(client, dbname):
+    """SegmentAggregate.vehicleType is a VehicleFilter; postures are the app's two (RaterPosture)."""
+    import psycopg
+
+    cell = "8b1e00000000fff"
+    with psycopg.connect(dbname=dbname) as conn:
+        conn.execute("INSERT INTO segments (h3, center, boundary) VALUES (%s, "
+                     "ST_SetSRID(ST_MakePoint(23.62, 46.77), 4326)::geography, "
+                     "ST_Buffer(ST_SetSRID(ST_MakePoint(23.62, 46.77), 4326)::geography, 20))", (cell,))
+        for vt in ("bike", "bus", "all", "car"):
+            conn.execute("INSERT INTO segment_agg (h3, vehicle_type, n_sessions, n_passes, roughness_method,"
+                         " pothole_hits, pothole_passes, pothole_confirmed, sickness_sessions)"
+                         " VALUES (%s, %s, 1, 1, 'none', 0, 0, false, 0)", (cell, vt))
+        for posture in ("standing", "lying"):
+            conn.execute("INSERT INTO segment_sickness (h3, vehicle_type, rater_seat, rater_posture, n_sessions)"
+                         " VALUES (%s, 'bus', 'rear', %s, 1)", (cell, posture))
+    detail = _ok(client, f"/api/segments/{cell}")
+    assert [a["vehicleType"] for a in detail["byVehicle"]] == ["all", "car", "bus"]
+    assert sorted(x["raterPosture"] for x in detail["sicknessBySeat"]) == ["seated", "standing"]
+
+
+def test_rater_posture_is_one_of_the_apps(client, seed, fixture_batch):
+    other = "99999999-2222-4333-8444-555555555555"
+    people = {"operatorSeat": "front", "raterSeat": "rear left", "passengerCount": 2}
+    seed(meta=[session_meta(SID, people={**people, "raterPosture": "lying"}),
+               session_meta(other, device_id="PHONE-2", people={**people, "raterPosture": "standing"})])
+    by_id = {s["sessionId"]: s["people"]["raterPosture"] for s in _ok(client, "/api/sessions")["sessions"]}
+    assert by_id == {SID: "seated", other: "standing"}
+
+
 def test_unknown_route_is_404_with_error_body(client):
     _err(client, "/api/nothing-here", 404)
 

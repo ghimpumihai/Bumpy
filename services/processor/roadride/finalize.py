@@ -86,7 +86,9 @@ class BlobArchive:
         return [b.name for b in self._client.list_blobs(name_starts_with=f"raw/session={session_id}/")]
 
     def read(self, name: str) -> bytes:
-        return self._client.download_blob(name).readall()
+        # Ingest stores the gzip with Content-Encoding: gzip, and the SDK inflates such blobs by
+        # default; load_trip expects the stored gzip bytes, as DirArchive returns them.
+        return self._client.download_blob(name, decompress=False).readall()
 
     def write(self, name: str, data: bytes) -> None:
         self._client.upload_blob(name, data, overwrite=True)

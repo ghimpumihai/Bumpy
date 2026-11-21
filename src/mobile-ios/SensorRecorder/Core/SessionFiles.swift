@@ -67,7 +67,6 @@ enum StreamFile: String, CaseIterable, Sendable {
 enum SessionFileName {
     static let metadata = "session.json"
     static let appLog = "app_log.txt"
-    static let mountPhoto = "mount.jpg"
 }
 
 /// Where a `BufferedFileWriter` puts bytes. Production: the file; tests inject failures

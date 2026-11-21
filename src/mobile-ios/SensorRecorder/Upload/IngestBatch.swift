@@ -155,8 +155,13 @@ struct IngestBatch: Encodable, Equatable {
     }
 }
 
+// The 0 for a non-finite value is only a last resort (JSONEncoder throws on NaN, which would block the
+// queue): `drain` never passes one in. See `BatchAccumulator.drain` for what it does instead.
 @inline(__always) func round6(_ v: Double) -> Double { v.isFinite ? (v * 1e6).rounded() / 1e6 : 0 }
 @inline(__always) func round8(_ v: Double) -> Double { v.isFinite ? (v * 1e8).rounded() / 1e8 : 0 }
+/// For the fields where iOS itself uses -1 for "invalid" (speed, course, accuracies, battery).
+@inline(__always) func round6OrInvalid(_ v: Double) -> Double { v.isFinite ? round6(v) : -1 }
+@inline(__always) func allFinite(_ values: Double...) -> Bool { values.allSatisfy(\.isFinite) }
 
 /// Collects the samples of the current 2 s window (an in-memory copy; disk files remain the
 /// source of truth). Thread-safe: `add*` is called from sensor queues, `drain` from the batch timer.
@@ -219,6 +224,13 @@ final class BatchAccumulator: @unchecked Sendable {
 
     /// Takes everything collected since the previous drain and builds a batch numbered `nextSeq`
     /// (0-based). The number is consumed only by `markQueued(seq:)`. `t0Up` is the window start.
+    ///
+    /// Non-finite values: the CSV writes an empty field, but the contract (spec §6, ingest
+    /// `validate_batch`) accepts only finite numbers, never null, and one bad value rejects the whole
+    /// batch. So a value iOS marks invalid with -1 anyway (speed, course, accuracies, battery) gets -1
+    /// (a non-finite altitude also sets `vAcc` to -1, iOS's "altitude invalid"); any other sample with
+    /// a non-finite value, or a fix outside lat ±90 / lon ±180, is left out of the batch rather than
+    /// sent as a made-up 0. Arrays stay aligned, and the session folder keeps the row.
     func drain(t0Up: Double, t0UtcMs: Double, device: DeviceStatus) -> IngestBatch {
         let p = pending.withLock { p -> Pending in
             let out = p
@@ -226,18 +238,22 @@ final class BatchAccumulator: @unchecked Sendable {
             return out
         }
         let n = nextSeq
+        let battery = Double(device.batteryLevel)
         let rel = { (t: Double) in round6(t - t0Up) }
 
         var b = IngestBatch(sessionId: sessionId, deviceId: deviceId, batchSeq: n,
                             t0Utc: ISO8601.string(Date(timeIntervalSince1970: t0UtcMs / 1000)),
                             t0Up: round6(t0Up), t0UtcMs: t0UtcMs.isFinite ? Int64(t0UtcMs.rounded()) : 0,
-                            device: .init(battery: Double(device.batteryLevel),
+                            device: .init(battery: battery.isFinite ? battery : -1,
                                           thermal: device.thermal.rawValue, lowPower: device.lowPowerMode,
                                           batteryState: device.batteryState, freeDiskBytes: device.freeDiskBytes,
                                           netStatus: device.networkStatus, netType: device.networkType))
         var dm = IngestBatch.DeviceMotion()
         dm.t.reserveCapacity(p.dm.count)
         for s in p.dm {
+            let ua = s.userAccel, g = s.gravity, rr = s.rotationRate, q = s.quaternion
+            guard allFinite(s.t, ua.x, ua.y, ua.z, g.x, g.y, g.z, rr.x, rr.y, rr.z, q.w, q.x, q.y, q.z,
+                            s.roll, s.pitch, s.yaw) else { continue }
             dm.t.append(rel(s.t))
             dm.ua_x.append(round6(s.userAccel.x)); dm.ua_y.append(round6(s.userAccel.y)); dm.ua_z.append(round6(s.userAccel.z))
             dm.g_x.append(round6(s.gravity.x)); dm.g_y.append(round6(s.gravity.y)); dm.g_z.append(round6(s.gravity.z))
@@ -249,29 +265,35 @@ final class BatchAccumulator: @unchecked Sendable {
         b.deviceMotion = dm
         b.accelRaw = Self.xyz(p.accel, rel)
         b.gyroRaw = Self.xyz(p.gyro, rel)
-        b.location = p.location.map {
-            .init(tUtcMs: Int64($0.utcMs.rounded()), lat: round8($0.lat), lon: round8($0.lon), alt: round6($0.alt),
-                  hAcc: round6($0.hAcc), speed: round6($0.speed), speedAcc: round6($0.speedAcc), course: round6($0.course),
-                  isSimulated: $0.isSimulated, ellAlt: round6($0.ellAlt), vAcc: round6($0.vAcc), courseAcc: round6($0.courseAcc))
+        b.location = p.location.compactMap {
+            guard $0.utcMs.isFinite, (-90...90).contains($0.lat), (-180...180).contains($0.lon) else { return nil }
+            let altValid = allFinite($0.alt, $0.ellAlt)
+            return .init(tUtcMs: Int64($0.utcMs.rounded()), lat: round8($0.lat), lon: round8($0.lon), alt: round6($0.alt),
+                         hAcc: round6OrInvalid($0.hAcc), speed: round6OrInvalid($0.speed),
+                         speedAcc: round6OrInvalid($0.speedAcc), course: round6OrInvalid($0.course),
+                         isSimulated: $0.isSimulated, ellAlt: round6($0.ellAlt), vAcc: altValid ? round6OrInvalid($0.vAcc) : -1,
+                         courseAcc: round6OrInvalid($0.courseAcc))
         }
         b.magRaw = Self.xyz(p.mag, rel)
-        b.heading = p.heading.map {
-            .init(tUtcMs: Int64($0.utcMs.rounded()), magHeading: round6($0.magneticHeading), trueHeading: round6($0.trueHeading),
-                  headingAcc: round6($0.accuracy), x: round6($0.raw.x), y: round6($0.raw.y), z: round6($0.raw.z))
+        b.heading = p.heading.compactMap {
+            guard allFinite($0.utcMs, $0.magneticHeading, $0.raw.x, $0.raw.y, $0.raw.z) else { return nil }
+            return .init(tUtcMs: Int64($0.utcMs.rounded()), magHeading: round6($0.magneticHeading),
+                         trueHeading: round6OrInvalid($0.trueHeading), headingAcc: round6OrInvalid($0.accuracy),
+                         x: round6($0.raw.x), y: round6($0.raw.y), z: round6($0.raw.z))
         }
         var abs = IngestBatch.AbsAltitude()
-        for s in p.absAlt {
+        for s in p.absAlt where allFinite(s.t, s.altitudeM, s.accuracyM, s.precisionM) {
             abs.t.append(rel(s.t)); abs.altitudeM.append(round6(s.altitudeM))
             abs.accuracyM.append(round6(s.accuracyM)); abs.precisionM.append(round6(s.precisionM))
         }
         b.absAltitude = abs
-        b.activity = p.activity.map {
+        b.activity = p.activity.filter { $0.t.isFinite }.map {
             .init(t: rel($0.t), stationary: $0.stationary, walking: $0.walking, running: $0.running, automotive: $0.automotive,
                   cycling: $0.cycling, unknown: $0.unknown, confidence: $0.confidence,
                   startUtcMs: $0.startUtcMs.isFinite ? Int64($0.startUtcMs.rounded()) : 0)
         }
         var alt = IngestBatch.Altimeter()
-        for s in p.alt {
+        for s in p.alt where allFinite(s.t, s.relativeAltitudeM, s.pressureKPa) {
             alt.t.append(rel(s.t)); alt.relAltM.append(round6(s.relativeAltitudeM)); alt.pressureKpa.append(round6(s.pressureKPa))
         }
         b.altimeter = alt
@@ -282,7 +304,7 @@ final class BatchAccumulator: @unchecked Sendable {
     private static func xyz(_ samples: [Vec3Sample], _ rel: (Double) -> Double) -> IngestBatch.XYZ {
         var o = IngestBatch.XYZ()
         o.t.reserveCapacity(samples.count)
-        for s in samples {
+        for s in samples where allFinite(s.t, s.v.x, s.v.y, s.v.z) {
             o.t.append(rel(s.t)); o.x.append(round6(s.v.x)); o.y.append(round6(s.v.y)); o.z.append(round6(s.v.z))
         }
         return o

@@ -30,11 +30,15 @@ Three screens (D51): **Start** → **Recording** → **Recap**. Lay the phone fl
 fix, and starting anyway asks for a confirm (recorded as an override). While recording the screen
 shows a timer and one status line (red while something is wrong, "GPS back · 12 s gap" for a few
 seconds after GPS recovers). Hold **Hold to end trip** for 2 s. The recap shows data quality (share
-of the trip with motion and GPS data) and how much of the trip reached the cloud. Every trip is
+of the trip with motion and GPS data) and how much of the trip reached the cloud: only parts the
+backend accepted count, and every 2 s window left out of the live upload (upload off for part of the
+trip, a full disk) and the Stop copy count too, so 100 % means the cloud has the whole trip. When a
+part will never arrive by itself, the recap says so in amber and asks for the laptop upload. Every trip is
 recorded as a car; there are no labels or sickness prompts. Results are on the web dashboard.
 
 The menu (top left) holds **Web app** and **Settings**: server address, device key and Test
-connection, with how many trips are still waiting to upload. The dashboard link appears once its
+connection, with how many trips are still waiting to upload, and **Retry failed uploads (N)** while
+the server has rejected parts (they wait in `upload_failed/`). The dashboard link appears once its
 address is set, for now with the launch argument `-dashboard.baseURL <url>`.
 
 The look follows the redesign mock-up: the dashboard's neutral palette, an ink-black accent and the
@@ -91,8 +95,8 @@ builds may still contain them, and `session.json` `stats.sicknessRatings/sicknes
   upload of the session folder is the fallback. The session folder stays the local source of truth.
 - **401/403 are retried with backoff** instead of moved to `upload_failed/`; otherwise a mistyped
   key would dump the whole queue. 408/429/5xx/network errors are retried; other 4xx go to
-  `upload_failed/` (they stay there, on the phone and in the Files app; the app has no button to
-  re-send them since D51). A pasted API URL ending in
+  `upload_failed/` (they stay there, on the phone and in the Files app, until **Retry failed uploads**
+  in Settings moves them back into the queue, D56). A pasted API URL ending in
   `/api/ingest` is reduced to its base (the app appends that path itself).
 - **The upload test is a probe POST**, because the backend has no `/api/health` route.
   - The app sends `{"probe":true,"deviceId":"<Device ID>"}` (gzipped, with the device key and
@@ -147,6 +151,10 @@ One request at a time, oldest first, with backoff 1 → 30 s; 2xx/409 means done
   yet) is retried about 2 minutes, then set aside in `upload_failed/` so the batches can go.
 - **Redirects** are refused.
 - **5xx / 408 / 429** are retried in place, never re-ordered or set aside.
+- **Accepted parts are recorded (D56):** before a sent file is deleted, its batch number (or
+  `meta-start|stop`) is appended to `Documents/upload_acked/<sessionId>.txt`. The recap and the
+  delete guard read it, together with `stats.uploadWindowsNotQueued` in the local `session.json`
+  (windows that never entered the queue; omitted when 0, never sent in the Stop copy).
 
 The API URL and key are entered in **Settings** at runtime (key in the Keychain); nothing secret is
 in the repo.
@@ -157,7 +165,9 @@ in the repo.
 - GPS traces and `people.raterName` are personal data. Use pseudonyms such as "R1" for raters.
   Sessions live in Documents: they are visible in the Files app and included in device backups.
 - Sessions are deleted from the Files app (there is no in-app session list since D51). The device
-  ID is per phone (Keychain, this-device-only).
+  ID is per phone (Keychain, this-device-only). `AppModel.deleteSession` (no button yet) refuses a
+  trip unless every batch and the Stop copy were accepted, nothing is queued or rejected and no
+  window was left out of the live upload (D56).
 
 ## Robustness
 
@@ -211,8 +221,8 @@ xcodebuild -project SensorRecorder.xcodeproj -scheme SensorRecorder \
 
 - **Unit tests** cover CSV formatting, schemas, the clock math, concurrent writers, periodic flush,
   gap/rate stats, every warning rule, session.json, crash recovery, gzip/CRC, the batch payload
-  shape, every upload-queue rule, the Wf filter response vs ISO values, zip
-  export, and a full 3-second recording that checks every file on disk.
+  shape, every upload-queue rule, the Wf filter response vs ISO values, and a full 3-second
+  recording that checks every file on disk.
 - **UI tests** drive the real app: Start (override on the Simulator) → Recording → short tap
   doesn't stop → hold-to-stop → Recap → Done, kill-while-recording → relaunch → recovered, and
   Settings (upload off; no recording switch, Back returns to Start).

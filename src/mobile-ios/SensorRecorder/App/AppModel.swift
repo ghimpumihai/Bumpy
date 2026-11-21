@@ -35,7 +35,7 @@ final class AppModel {
         // build) must never be able to delete recorded sessions.
         if args.contains("-uiTestingReset") {
             let docs = SessionStore.documentsDirectory
-            for name in ["sessions", "upload_queue", "upload_failed"] {
+            for name in ["sessions", "upload_queue", "upload_failed", "upload_acked"] {
                 try? FileManager.default.removeItem(at: docs.appendingPathComponent(name))
             }
             UserDefaults.standard.removeObject(forKey: SetupDefaults.key)
@@ -84,40 +84,25 @@ final class AppModel {
         }
     }
 
-    enum DeleteSessionError: LocalizedError {
-        case batchesNotUploaded(Int)
-        case batchesFailed(Int)
-
-        var errorDescription: String? {
-            switch self {
-            case .batchesNotUploaded(let count):
-                return "\(count) batch(es) of this trip haven't reached the cloud yet. Let the upload finish before deleting."
-            case .batchesFailed(let count):
-                return "\(count) batch(es) of this trip were rejected by the server and are in upload_failed. Export the trip and resolve them before deleting."
-            }
-        }
-    }
-
-    /// Deletes a recorded session. Refuses the session being recorded, and a session whose batches are
-    /// still queued: a trip is deleted from the phone only once it reached the cloud.
-    func deleteSession(folder: URL, sessionId: String?) async throws {
+    /// Deletes a recorded session. Refuses the session being recorded, and any session the cloud is
+    /// not known to have in full (`TripCloudCopy.deleteRefusal`, D56): nothing is deleted on the
+    /// phone until its trip is in the cloud. The session ID comes from the folder's own session.json.
+    func deleteSession(folder: URL) async throws {
         if let active = recording?.session.folder, active.standardizedFileURL == folder.standardizedFileURL,
            recording?.isFinished == false {
             throw CocoaError(.fileWriteNoPermission)
         }
+        let store = self.store, queue = uploadQueue
+        try await Task.detached(priority: .userInitiated) {
+            let meta = store.entry(for: folder).metadata
+            let state = meta.map { queue.tripState(sessionId: $0.sessionId) } ?? UploadQueue.TripState()
+            if let refusal = TripCloudCopy.deleteRefusal(metadata: meta, state: state) { throw refusal }
+            try store.deleteSession(folder)
+            if let meta { queue.forgetAcknowledged(sessionId: meta.sessionId) }
+        }.value
         uploadLogSession.withLock { s in
             if s?.folder.standardizedFileURL == folder.standardizedFileURL { s = nil }
         }
-        let store = self.store, queue = uploadQueue
-        try await Task.detached(priority: .userInitiated) {
-            if let sessionId {
-                let pending = queue.pendingCount(sessionId: sessionId)
-                if pending > 0 { throw DeleteSessionError.batchesNotUploaded(pending) }
-                let failed = queue.failedCount(sessionId: sessionId)
-                if failed > 0 { throw DeleteSessionError.batchesFailed(failed) }
-            }
-            try store.deleteSession(folder)
-        }.value
         refreshSessions()
     }
 
@@ -166,7 +151,6 @@ final class AppModel {
     /// `uploadLogSession` is kept: this session's last uploads may still be in flight.
     func closeRecording() {
         recording = nil
-        setup.mountPhotoJPEG = nil
         path = NavigationPath()
         refreshSessions()
     }
@@ -183,7 +167,7 @@ final class AppModel {
     }
 }
 
-/// Remembers the last setup form (minus the photo) so a new session takes seconds.
+/// Remembers the last setup values so a new session takes seconds.
 enum SetupDefaults {
     static let key = "setup.last"
 

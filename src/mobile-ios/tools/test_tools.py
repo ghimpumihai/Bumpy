@@ -759,6 +759,9 @@ class MockIngestServerTests(unittest.TestCase):
         self.assertIn("probe", p["error"])
         # ...and 401 when the key is wrong (the app reports "device key rejected")
         self.assertStatus(self.srv.ingest(raw=raw, key="wrong", extra={"x-probe": "1"}), 401)
+        # The app's probe names its deviceId (the real ingest checks the key's binding; the mock has none).
+        named = gzip.compress(b'{"probe":true,"deviceId":"8C3F1A2B-0000-4000-8000-000000000001"}')
+        self.assertIn("probe", self.assertStatus(self.srv.ingest(raw=named, extra={"x-probe": "1"}), 400)["error"])
 
     def test_empty_batch_is_201(self):
         self.assertStatus(self.srv.ingest(make_batch(n=0)), 201)

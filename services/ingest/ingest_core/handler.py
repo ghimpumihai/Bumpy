@@ -8,7 +8,8 @@ Checks run in the same order as the mock server the app was tested against
      Functions host may inflate the body and drop the header (plan §5). Size caps (413 too large,
      400 broken gzip)
   4. JSON (400)
-  5. schema and string limits (400; the app's {"probe": true} lands here: "reachable, key accepted")
+  5. schema and string limits (400; the app's {"probe": true} lands here: "reachable, key accepted").
+     A probe that names its deviceId is checked against the key's binding first (403, step 6)
   6. the body's deviceId must be one the key may send as (403, not in the mock: keys.may_send_as)
   7. x-idempotency-key when present (400)
 Then the message goes to Event Hubs and the raw archive, and the answer is 200. The function can't
@@ -49,8 +50,9 @@ class Sinks(Protocol):
 
 
 class KeyChecker(Protocol):
-    def identify(self, presented: str | None) -> AbstractSet[str] | None:
-        """The device IDs the key is bound to, or None for an unknown key."""
+    def identify(self, presented: str | None, refresh: bool = False) -> AbstractSet[str] | None:
+        """The device IDs the key is bound to, or None for an unknown key. `refresh=True`: reload
+        the keys first if allowed (a known key's binding didn't match)."""
 
 
 def _now_iso(now: dt.datetime) -> str:
@@ -92,9 +94,19 @@ def _decode(headers: Mapping[str, str], raw: bytes | None, keys: KeyChecker, max
     return parsed, body, raw if was_gzip else gzip.compress(body), device_ids
 
 
-def _not_this_device(device_ids: AbstractSet[str], device_id: str, info: str) -> Response | None:
+def _not_this_device(device_ids: AbstractSet[str], device_id: str, info: str,
+                     headers: Mapping[str, str], keys: KeyChecker) -> Response | None:
     """Step 6: 403 when the key isn't bound to the body's deviceId. The app keeps the message and
-    retries 403 with backoff, so nothing is lost while the key's binding is being fixed."""
+    retries 403 with backoff, so nothing is lost while the key's binding is being fixed. A mismatch
+    reloads the keys first (rate-limited): a key renamed with `-RenameFrom` keeps its hash, so the
+    cached binding would otherwise stay wrong until the app restarts."""
+    if may_send_as(device_ids, device_id):
+        return None
+    try:
+        device_ids = keys.identify(headers.get("x-device-key"), refresh=True) or frozenset()
+    except Exception:  # Key Vault unreachable: a server problem, so the app retries
+        log.exception("could not reload device keys")
+        return _error(503, "device keys unavailable, try again later", info)
     if may_send_as(device_ids, device_id):
         return None
     return _error(403, f"deviceId {device_id!r} is not the device this x-device-key was issued to "
@@ -118,6 +130,14 @@ def handle_batch(headers: Mapping[str, str], raw: bytes | None, keys: KeyChecker
     sid = b.get("sessionId") if isinstance(b, dict) else None
     seq = b.get("batchSeq") if isinstance(b, dict) else None
     ids = f"sid={str(sid)[:8] if sid else '-'} seq={seq if seq is not None else '-'}"
+    # The app's connectivity probe names its deviceId, so "Test connection" also reports a key
+    # stored under another name (403) instead of "key accepted" while every batch gets 403.
+    # Probes without one (older app builds) keep the plain 400.
+    probe_device = b.get("deviceId") if isinstance(b, dict) and b.get("probe") is True else None
+    if isinstance(probe_device, str) and 0 < len(probe_device) <= contract.MAX_ID_LEN:
+        forbidden = _not_this_device(device_ids, probe_device, "probe", headers, keys)
+        if forbidden:
+            return forbidden
     try:
         contract.validate_batch(b)
     except Invalid as e:
@@ -125,7 +145,7 @@ def handle_batch(headers: Mapping[str, str], raw: bytes | None, keys: KeyChecker
         if headers.get("x-probe") == "1" and not reason.startswith(contract.PROBE_PREFIX):
             reason = f"probe request (x-probe: 1) with a non-probe body: {reason}"
         return _error(400, reason, ids)
-    forbidden = _not_this_device(device_ids, b["deviceId"], ids)
+    forbidden = _not_this_device(device_ids, b["deviceId"], ids, headers, keys)
     if forbidden:
         return forbidden
     idem = headers.get("x-idempotency-key")
@@ -162,7 +182,7 @@ def handle_session(path_id: str, headers: Mapping[str, str], raw: bytes | None, 
         phase = contract.validate_session_meta(m, path_id)
     except Invalid as e:
         return _error(400, str(e), ids)
-    forbidden = _not_this_device(device_ids, m["deviceId"], ids)
+    forbidden = _not_this_device(device_ids, m["deviceId"], ids, headers, keys)
     if forbidden:
         return forbidden
     idem = headers.get("x-idempotency-key")

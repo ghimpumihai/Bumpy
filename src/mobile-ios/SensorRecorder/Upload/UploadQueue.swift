@@ -530,11 +530,13 @@ final class UploadQueue: @unchecked Sendable {
 
     // MARK: Preflight connectivity test (warning only)
 
-    /// Probe `POST {API}/api/ingest` with a deliberately invalid body (`{"probe":true}`, gzipped,
-    /// with the device key). The ingest function checks the key first and the schema second, so:
-    /// 400/422 = reachable + key accepted (the probe is rejected, never stored); 401/403 = key
-    /// rejected; 404 = wrong base URL. There is no `/api/health` route (02 §5). Never blocks.
-    static func testConnection(config: UploadConfig, transport: HTTPTransport = URLSessionTransport()) async -> (ok: Bool, detail: String) {
+    /// Probe `POST {API}/api/ingest` with a deliberately invalid body (`{"probe":true,"deviceId":…}`,
+    /// gzipped, with the device key). The ingest function checks the key, then that the key is stored
+    /// under this deviceId, then the schema, so: 400/422 = reachable + key accepted for this device (the
+    /// probe is rejected, never stored); 401 = unknown key; 403 = key stored under another Device ID;
+    /// 404 = wrong base URL. There is no `/api/health` route (02 §5). Never blocks.
+    static func testConnection(config: UploadConfig, deviceId: String = AppSettings.deviceId,
+                               transport: HTTPTransport = URLSessionTransport()) async -> (ok: Bool, detail: String) {
         guard let url = config.ingestURL else { return (false, "upload off (no URL)") }
         var r = URLRequest(url: url)
         r.httpMethod = "POST"
@@ -542,7 +544,9 @@ final class UploadQueue: @unchecked Sendable {
         r.setValue("gzip", forHTTPHeaderField: "Content-Encoding")
         r.setValue(config.deviceKey, forHTTPHeaderField: "x-device-key")
         r.setValue("1", forHTTPHeaderField: "x-probe")
-        r.httpBody = try? Gzip.compress(Data(#"{"probe":true}"#.utf8))
+        let probe = (try? JSONSerialization.data(withJSONObject: ["probe": true, "deviceId": deviceId] as [String: Any]))
+            ?? Data(#"{"probe":true}"#.utf8)
+        r.httpBody = try? Gzip.compress(probe)
         r.timeoutInterval = 8
         do {
             return interpretProbe(status: try await transport.send(r))
@@ -555,7 +559,8 @@ final class UploadQueue: @unchecked Sendable {
         switch status {
         case 400, 422: return (true, "reachable, key accepted (HTTP \(status) to probe)")
         case 200..<300: return (true, "reachable (HTTP \(status))")
-        case 401, 403: return (false, "device key rejected (HTTP \(status))")
+        case 401: return (false, "device key rejected (HTTP 401)")
+        case 403: return (false, "device key is stored under another Device ID (HTTP 403): add it for this phone's Device ID (Settings)")
         case 404: return (false, "endpoint not found (HTTP 404): check the API URL")
         default: return (false, "HTTP \(status) from /api/ingest")
         }

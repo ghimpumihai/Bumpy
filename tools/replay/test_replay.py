@@ -177,7 +177,7 @@ class _Keys:
     """Like the Key Vault secret {"replay": hash, "PHONE-1": hash, "PHONE-2": hash}."""
     BOUND = {"test-key": {"replay"}, "phone-1-key": {"PHONE-1"}, "phone-2-key": {"PHONE-2"}}
 
-    def identify(self, presented):
+    def identify(self, presented, refresh=False):  # same signature as ingest_core.keys.KeyStore
         return self.BOUND.get(presented)
 
 

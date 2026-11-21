@@ -25,6 +25,7 @@ ACTIVITY_OK = {"t": 0.6, "stationary": False, "walking": False, "running": False
 BATCH_MUTATIONS = {
     "valid": lambda b: None,
     "probe": lambda b: b.clear() or b.update({"probe": True}),
+    "probe naming its device": lambda b: b.clear() or b.update({"probe": True, "deviceId": "FIXTURE-DEVICE"}),
     "not object": None,  # handled below
     "missing key": lambda b: b.pop("labels"),
     "schemaVersion 2": lambda b: b.update(schemaVersion=2),

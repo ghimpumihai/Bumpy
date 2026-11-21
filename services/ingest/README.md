@@ -7,7 +7,7 @@ The phone's front door (plan §5, "Azure Functions"). Python 3.12 on Flex Consum
 | `POST /api/ingest` | one gzipped 2-second batch | `200 {"ok":true,"sessionId","batchSeq"}` |
 | `PUT /api/ingest/sessions/{sessionId}` | gzipped `session.json`, at Start and at Stop | `200 {"ok":true,"sessionId","phase"}` |
 
-Every request is checked in the same order as [`mock_ingest_server.py`](../../src/mobile-ios/tools/mock_ingest_server.py), the server the app was built against: device key (401) → Content-Type (400) → gunzip and size (413/400) → JSON (400) → schema and string limits (400) → the key's device (403) → idempotency header (400). The app's connectivity probe `{"probe":true}` gets a 400 that means "reachable, key accepted".
+Every request is checked in the same order as [`mock_ingest_server.py`](../../src/mobile-ios/tools/mock_ingest_server.py), the server the app was built against: device key (401) → Content-Type (400) → gunzip and size (413/400) → JSON (400) → schema and string limits (400) → the key's device (403) → idempotency header (400). The app's connectivity probe `{"probe":true,"deviceId":"<Device ID>"}` is checked against the key's device first (403 if the key is stored under another name) and otherwise gets a 400 that means "reachable, key accepted"; a probe without `deviceId` (older app builds) always gets the 400.
 
 - **Gzip is decided by the magic bytes** `1f 8b`, not by `Content-Encoding`: the Functions host may inflate the body itself and drop the header (plan §5). A body without them is taken as JSON the host already inflated, within the same size limit.
 - **Size:** at most 200 KB decompressed. The app setting `MAX_BODY_BYTES` can lower it; it can't go above 240 KB (an Event Hubs Basic event is at most 256 KB).
@@ -35,7 +35,7 @@ deploy.ps1           deploy from a laptop
 
 ## Device keys
 
-`infra/scripts/add-device-key.ps1 -DeviceId <the app's Device ID>` adds a key's SHA-256 hash to the Key Vault secret `device-key-hashes` (`{"<deviceId>": "<sha256 hex>"}`). The app shows its Device ID in Settings. The function reloads the secret by itself when it sees an unknown key (at most once a minute), so no restart is needed.
+`infra/scripts/add-device-key.ps1 -DeviceId <the app's Device ID>` adds a key's SHA-256 hash to the Key Vault secret `device-key-hashes` (`{"<deviceId>": "<sha256 hex>"}`). The app shows its Device ID in Settings. The function reloads the secret by itself, so no restart is needed: when it sees an unknown key, when a known key sends as a device it isn't stored under (so a rename is picked up by the app's next retry), each at most once a minute, and every 5 minutes in any case (so a revoked key stops working). If Key Vault fails on that 5-minute reload, the cached keys keep working.
 
 A key may only send batches and session metadata whose `deviceId` is the name it is stored under (case-insensitive), so one key can't post as another phone. Otherwise the answer is `403`, which the app retries with backoff, so nothing is lost while a key's name is fixed. For [the replay tool](../../tools/replay/README.md): a key stored as `replay` (or `replay-<anything>`) may send any `replay-…` device ID but never a phone's, and a phone's key may send `replay-<its own ID>`.
 
@@ -68,7 +68,7 @@ try { Invoke-WebRequest $url -Method Post -Body $ms.ToArray() -ContentType 'appl
 ## Differences from the mock and the plan
 
 - Session IDs must match `[A-Za-z0-9_-]{1,128}` in batches too (the mock accepts any string): the ID becomes part of a blob path. The app uses UUIDs.
-- The mock has a single key and doesn't check the key's device (the `403` above).
+- The mock has a single key and doesn't check the key's device (the `403` above), for batches, session metadata or the probe.
 - A new batch and a repeat both get `200` (the mock says `201` for new). The app treats every 2xx as delivered.
 - Session metadata is archived as one blob per phase instead of a single `session.json.gz`, so a late retry of the Start copy can't touch the Stop copy. Plan §5 says a retry overwrites its blob; it now keeps the first copy instead, so a key can't replace an archived trip.
 - Validation is plain Python ported from the mock instead of pydantic (plan §5), so the two can be tested for identical behaviour.

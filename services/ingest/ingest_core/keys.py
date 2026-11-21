@@ -13,9 +13,12 @@ from __future__ import annotations
 import hashlib
 import hmac
 import json
+import logging
 import threading
 import time
 from typing import Callable, Iterable, Mapping
+
+log = logging.getLogger("ingest.keys")
 
 # Device IDs the replay tool sends: `replay-<the recorded phone's deviceId>` by default.
 REPLAY_PREFIX = "replay-"
@@ -61,22 +64,51 @@ def may_send_as(names: Iterable[str], device_id: str) -> bool:
 
 
 class KeyStore:
-    """Caches the hashes. An unknown key triggers a reload at most every `min_reload_s` seconds,
-    so a key added with add-device-key.ps1 works within a minute without restarting the app."""
+    """Caches the hashes and their device IDs, so the secret isn't read on every request.
+
+    The cache is reloaded:
+    - when an unknown key arrives (at most every `min_reload_s`): a key added with
+      add-device-key.ps1 works within a minute;
+    - when a known key sends as a device it isn't bound to (`identify(..., refresh=True)`, at most
+      every `min_reload_s`): a key renamed with `-RenameFrom` keeps its hash, so only a reload can
+      see its new name. The app retries 403, so the next retry after the rename gets through;
+    - in any case every `max_age_s`, so a revoked key stops working without a restart.
+    A reload that fails raises (the caller answers 503 and the app retries), except the periodic one
+    for a key that is already known: it keeps the cached keys, so a Key Vault blip doesn't turn every
+    phone's batches into 503s, and is tried again after `min_reload_s`.
+    """
 
     def __init__(self, loader: Callable[[], Mapping[str, Iterable[str]]], min_reload_s: float = 60.0,
-                 clock: Callable[[], float] = time.monotonic):
+                 max_age_s: float = 300.0, clock: Callable[[], float] = time.monotonic):
         self._loader = loader
         self._min_reload_s = min_reload_s
+        self._max_age_s = max_age_s
         self._clock = clock
         self._lock = threading.Lock()
         self._entries: tuple[tuple[str, frozenset[str]], ...] | None = None
-        self._loaded_at = 0.0
+        self._loaded_at = 0.0  # last successful load
+        self._tried_at = 0.0  # last attempt, successful or not
 
     def _reload(self) -> None:
-        loaded = self._loader()  # may raise: the caller answers 503, not 401
+        self._tried_at = self._clock()
+        loaded = self._loader()  # may raise: on the first load the caller answers 503, not 401
         self._entries = tuple((h, frozenset(ids)) for h, ids in loaded.items())
         self._loaded_at = self._clock()
+
+    def _reload_if_older_than(self, age_s: float, keep_on_failure: bool) -> None:
+        if self._entries is None:
+            self._reload()
+            return
+        now = self._clock()
+        if now - self._loaded_at < age_s or now - self._tried_at < self._min_reload_s:
+            return
+        if not keep_on_failure:
+            self._reload()
+            return
+        try:
+            self._reload()
+        except Exception:  # noqa: BLE001 - keep serving the cached keys; tried again after min_reload_s
+            log.warning("could not reload device keys; keeping the cached ones", exc_info=True)
 
     def _match(self, presented_hash: str) -> frozenset[str] | None:
         found = None
@@ -85,21 +117,22 @@ class KeyStore:
                 found = ids
         return found
 
-    def identify(self, presented: str | None) -> frozenset[str] | None:
-        """The device IDs the key is stored under, or None for an unknown key."""
+    def identify(self, presented: str | None, refresh: bool = False) -> frozenset[str] | None:
+        """The device IDs the key is stored under, or None for an unknown key. `refresh=True` asks for
+        a reload first (rate-limited), for a known key whose binding didn't match."""
         if not presented:
             return None
         presented_hash = hash_key(presented)
         with self._lock:
-            if self._entries is None:
-                self._reload()
+            if refresh:
+                self._reload_if_older_than(self._min_reload_s, keep_on_failure=False)
+            else:
+                self._reload_if_older_than(self._max_age_s, keep_on_failure=True)
             found = self._match(presented_hash)
-            if found is not None:
-                return found
-            if self._clock() - self._loaded_at >= self._min_reload_s:
-                self._reload()
-                return self._match(presented_hash)
-            return None
+            if found is None:
+                self._reload_if_older_than(self._min_reload_s, keep_on_failure=False)
+                found = self._match(presented_hash)
+            return found
 
     def check(self, presented: str | None) -> bool:
         return self.identify(presented) is not None

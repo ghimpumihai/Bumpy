@@ -5,7 +5,7 @@ import type { ExclusionReason, QualityRow, SessionDetail, SessionQuality, Sessio
 import { aggregate, type AggregationResult } from "./aggregate";
 import { SESSION_SPECS, type SessionSpec } from "./catalog";
 import { unitHash } from "./random";
-import { detectionMetrics, PRIVACY_TRIM_M, SERIES_HZ, simulateSession, type SimulatedSession } from "./simulate";
+import { detectionMetrics, SERIES_HZ, simulateSession, type SimulatedSession } from "./simulate";
 
 const PROCESSOR_VERSION = "mock-1";
 /** Live sessions started this long before the page loaded, so the live view has a track straight away. */
@@ -114,12 +114,6 @@ export function processingStatus(sim: SimulatedSession, nowMs: number = Date.now
   return processedAt(sim, nowMs) === null ? "processing" : "complete";
 }
 
-/** Same rule as the read API: the first and last 200 m of a finished trip never leave the database. */
-export function inPrivacyZone(sim: SimulatedSession, sampleIndex: number, nowMs: number = Date.now()): boolean {
-  const s = sim.s[sampleIndex];
-  return s < PRIVACY_TRIM_M || (!isStillLive(sim, nowMs) && s > sim.totalDistanceM - PRIVACY_TRIM_M);
-}
-
 // ---------------------------------------------------------------------------------------------
 // Aggregation rules (plan 02 §8, §10; dashboard/API.md).
 
@@ -178,10 +172,10 @@ export function getAggregation(nowMs: number = Date.now()): AggregationResult {
   return result;
 }
 
-/** Counts only events the API publishes (outside the privacy zone), so counts match the dots on the map. */
-function eventCounts(sim: SimulatedSession, last: number, nowMs: number): Record<RoadEventType, number> {
+/** Counts the events recorded so far, so counts match the dots on the map. */
+function eventCounts(sim: SimulatedSession, last: number): Record<RoadEventType, number> {
   const counts: Record<RoadEventType, number> = { pothole: 0, speed_bump: 0, rail_joint: 0 };
-  for (const event of sim.events) if (event.sampleIndex <= last && !inPrivacyZone(sim, event.sampleIndex, nowMs)) counts[event.type]++;
+  for (const event of sim.events) if (event.sampleIndex <= last) counts[event.type]++;
   return counts;
 }
 
@@ -220,7 +214,7 @@ export function sessionSummary(sim: SimulatedSession, nowMs: number = Date.now()
     sicknessExperimental: isSicknessExperimental(spec),
     msdvZ: msdv,
     msiPct: msdv / 3,
-    eventCounts: eventCounts(sim, last, nowMs),
+    eventCounts: eventCounts(sim, last),
     ratingsCount: sim.ratings.filter((r) => r.sampleIndex <= last).length,
   };
 }

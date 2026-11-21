@@ -6,15 +6,15 @@ The dashboard's only backend (plan §5, contract in [`dashboard/API.md`](../../d
 
 | Route | Data |
 |---|---|
-| `/api/live` | Devices heard from in the last 60 s (`live_state`), with the last 2 minutes of public track, `roughnessNow`, `msdvSoFar` and the latest MISC rating. A device is hidden until its track has left the start zone, whenever it is back inside it, and as soon as the trip has ended (its position is then its endpoint). |
+| `/api/live` | Devices heard from in the last 60 s (`live_state`), with the last 2 minutes of track, `roughnessNow`, `msdvSoFar` and the latest MISC rating. A device is listed from its first position, including for up to 60 s after its trip ends (D40). |
 | `/api/sessions`, `/api/sessions/{id}`, `/api/quality` | Built from `sessions`, `track_points`, `labels`, `events` and `ingest_batches`. Missing context gets the defaults the dashboard expects. Fills in distance (whole track length; `sessions.distance_m` once finalized), `msdvZ`/`msiPct`, public event counts, GPS accuracy, per-stream quality, `validFraction`/`invalidSeconds`/`processedAt` from the finalize job, and late and duplicate batch counts. |
-| `/api/sessions/{id}/track` | 1 Hz track without the start zone, and without the end zone once the trip has ended (see Privacy). |
+| `/api/sessions/{id}/track` | 1 Hz track, whole (no start/end trim, D40); fixes less accurate than 50 m are left out. |
 | `/api/sessions/{id}/series` | The 5 Hz chart series from the signal processing. |
-| `/api/sessions/{id}/events` | Detected potholes, minus those in the private zones. |
+| `/api/sessions/{id}/events` | Detected events that have a position. |
 | `/api/sessions/{id}/labels` | The trip's labels. |
-| `/api/events` | Events of **aggregated** (finalized) trips only, minus those in the private zones. |
+| `/api/events` | Events of **aggregated** (finalized) trips only. |
 | `/api/overview` | Session counts, distance of aggregated trips, segment and pothole counts and the latest aggregation fit (`aggregation_fit`). |
-| `/api/segments`, `/api/segments/{h3}` | `segments` + `segment_agg` (+ `segment_sickness`, `segment_observations`) from the aggregate job. Passes in a private zone are left out (the finalize job's flag and the read API's own rule). `/api/segments/{h3}` answers 404 for a cell without observations and 400 for anything else. |
+| `/api/segments`, `/api/segments/{h3}` | `segments` + `segment_agg` (+ `segment_sickness`, `segment_observations`) from the aggregate job. Every pass is served, including ones flagged `in_privacy_zone` before D40. `/api/segments/{h3}` answers 404 for a cell without observations and 400 for anything else. |
 
 Errors are always `{"error": "..."}`, with the CORS headers like any other answer (a 500 without them looks like a network error to the browser): 404 for an unknown session, segment or route, 400 for a bad query parameter (same allowed values as the mock), 503 when no database connection is free in time or a statement hits its timeout, 500 for anything else (logged with its stack trace). Times are `2026-11-21T09:12:03.512Z`; epoch milliseconds are integers.
 
@@ -22,18 +22,13 @@ Errors are always `{"error": "..."}`, with the CORS headers like any other answe
 
 `detection` comes from the finalize job (`sessions.quality.detection`, scored against the manual taps) and is `null` until a trip is finalized. Speed bumps come from the processor; rail joints aren't detected yet.
 
-## Privacy (plan §11)
+## No privacy trim (D40)
 
-A trip's positions stay in the database until it is 200 m away from where it started, and, once it has ended, from the last time it was 200 m away from where it ended (`app/queries.py`, applied in SQL by every route):
-
-- Only fixes with `h_acc_m <= 50` count. Fixes without an accuracy or worse than that never anchor a zone and are never public, so a garage start or a cold GPS can't move the zone away from home.
-- The start zone is a 200 m radius (geodesic) around the first accurate fix. The track is private until it leaves that radius (an accurate fix outside it, confirmed by the next accurate fix). This is a radius, not a path length: GPS jitter while parked can add up to hundreds of metres without the phone moving.
-- The end zone is the same around the last accurate fix, from the last time the track was outside it. It applies once the trip has ended: status not `live`, or an end time, or a Stop message (`expected_batch_count`), or 15 minutes without batches, whichever comes first.
-- Both are a prefix and a suffix: a trip that later passes its start again stays public there, so the track isn't punched full of holes. Events must be inside the public part of the track and also outside both radii.
+Positions are served whole: no start or end zone is hidden, on any route. The only filter is accuracy: fixes without an accuracy or worse than 50 m (`MAX_HACC_M` in `app/queries.py`) are never returned. Anyone with the dashboard link can see where trips start and end.
 
 ## Performance
 
-Every route runs a fixed number of queries, whatever the number of trips. The privacy windows use `LATERAL ... ORDER BY t LIMIT 1` on the `track_points` primary key, so they read the start and end of a track, not all of it; `/api/live` reads only the last 2 minutes of each live track. Track length (until a trip is finalized and has `sessions.distance_m`), GPS accuracy and live stream quality read a whole trip, so they are cached per trip until its `sessions.updated_at` or `status` changes (the processor bumps `updated_at` with every batch and session message; a job that rewrites a trip's track or batches must do the same).
+Every route runs a fixed number of queries, whatever the number of trips. `/api/live` reads only the last 2 minutes of each live track. Track length (until a trip is finalized and has `sessions.distance_m`), GPS accuracy and live stream quality read a whole trip, so they are cached per trip until its `sessions.updated_at` or `status` changes (the processor bumps `updated_at` with every batch and session message; a job that rewrites a trip's track or batches must do the same).
 
 | Env var | Default | |
 |---|---|---|

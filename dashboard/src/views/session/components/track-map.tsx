@@ -61,7 +61,7 @@ export function TrackMap({ session }: TrackMapProps) {
         className="absolute bottom-8 left-3"
         title="Speed"
         bands={SPEED_BANDS}
-        footnote={track.data ? `First and last ${track.data.properties.trimmedM} m hidden for privacy. Dots: detected events.` : undefined}
+        footnote={track.data ? "Dots: detected events." : undefined}
       />
     </div>
   );

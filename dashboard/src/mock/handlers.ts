@@ -20,7 +20,6 @@ import { bearingDeg } from "@/utils/geo";
 import {
   getAggregation,
   getDataset,
-  inPrivacyZone,
   isIncluded,
   lastSampleIndex,
   processedAt,
@@ -30,7 +29,7 @@ import {
   sessionDetail,
   sessionSummary,
 } from "./dataset";
-import { PRIVACY_TRIM_M, SERIES_HZ, type SimulatedSession } from "./simulate";
+import { SERIES_HZ, type SimulatedSession } from "./simulate";
 
 export class MockHttpError extends Error {
   readonly status: number;
@@ -83,7 +82,7 @@ function eventsOf(sims: SimulatedSession[], type: string | null): RoadEventColle
   const features = sims.flatMap((sim) => {
     const last = lastSampleIndex(sim);
     return sim.events
-      .filter((e) => e.sampleIndex <= last && !inPrivacyZone(sim, e.sampleIndex) && (!type || e.type === type))
+      .filter((e) => e.sampleIndex <= last && (!type || e.type === type))
       .map((e) => ({
         type: "Feature" as const,
         geometry: { type: "Point" as const, coordinates: [round(e.position[0]), round(e.position[1])] },
@@ -156,7 +155,7 @@ function segmentDetail(h3: string): SegmentDetail {
     .flatMap((sim) =>
       sim.observations
         // Passes recorded so far; a trip still recording or processing is listed as not included.
-        .filter((obs) => obs.cell === h3 && !obs.inPrivacyZone && obs.firstSample <= lastSampleIndex(sim, now))
+        .filter((obs) => obs.cell === h3 && obs.firstSample <= lastSampleIndex(sim, now))
         .map((obs) => ({
           sessionId: sim.spec.sessionId,
           vehicleType: sim.spec.vehicle.type,
@@ -199,7 +198,6 @@ function track(sim: SimulatedSession): SessionTrack {
   const times: number[] = [];
   const speeds: number[] = [];
   for (let k = 0; k <= last; k += step) {
-    if (inPrivacyZone(sim, k)) continue;
     coordinates.push([round(sim.lon[k]), round(sim.lat[k])]);
     times.push(sim.t[k]);
     speeds.push(round(sim.speed[k], 2));
@@ -207,7 +205,7 @@ function track(sim: SimulatedSession): SessionTrack {
   return {
     type: "Feature",
     geometry: { type: "LineString", coordinates },
-    properties: { sessionId: sim.spec.sessionId, times, speeds, trimmedM: PRIVACY_TRIM_M },
+    properties: { sessionId: sim.spec.sessionId, times, speeds, trimmedM: 0 },
   };
 }
 
@@ -221,22 +219,17 @@ function live(): LiveResponse {
   const devices: LiveDevice[] = [...getDataset().sims.values()]
     .filter((sim) => sim.spec.live)
     .flatMap((sim) => {
-      // Like the read API: a device leaves the live view as soon as its trip ends (privacy — the end of a
-      // trip is often someone's home, and the last 200 m can't be known to be the last until then).
-      if (processingStatus(sim, now) !== "live") return [];
       const last = lastSampleIndex(sim, now);
       // Devices the ingest function heard from in the last minute (a dead zone keeps them listed, stale).
       const receivedAt = receivedAtMs(sim, now);
       if (now - receivedAt > LIVE_WINDOW_S * MS_PER_SECOND) return [];
-      // Privacy (plan §11): no position is published while the trip is in its first 200 m.
-      if (inPrivacyZone(sim, last, now)) return [];
       const latest = sim.ratings.filter((rating) => rating.sampleIndex <= last).at(-1);
       const window = ROUGHNESS_NOW_WINDOW_S * SERIES_HZ;
       let sumSquares = 0;
       for (let k = Math.max(0, last - window); k <= last; k++) sumSquares += sim.aVert[k] ** 2;
       const trackPoints: [number, number][] = [];
       for (let k = Math.max(0, last - LIVE_TRACK_S * SERIES_HZ); k <= last; k += SERIES_HZ / TRACK_HZ) {
-        if (!inPrivacyZone(sim, k)) trackPoints.push([round(sim.lon[k]), round(sim.lat[k])]);
+        trackPoints.push([round(sim.lon[k]), round(sim.lat[k])]);
       }
       const hoursRunning = (sim.t[last] - sim.t[0]) / MS_PER_SECOND / SECONDS_PER_HOUR;
       const prev = Math.max(0, last - SERIES_HZ);
@@ -245,7 +238,7 @@ function live(): LiveResponse {
           deviceId: sim.spec.deviceId,
           sessionId: sim.spec.sessionId,
           source: sim.spec.source,
-          sessionStatus: "live",
+          sessionStatus: processingStatus(sim, now),
           vehicleType: sim.spec.vehicle.type,
           updatedAt: new Date(sim.t[last]).toISOString(),
           receivedAt: new Date(receivedAt).toISOString(),

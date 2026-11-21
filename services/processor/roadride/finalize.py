@@ -50,7 +50,6 @@ H3_RESOLUTION = aggregate.H3_RESOLUTION
 WINDOW_S = 0.2  # session_series spacing (dsp.SERIES_EVERY at 100 Hz)
 MOVING_SPEED_MS = 1.0  # windows slower than this don't count for a pass's roughness (as the mock)
 MIN_MOVING_WINDOWS = 3
-PRIVACY_TRIM_M = 200.0  # plan §11: same as the read API
 MAX_FIX_GAP_S = 10.0  # no position between two fixes further apart than this
 FIX_EDGE_S = 2.0  # a window this close before the first / after the last fix still gets a position
 MOTION_HZ = 100.0
@@ -215,7 +214,6 @@ class Pass:
     aw_rms: float
     pothole_count: int
     n_windows: int
-    in_privacy_zone: bool
 
 
 def _haversine_m(lat1, lon1, lat2, lon2) -> np.ndarray:
@@ -249,10 +247,9 @@ def build_passes(series: list[SeriesPoint], fixes: list[tuple[float, float, floa
     if not series or not fixes:
         return []
     fa = np.asarray(fixes, dtype=float)
-    ft, dist = fa[:, 0], track_distance(fixes)
-    total = float(dist[-1])
+    ft = fa[:, 0]
     t = np.array([p.t for p in series])
-    lat, lon, d = (np.interp(t, ft, col) for col in (fa[:, 1], fa[:, 2], dist))
+    lat, lon = (np.interp(t, ft, col) for col in (fa[:, 1], fa[:, 2]))
     if len(ft) > 1:
         i = np.clip(np.searchsorted(ft, t), 1, len(ft) - 1)
         bracket = ft[i] - ft[i - 1]
@@ -281,12 +278,11 @@ def build_passes(series: list[SeriesPoint], fixes: list[tuple[float, float, floa
             speed = sum(known) / len(known) if known else None
         duration = len(pts) * WINDOW_S
         t0, t1 = pts[0].t - WINDOW_S, pts[-1].t
-        mid = float(d[run[len(run) // 2]])
         passes.append(Pass(
             h3=run_cell, t_start=t0, duration_s=duration, mean_speed_ms=speed, roughness_rms=rough,
             aw_rms=math.sqrt(sum(p.dose_inc for p in pts) / duration),
             pothole_count=int(np.count_nonzero((potholes > t0) & (potholes <= t1))),
-            n_windows=len(pts), in_privacy_zone=mid < PRIVACY_TRIM_M or mid > total - PRIVACY_TRIM_M))
+            n_windows=len(pts)))
 
     for k in range(len(series)):
         if not has_pos[k]:
@@ -572,11 +568,11 @@ def finalize_session(conn: Connection, archive: Archive, session_id: str,
             cur.executemany(
                 """
                 INSERT INTO segment_observations (session_id, pass_idx, h3, t_start, duration_s,
-                  mean_speed_ms, roughness_rms, aw_rms, pothole_count, n_windows, in_privacy_zone)
-                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                  mean_speed_ms, roughness_rms, aw_rms, pothole_count, n_windows)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                 """,
                 [(session_id, i, p.h3, from_epoch(p.t_start), p.duration_s, p.mean_speed_ms,
-                  p.roughness_rms, p.aw_rms, p.pothole_count, p.n_windows, p.in_privacy_zone)
+                  p.roughness_rms, p.aw_rms, p.pothole_count, p.n_windows)
                  for i, p in enumerate(passes)],
             )
 

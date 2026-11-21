@@ -53,7 +53,6 @@ EXTRA_STREAMS = {
     "mag_raw": ("mag_raw.csv", 50.0),
     "altimeter": ("altimeter.csv", 1.0),  # CMAltimeter: about once a second, as in the read API and the mock
     "abs_altitude": ("abs_altitude.csv", None),
-    "audioLevel": ("audio_level.csv", 10.0),
 }
 
 
@@ -308,7 +307,11 @@ def build_batches(session_id: str, meta: dict, dm: dict, loc: dict, lab: dict,
         return slice(int(np.searchsorted(a["t_up"], t0, "left")), int(np.searchsorted(a["t_up"], t1, "left")))
 
     device_id = str(meta.get("deviceId") or "") or None
-    zeros = np.nan_to_num  # the app sends a non-finite sensor value as 0 in a live batch
+    def zeros(a: np.ndarray) -> np.ndarray:
+        # The app sends a non-finite sensor value, ±inf included, as 0 in a live batch (round6), so an
+        # upload gives the same numbers. np.nan_to_num alone turned inf into 1.8e308.
+        return np.nan_to_num(a, nan=0.0, posinf=0.0, neginf=0.0)
+
     offset_ms = None
     out = []
     for k in range(windows):

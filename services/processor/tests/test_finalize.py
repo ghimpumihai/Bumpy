@@ -241,6 +241,35 @@ def _one(db, sql, *args):
 
 
 @requires_db
+def test_events_and_passes_are_placed_only_from_usable_fixes(db, batch, session_meta, tmp_path):
+    """The pothole's batch has an invalid fix (hAcc -1) far off the track. Live, the event takes the
+    nearest usable fix stored so far; finalized, it is interpolated between the usable fixes around it, and no pass
+    lands in the invalid fix's cell."""
+    import h3
+
+    sid = "trip-badfix"
+    batches, metas = _trip(batch, session_meta, sid)
+    bad = batches[10]["location"][0]  # seq 10: t0 = T0 + 20, the pothole at T0 + 21
+    bad.update(hAcc=-1.0, lat=bad["lat"] + 0.05)
+    _stream(db, batches, metas)
+    step = 0.0002  # conftest.motion_batch: north by step_deg per batch, fix at t0 + 0.3 s
+    lat_of = lambda seq: 46.77 + seq * step  # noqa: E731
+    live = _one(db, "SELECT ST_Y(geom::geometry) FROM events WHERE type = 'pothole'")[0]
+    # Reported during seq 10, before seq 11's fix arrived: the nearest usable one so far is seq 9's.
+    assert live == pytest.approx(lat_of(9), abs=1e-9)
+
+    _write_archive(tmp_path, sid, batches, metas)
+    assert fz.handle(db, fz.DirArchive(tmp_path), json.dumps({"sessionId": sid}).encode())[0] == "complete"
+    final = _one(db, "SELECT ST_Y(geom::geometry) FROM events WHERE type = 'pothole'")[0]
+    t_event = _one(db, "SELECT extract(epoch FROM t) FROM events WHERE type = 'pothole'")[0]
+    frac = (float(t_event) - (T0 + 18.3)) / 4.0  # between the fixes of seq 9 and seq 11
+    assert final == pytest.approx(lat_of(9) + frac * 2 * step, abs=1e-7)
+    far = h3.latlng_to_cell(bad["lat"], bad["lon"], fz.H3_RESOLUTION)
+    cells = [r[0] for r in db.execute("SELECT h3 FROM segment_observations").fetchall()]
+    assert cells and far not in cells
+
+
+@requires_db
 def test_a_phone_moved_tap_restarts_the_forward_axis_live_and_in_finalize(db, batch, session_meta):
     """Both paths hand the operator's tap to the pipeline, on the same clock as the fixes."""
     from roadride.dsp import FWD_SETTLE_S
@@ -534,9 +563,23 @@ def _assess_trip(fixes, seconds=600):
     return fz.assess(fz.Trip("s", [batch], []), fz.TripSignal(series=series), 1, fixes)
 
 
-def test_fix_without_accuracy_is_unknown_not_poor():
+def test_a_fix_without_accuracy_has_no_position():
+    """iOS reports -1 when "the latitude and longitude are invalid" (Apple's CLLocation docs): such fixes
+    are no GPS at all, not GPS of unknown quality. The motion itself stays valid."""
     status, valid, q = _assess_trip([(1000 + i, 45.0, 21.0, None) for i in range(601)])
-    assert (status, valid, q["invalidSeconds"]["gps_poor"]) == ("ok", 1.0, 0.0)  # was valid 0.0, 600 s poor
+    assert (status, valid, q["invalidSeconds"]["gps_poor"]) == ("bad", 1.0, 600.0)
+    mixed = [(1000 + i, 45.0, 21.0, None if i % 2 else 5.0) for i in range(601)]
+    status, valid, q = _assess_trip(mixed)  # a good fix within 2 s of every window
+    assert (status, q["invalidSeconds"]["gps_poor"]) == ("ok", 0.0)
+
+
+def test_a_step_is_measured_on_the_wgs84_ellipsoid():
+    """The read API's ST_Distance(geography) uses WGS84, so the finalize job does too; references from
+    the geodesic (GeographicLib through pyproj): a sphere read east-west steps at 47°N 0.3 % short."""
+    lat1, lon1, lat2, lon2 = (np.array(v) for v in zip((46.77, 23.6, 46.77, 23.6013),
+                                                       (46.77, 23.6, 46.7709, 23.6),
+                                                       (0.0, 179.9999, 0.0, -179.9999)))
+    assert fz._step_m(lat1, lon1, lat2, lon2) == pytest.approx([99.296288, 100.049727, 22.263898], abs=1e-5)
 
 
 def test_poor_gps_is_reported_but_does_not_invalidate_the_motion():

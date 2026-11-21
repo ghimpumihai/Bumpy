@@ -70,7 +70,6 @@ export interface SessionSummary {
   vehicle: Vehicle;
   mount: Mount;
   people: People;
-  audioEnabled: boolean;
   startedAt: IsoDateTime;
   endedAt: IsoDateTime | null;
   durationS: number;

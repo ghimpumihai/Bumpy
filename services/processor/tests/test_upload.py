@@ -75,6 +75,7 @@ def make_folder(root, *, sid=SID, seconds=SECONDS, ended=True):
             "h_acc": "4.7", "v_acc": "3", "speed": "12.000000", "speed_acc": "0.5", "course": "0.0",
             "course_acc": "5", "is_simulated": "0"}))
         rows["altimeter"].append(_row("altimeter", tu, {"rel_alt_m": "0.1", "pressure_kpa": "97.1"}))
+    # Folders from builds before D48 still hold audio files: the processor must ignore them.
     rows["audio_level"] = [_row("audio_level", START_UP + i / 10, {"avg_dbfs": "-40", "peak_dbfs": "-30"})
                            for i in range(seconds * 10)]
     rows["labels"] = [_row("labels", START_UP + POTHOLE_S + 0.8, {"type": "pothole"}),
@@ -155,7 +156,7 @@ def test_the_folder_gives_the_same_signal_as_the_streamed_trip(folder, uploaded)
     assert [(lab.type, lab.value, lab.note) for lab in labels] == \
         [("pothole", None, None), ("sickness", "3", "a, b"), ("phone_moved", None, None)]
     assert "raterName" not in trip.meta["people"] and not trip.incomplete
-    assert trip.streams["accelRaw"]["rows"] == SECONDS * 100 and trip.streams["audioLevel"]["expectedHz"] == 10.0
+    assert trip.streams["accelRaw"]["rows"] == SECONDS * 100 and "audioLevel" not in trip.streams
 
 
 def _with_speeds(batches):
@@ -224,6 +225,19 @@ def test_unparseable_value_falls_back_to_the_forgiving_reader(folder):
     assert np.isnan(fast["rr_z"][77])  # an empty field
 
 
+def test_an_infinite_value_reads_as_zero_as_the_app_sends_it(tmp_path):
+    """The app's batches carry a non-finite sensor value as 0 (IngestBatch round6); an upload must give
+    the same numbers, not 1.8e308 (np.nan_to_num's default for inf)."""
+    d = make_folder(tmp_path / "phone")
+    csv = d / "device_motion.csv"
+    csv.write_bytes(csv.read_bytes().replace(b",-1.000000,", b",inf,", 1))  # the first row's g_z
+    root = tmp_path / "sessions"
+    uploader.run(d, client=None, dry_run=root, log=lambda m: None)
+    trip = up.load(up.DirUploads(root), SID)
+    g = np.asarray(trip.batches[0].motion_g, dtype=float).reshape(-1, 3)
+    assert g[0, 2] == 0.0 and g[1, 2] == -1.0
+
+
 def _tamper(uploaded, name, data):
     (uploaded.root / SID / name).write_bytes(data)
 
@@ -289,7 +303,8 @@ def test_upload_only_trip_is_finalized_and_aggregated(db, uploaded, tmp_path):
     assert "raterName" not in row[8]
     q = _one(db, "SELECT quality FROM sessions")[0]
     assert q["finalizedFrom"] == "upload" and q["missingBatches"] is None
-    assert {"deviceMotion", "accelRaw", "gyroRaw", "altimeter", "audioLevel", "location"} <= set(q["streams"])
+    assert {"deviceMotion", "accelRaw", "gyroRaw", "altimeter", "location"} <= set(q["streams"])
+    assert "audioLevel" not in q["streams"]
     assert q["detection"]["pothole"]["truePositives"] == 1
     assert q["invalidSeconds"]["phone_moved"] == pytest.approx(10, abs=0.4)
     assert _one(db, "SELECT count(*) FROM track_points")[0] == SECONDS

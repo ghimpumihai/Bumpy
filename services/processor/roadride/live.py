@@ -12,7 +12,7 @@ from dataclasses import dataclass, field
 
 UTC = dt.timezone.utc
 
-COLUMNAR_BLOCKS = ("deviceMotion", "accelRaw", "gyroRaw", "altimeter", "audioLevel")
+COLUMNAR_BLOCKS = ("deviceMotion", "accelRaw", "gyroRaw", "altimeter")
 VEHICLE_TYPES = {"car", "bus", "tram", "bike", "boat"}
 SOURCES = {"live", "upload", "replay"}
 
@@ -27,6 +27,15 @@ def parse_iso(value: str | None) -> dt.datetime | None:
 
 def from_ms(ms: int | float) -> dt.datetime:
     return dt.datetime.fromtimestamp(ms / 1000.0, tz=UTC)
+
+
+# A fix gives a position only with a known accuracy of at most this (the read API's MAX_HACC_M for the
+# track). Without one it is iOS's -1, which Apple documents as "the latitude and longitude are invalid".
+MAX_HACC_M = 50.0
+
+
+def usable_fix(h_acc_m: float | None) -> bool:
+    return h_acc_m is not None and h_acc_m <= MAX_HACC_M
 
 
 def _non_negative(v) -> float | None:
@@ -142,7 +151,6 @@ class SessionFacts:
     mount: dict
     people: dict
     conditions: dict | None
-    audio_enabled: bool | None
     synthetic_sensors: bool
     recovered: bool
     started_at: dt.datetime | None
@@ -166,7 +174,6 @@ def parse_session(m: dict) -> SessionFacts:
         mount=m.get("mount") or {},
         people=m.get("people") or {},
         conditions=m.get("conditions") if isinstance(m.get("conditions"), dict) else None,
-        audio_enabled=m.get("audioEnabled") if isinstance(m.get("audioEnabled"), bool) else None,
         synthetic_sensors=m.get("syntheticSensors") is True,
         recovered=m.get("recovered") is True,
         started_at=parse_iso(m.get("startedAtUtc")),

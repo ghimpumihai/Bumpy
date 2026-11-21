@@ -12,8 +12,9 @@ def test_fixture_batch_facts(batch):
     assert f.t0_utc == dt.datetime(2025, 11, 21, 9, 15, 32, tzinfo=UTC)
     # Newest sample: the location fix at t0 + 0.120 s (columnar samples end at t0 + 0.04 s).
     assert f.end_utc == dt.datetime(2025, 11, 21, 9, 15, 32, 120000, tzinfo=UTC)
+    # The fixture comes from a build that still sends audioLevel (D48): it is not counted.
     assert f.sample_counts == {"deviceMotion": 5, "accelRaw": 5, "gyroRaw": 5, "altimeter": 1,
-                               "audioLevel": 1, "location": 1, "labels": 2}
+                               "location": 1, "labels": 2}
     (fix,) = f.fixes
     assert (fix.lat, fix.lon, fix.speed_ms, fix.course_deg, fix.h_acc_m) == (46.77121, 23.62363, 8.4, 92, 4.7)
     assert [lab.type for lab in f.labels] == ["pothole", "note"]
@@ -37,7 +38,7 @@ def test_minus_one_means_unknown(batch):
 
 
 def test_batch_without_samples_ends_at_t0(batch):
-    for block in ("deviceMotion", "accelRaw", "gyroRaw", "altimeter", "audioLevel"):
+    for block in ("deviceMotion", "accelRaw", "gyroRaw", "altimeter"):
         batch[block] = {k: [] for k in batch[block]}
     batch["location"], batch["labels"] = [], []
     f = parse_batch(batch)

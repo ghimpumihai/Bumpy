@@ -200,7 +200,6 @@ export function sessionSummary(sim: SimulatedSession, nowMs: number = Date.now()
     vehicle: spec.vehicle,
     mount: spec.mount,
     people: spec.people,
-    audioEnabled: spec.audioEnabled,
     startedAt: new Date(sim.t[0]).toISOString(),
     endedAt: ended === null ? null : new Date(ended).toISOString(),
     durationS: (sim.t[last] - sim.t[0]) / MS_PER_SECOND,
@@ -246,7 +245,6 @@ function sessionQuality(sim: SimulatedSession, last: number): SessionQuality {
     mag_raw: stream(50, durationS, `${id}:mag`),
     location: bad ? stream(0.4, durationS, `${id}:loc`, 9, 14.2) : stream(1, durationS, `${id}:loc`),
     altimeter: stream(1, durationS, `${id}:alt`),
-    audio_level: stream(10, durationS, `${id}:aud`),
     device: stream(0.2, durationS, `${id}:dev`),
   };
   const fixes = streams.location.rows;

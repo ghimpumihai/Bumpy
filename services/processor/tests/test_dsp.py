@@ -98,6 +98,15 @@ def test_wy_is_flat_to_025_hz_then_falls_12_db_per_octave():
     assert 20 * np.log10(g[4] / g[3]) == pytest.approx(-12.0, abs=0.3)
 
 
+def test_wy_follows_the_papers_weighting_within_08_db():
+    """D50: Donohew & Griffin's acceleration weighting is flat from 0.0315 to 0.25 Hz, then falls
+    12 dB per octave to 0.8 Hz. Butterworth corners at those edges read 3 dB low there (D49)."""
+    f = np.geomspace(0.0315, 0.8, 200)
+    straight = np.where(f <= 0.25, 1.0, (0.25 / f) ** 2)
+    for gain in (dsp.wy_analog_gain(f), dsp.wy_digital_gain(f)):
+        assert np.max(np.abs(20 * np.log10(gain / straight))) < 0.8
+
+
 def _sine(amp, f0):
     return lambda t: amp * np.sin(2 * np.pi * f0 * t)
 
@@ -843,25 +852,121 @@ def test_a_reset_does_not_inject_dose_from_its_first_sample():
     assert p.dose < 0.001
 
 
-def test_window_dose_adds_up_to_the_trip_across_resets():
-    """A reset cut the open 5 Hz window and dropped its dose, so Σ dose_inc < dose (and passes' a_w
-    came out low). The cut-short dose now goes into the next window."""
-    vert = lambda t: np.sin(2 * np.pi * 0.2 * t)  # noqa: E731
-    t, ua, grav, fixes = synth(60, vert=vert)
-    m = ~(((t >= T0 + 20.03) & (t < T0 + 20.6)) | ((t >= T0 + 41.11) & (t < T0 + 41.7)))
+def test_a_reset_drops_the_cut_window_with_its_dose(monkeypatch):
+    """A window carries the dose of its own 0.2 s only. A reset drops the window it cuts short, dose and
+    time together, so a pass's a_w = √(Σ dose_inc / Σ 0.2 s) stays unbiased; the trip's dose keeps it.
+    (Carrying the cut dose into the next window gave a still pass after a hole an a_w of 0.6 m/s².)"""
+    dropped = []
+    drop = dsp.Pipeline._drop_grid
+
+    def spy(self):
+        if self.grid is not None:
+            dropped.append(self.grid["win"]["aw2"])
+        drop(self)
+
+    monkeypatch.setattr(dsp.Pipeline, "_drop_grid", spy)
+    still_after = T0 + 31.0
+    vert = lambda t: np.where(t < still_after - T0, 2.0 * np.sin(2 * np.pi * 0.2 * t), 0.0)  # noqa: E731
+    t, ua, grav, fixes = synth(60, vert=vert, jitter=False)
+    m = ~((t >= T0 + 30.13) & (t < T0 + 31.13))  # a hole, then no motion at all
     out, p = run_whole(t[m], ua[m], grav[m], fixes)
-    assert out.reset
+    assert out.reset and dropped and max(dropped) > 0
+    assert sum(pt.dose_inc for pt in out.series) + sum(dropped) + p.grid["win"]["aw2"] == pytest.approx(p.dose, rel=1e-9)
+    assert all(pt.dose_inc == 0.0 for pt in out.series if pt.t > still_after)
 
-    def open_dose(pipe):  # the window still open at the end of the data, not emitted yet
-        return pipe.grid["win"]["aw2"] + pipe.carry_aw2
 
-    assert sum(pt.dose_inc for pt in out.series) + open_dose(p) == pytest.approx(p.dose, rel=1e-9)
-    # Also when the reset comes between feeds (a missing batch).
-    q = dsp.Pipeline()
-    half = int(np.searchsorted(t, T0 + 30.07))
-    a = q.feed(t[:half], ua[:half], grav[:half], [f for f in fixes if f[0] < t[half]])
-    b = q.feed(t[half:], ua[half:], grav[half:], [f for f in fixes if f[0] >= t[half]], reset=True)
-    assert sum(pt.dose_inc for pt in a.series + b.series) + open_dose(q) == pytest.approx(q.dose, rel=1e-9)
+def test_an_overlap_before_a_short_stall_is_not_a_hole():
+    """The next batch re-anchored 20 ms early, so its first sample overlaps the previous batch, then
+    CoreMotion stalls: the real hole after the last sample is 0.24 s, under MAX_GAP_S."""
+    t, ua, grav, fixes = synth(4, vert=_sine(1.0, 3.0), jitter=False)
+    p = dsp.Pipeline()
+    first = t < T0 + 2.0
+    p.feed(t[first], ua[first], grav[first], [])
+    last = t[first][-1]
+    t2 = np.concatenate([[last - 0.02], last + 0.24 + np.arange(100) * 0.01])
+    out = p.feed(t2, ua[:101], grav[:101], [])
+    assert not out.reset
+
+
+def test_roughness_now_is_unbiased_from_the_start():
+    """The exponential average starts from 0 and is divided by its weight so far: two seconds into a
+    trip, a 10 Hz road reads its RMS, not half of it."""
+    amp = 2.0
+    p = dsp.Pipeline()
+    t, ua, grav, fixes = synth(30, vert=_sine(amp, 10.0))
+    for start, end in ((0.0, 2.0), (2.0, 5.0), (5.0, 30.0)):
+        m = (t >= T0 + start) & (t < T0 + end)
+        out = p.feed(t[m], ua[m], grav[m], [])
+        assert out.roughness_now == pytest.approx(amp / math.sqrt(2), rel=0.05)
+
+
+def test_a_trip_saved_before_the_unbiased_roughness_carries_on():
+    t, ua, grav, fixes = synth(10, vert=_sine(2.0, 10.0))
+    p = dsp.Pipeline()
+    p.feed(t[t < T0 + 5], ua[t < T0 + 5], grav[t < T0 + 5], [])
+    old = p.to_state()
+    old.pop("rough_w")  # the previous version: an average that started from the first sample
+    q = dsp.Pipeline(old)
+    assert q.rough_w == 1.0 and q._rough() == pytest.approx(math.sqrt(old["rough_ema"]))
+
+
+def test_a_non_finite_sample_is_left_out():
+    t, ua, grav, fixes = synth(20, vert=_sine(1.0, 0.2))
+    clean, _ = run_whole(t, ua, grav, fixes)
+    ua, grav = ua.copy(), grav.copy()
+    ua[500, 2], grav[700, 0] = np.nan, np.inf
+    out, p = run_whole(t, ua, grav, fixes)
+    assert math.isfinite(out.msdv) and math.isfinite(out.roughness_now)
+    assert out.msdv == pytest.approx(clean.msdv, rel=1e-3)
+    json.dumps(p.to_state(), allow_nan=False)  # jsonb rejects NaN
+
+
+def test_speed_changes_in_turns_do_not_tilt_the_forward_axis():
+    """Braking into a turn adds dv/dt · a_lat along the lateral axis, with the sign of the turn: as such
+    items counted, a forward axis learned from 10 was off by 5–40°. The gyro's yaw rate shows the turn."""
+    rng = np.random.default_rng(3)
+    seconds, rate = 400, FS
+    rel = np.arange(int(seconds * rate)) / rate
+    a_lon, a_lat = np.zeros_like(rel), np.zeros_like(rel)
+    k, v_now = 5.0, 12.0
+    while k < seconds - 10:
+        d, amp = rng.uniform(1.5, 4.0), rng.choice([-1, 1]) * rng.uniform(0.8, 2.5)
+        if not 6 < v_now + amp * d < 20:
+            amp = -amp
+        m = (rel >= k) & (rel < k + d)
+        a_lon[m] = amp
+        if amp < 0:  # braking into a left or right turn
+            a_lat[m] = rng.choice([-1, 1]) * rng.uniform(1.5, 3.0)
+        v_now += amp * d
+        k += d + rng.uniform(2, 8)
+    v = 12 + np.cumsum(a_lon) / rate
+    yaw = a_lat / v  # a_lat = v·ω
+    r = _phone_frame()
+    ua = dsp.UA_SIGN * (np.column_stack([a_lon, a_lat, 0 * rel]) @ r.T) / dsp.G
+    grav = np.tile(np.array([0, 0, -1.0]) @ r.T, (len(rel), 1))
+    rr = np.outer(yaw, r @ np.array([0, 0, 1.0]))
+    fixes = [(T0 + x, float(np.interp(x, rel, v))) for x in np.arange(0.3, seconds, 1.0)]
+    p = dsp.Pipeline()
+    fwd = r @ np.array([1.0, 0.0, 0.0])
+    t, first_known = T0 + rel, None
+    for c in range(seconds):  # 1 s batches, to see the axis as soon as it is trusted
+        m = (rel >= c) & (rel < c + 1)
+        p.feed(t[m], ua[m], grav[m], [f for f in fixes if T0 + c <= f[0] < T0 + c + 1], rr=rr[m])
+        if first_known is None and p.forward_known:
+            first_known = _axis_cos(p, fwd)
+    assert first_known is not None and math.degrees(math.acos(min(1.0, first_known))) < 2.0
+    assert math.degrees(math.acos(min(1.0, _axis_cos(p, fwd)))) < 1.0
+
+
+def test_a_lat_of_the_window_with_a_remount_is_not_diluted():
+    """The window in which the forward axis restarts (or becomes known) averages the samples that had
+    an axis, not all 20: half a window of 1 m/s² read 0.55 m/s²."""
+    t, ua, grav, fixes = synth(20, lat=lambda t: 0 * t + 1.0, jitter=False)
+    p = dsp.Pipeline(_forward_known_state())
+    out = p.feed(t, ua, grav, fixes, moved=[T0 + 10.105])
+    cut = next(s for s in out.series if s.t > T0 + 10.105)
+    assert cut.a_lat == pytest.approx(1.0, rel=0.01)
+    assert all(s.a_lat == 0.0 for s in out.series if s.t > T0 + 10.3)
 
 
 def test_no_pothole_at_exactly_15_kmh():

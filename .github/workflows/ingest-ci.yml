@@ -9,7 +9,7 @@ on:
       - ".github/workflows/ingest-ci.yml"
       - "!**/*.md"
   push:
-    branches: [main]
+    branches: [main, staging] # staging: the integration branch before main (no deploys)
     paths:
       - "services/ingest/**"
       - "src/mobile-ios/tools/mock_ingest_server.py"

@@ -10,7 +10,7 @@ on:
       - ".github/workflows/replay-ci.yml"
       - "!**/*.md"
   push:
-    branches: [main]
+    branches: [main, staging] # staging: the integration branch before main (no deploys)
     paths:
       - "tools/replay/**"
       - "!**/*.md"

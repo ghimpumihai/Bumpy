@@ -9,7 +9,7 @@ on:
       - ".github/workflows/read-api-ci.yml"
       - "!**/*.md"
   push:
-    branches: [main]
+    branches: [main, staging] # staging: the integration branch before main (no deploys)
     paths:
       - "services/read-api/**"
       - "db/**"

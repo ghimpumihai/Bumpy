@@ -22,7 +22,19 @@ locals {
 }
 
 module "observability" {
-  source              = "../modules/observability"
+  source = "../modules/observability"
+
+  # Read by the workbook only; the stack's resources don't depend on it.
+  ingest_function_name    = module.compute.ingest_function_name
+  eventhub_namespace_id   = module.messaging.eventhub_namespace_id
+  eventhub_name           = module.messaging.eventhub_name
+  servicebus_namespace_id = module.messaging.servicebus_namespace_id
+  queue_name              = module.messaging.queue_name
+  postgres_server_id      = module.database.server_id
+  processor_app_id        = module.compute.processor_id
+  read_api_app_id         = module.compute.read_api_id
+  finalize_job_id         = module.compute.finalize_job_id
+
   project             = var.project
   suffix              = local.suffix
   resource_group_name = local.rg

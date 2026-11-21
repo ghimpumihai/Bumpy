@@ -60,7 +60,23 @@ Database tokens: request `https://ossrdbms-aad.database.windows.net/.default` wi
 - The Static Web App is in **East US 2**: Static Web Apps isn't offered in North Europe, and West Europe refused new customers on 2026-11-20. It serves files from a global network anyway.
 - `TF_VAR_psql_nat_gateway_enabled=true` adds a NAT gateway to the database subnet (~$1/day), for when default outbound access can't reach Entra ID.
 - Bootstrap may not register `microsoft.insights` (Azure lists it in lowercase); if Application Insights fails with `MissingSubscriptionRegistration`, run `az provider register --namespace Microsoft.Insights --wait`.
-- The monitoring workbook and alert rules are not written yet (first on the plan's cut list). The budget and the email action group are.
+- No alert rules yet: the plan wants an email on errors and on processor lag. The email action group and the budget exist.
+
+## Monitoring workbook
+
+`modules/observability/workbook.tf` defines one Azure Monitor workbook, **Road & Ride: live path**. In the portal: Application Insights `appi-roadride-*` → Workbooks. It is free (queries and platform metrics only) and follows the time range picked at the top (4 h by default).
+
+| Section | Shows | From |
+|---|---|---|
+| Ingest function | requests by status code, per route with p95 duration, the latest rejections (4xx/5xx log lines), warnings and exceptions | Application Insights (`AppRequests`, `AppTraces`, `AppExceptions`) |
+| Event Hubs | messages in and out of the `ingest` hub, throttled requests, server and user errors | platform metrics |
+| Stream processor | commit lag (`lag_s`) per partition, events per minute by outcome, the last committed batch per partition, warnings, errors and process starts, replica restarts | the processor's per-batch log lines (`ContainerAppConsoleLogs_CL`), the `RestartCount` metric |
+| | the `roadride.processor.lag` gauge, which keeps rising while the processor is stuck | `AppMetrics`: empty until the processor exports it |
+| Finalize job and queue | trips queued, finalized, failed (retried) and dead-lettered; job executions by state; `session-ready` messages waiting and dead-lettered, sent, completed and abandoned; finalized trips by data quality; the latest finalize lines | job log lines, `Executions` metric, Service Bus metrics |
+| PostgreSQL | CPU and memory %, CPU credits left (B1ms is burstable), storage %, active and failed connections | platform metrics |
+| Read API | requests by status class, average response time, restarts, error lines; platform warnings (crash loops, failed image pulls) for the processor, read API and finalize job | Container Apps metrics, `ContainerAppConsoleLogs_CL`, `ContainerAppSystemLogs_CL` |
+
+The log tiles parse the services' log lines (`<date> <time> LEVEL logger message`, `services/processor/roadride/stream.py` and `finalize.py`); a change to those lines needs the matching change in `workbook.tf`. The read API has no Application Insights SDK, so its requests come from the Container Apps `Requests` metric. A tile shows an error instead of an empty chart until its table has its first row (for example `ContainerAppConsoleLogs_CL` before any app has logged).
 
 ## Known risks to check on the first apply
 

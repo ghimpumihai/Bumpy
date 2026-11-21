@@ -91,6 +91,7 @@ Solid boxes and arrows are built. Dashed ones are not: the laptop upload script 
 | **Dashboard** ([`dashboard/`](dashboard/README.md)) | Built, and the deploy workflow exists, but **deploy-dashboard hasn't been run yet**. Until it is, the website runs on its built-in mock data. Run it from the Actions tab: it points the site at the real read API and uploads it. |
 | **iPhone app** ([`src/mobile-ios/`](src/mobile-ios/README.md)) | Built and tested by the team. The phone needs the ingest URL and a device key in its upload settings: `.\infra\scripts\add-device-key.ps1 -DeviceId <name>` creates the key. |
 | **End-to-end test** | Every piece is tested on its own, and the deploys check the Azure logins. **No real batch has gone from a phone to the dashboard yet.** The first test is either a real drive or a [replay](tools/replay/README.md) of a recorded session folder. If the Live page stays empty, check the ingest function's logs first. |
+| **Monitoring workbook** ([`infra/`](infra/README.md#monitoring-workbook)) | Defined in Terraform, **not applied yet**: `.\tf.ps1 apply` creates it. One page for the live path: ingest requests by status, Event Hubs traffic, processor lag and events per minute, finalize runs and dead letters, the queue, PostgreSQL load and the read API. |
 
 ### Not built yet
 
@@ -98,7 +99,8 @@ In the plan's build order:
 
 1. **Speed bumps**: need the vehicle's pitch axis.
 2. **Finalize for uploaded folders, Parquet output, detection scoring against manual taps, phone-moved / gravity-drift quality checks.**
-3. From the plan's cut list: laptop upload fallback, monitoring workbook, Terraform plan on PRs.
+3. From the plan's cut list: laptop upload fallback, Terraform plan on PRs.
+4. **Alert rules** for errors and processor lag (plan §5). The email action group exists.
 
 ## Repository
 

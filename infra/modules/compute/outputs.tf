@@ -45,3 +45,15 @@ output "ingest_function_name" {
 output "ingest_base_url" {
   value = "https://${azurerm_function_app_flex_consumption.ingest.default_hostname}/api/ingest"
 }
+
+output "processor_id" {
+  value = azurerm_container_app.processor.id
+}
+
+output "read_api_id" {
+  value = azurerm_container_app.read_api.id
+}
+
+output "finalize_job_id" {
+  value = azurerm_container_app_job.finalize.id
+}

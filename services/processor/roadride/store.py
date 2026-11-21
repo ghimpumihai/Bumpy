@@ -265,6 +265,7 @@ class Store:
             np.asarray(f.motion_g, dtype=float).reshape(-1, 3),
             [(x.t.timestamp() - off, x.speed_ms) for x in f.fixes],
             reset=reset,
+            rr=np.asarray(f.motion_rr, dtype=float).reshape(-1, 3),
         )
         if out.series:
             with self.conn.cursor() as cur:

@@ -134,7 +134,8 @@ export interface SessionQuality {
   duplicateBatches: number;
 }
 
-/** Detections scored against manual taps within ±1.5 s (plan 02 §9 step 5). */
+/** Detections scored against manual taps within ±1.5 s (plan 02 §9 step 5). True/false positives
+ * count detections, false negatives count taps: precision is over detections, recall over taps. */
 export interface DetectionScore {
   truePositives: number;
   falsePositives: number;

@@ -38,7 +38,6 @@ export interface SessionSpec {
   source: SessionSource;
   mount: Mount;
   people: People;
-  audioEnabled: boolean;
   quality: MockQuality;
   /** Replays re-send the data of this session. */
   replayOf: string | null;
@@ -85,7 +84,6 @@ const IPHONE_B = "a2e9b4c7-1d38-4f6e-8b25-7e4c9d0a3f61";
 const base = {
   laps: 1,
   source: "live",
-  audioEnabled: true,
   quality: "ok",
   replayOf: null,
   live: false,
@@ -179,7 +177,6 @@ export const SESSION_SPECS: SessionSpec[] = [
     startedAt: "2026-11-19T13:15:44.000Z",
     mount: BUS_MOUNT,
     people: people("rear, over axle", "seated", 24),
-    audioEnabled: false,
   },
   {
     ...base,
@@ -191,7 +188,6 @@ export const SESSION_SPECS: SessionSpec[] = [
     startedAt: "2026-11-20T08:10:09.000Z",
     mount: BUS_MOUNT,
     people: people("middle, standing area", "standing", 41),
-    audioEnabled: false,
   },
   {
     ...base,
@@ -203,7 +199,6 @@ export const SESSION_SPECS: SessionSpec[] = [
     startedAt: "2026-11-20T12:00:27.000Z",
     mount: BUS_MOUNT,
     people: people("front", "seated", 18),
-    audioEnabled: false,
   },
   {
     ...base,
@@ -217,7 +212,6 @@ export const SESSION_SPECS: SessionSpec[] = [
     startedAt: "2026-11-19T15:30:52.000Z",
     mount: BUS_MOUNT,
     people: people("middle", "seated", 35),
-    audioEnabled: false,
   },
   {
     ...base,
@@ -229,7 +223,6 @@ export const SESSION_SPECS: SessionSpec[] = [
     startedAt: "2026-11-20T14:10:36.000Z",
     mount: BUS_MOUNT,
     people: people("rear, standing", "standing", 52),
-    audioEnabled: false,
   },
   {
     ...base,
@@ -309,7 +302,6 @@ export const SESSION_SPECS: SessionSpec[] = [
     source: "replay",
     mount: BUS_MOUNT,
     people: people("rear, over axle", "seated", 24),
-    audioEnabled: false,
     replayOf: "e4c7b2a9-6d1f-4e38-8b0a-3c9e5d2f1b77",
     live: true,
   },

@@ -17,10 +17,6 @@ export function ContextCard({ session }: { session: SessionDetail }) {
     { label: "Phone orientation", value: orUnknown(session.mount.phoneOrientation) },
     { label: "Rater", value: known ? [session.people.raterSeat, session.people.raterPosture].filter(Boolean).join(", ") : UNKNOWN_CONTEXT_TEXT },
     { label: "Passengers", value: known ? String(session.people.passengerCount) : UNKNOWN_CONTEXT_TEXT },
-    {
-      label: "Audio recording",
-      value: session.audioEnabled ? "on" : session.vehicle.type === "bus" || session.vehicle.type === "tram" ? "off (public transport)" : "off",
-    },
     { label: "Device", value: session.deviceId ?? PLACEHOLDER },
     { label: "Processed", value: `${formatDateTime(session.processedAt)}${session.processorVersion ? ` · ${session.processorVersion}` : ""}` },
   ];

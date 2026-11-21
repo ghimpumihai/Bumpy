@@ -380,7 +380,7 @@ class Store:
               context_known = true,
               vehicle_type = %s, vehicle_make_model = %s, vehicle_line = %s,
               mount = %s, people = %s, conditions = %s,
-              audio_enabled = %s, synthetic_sensors = %s, recovered = %s,
+              synthetic_sensors = %s, recovered = %s,
               metadata = %s,
               started_at = COALESCE(%s, started_at),
               ended_at = COALESCE(%s, ended_at),
@@ -392,7 +392,7 @@ class Store:
             """,
             (s.device_id, s.vehicle_type, s.vehicle_make_model, s.vehicle_line,
              Jsonb(s.mount), Jsonb(s.people), Jsonb(s.conditions) if s.conditions is not None else None,
-             s.audio_enabled, s.synthetic_sensors, s.recovered, Jsonb(s.metadata),
+             s.synthetic_sensors, s.recovered, Jsonb(s.metadata),
              s.started_at, s.ended_at, s.batch_count, s.replay_of, s.replay_of, s.session_id),
         )
         if s.phase == "stop" and not has_stop and status != "live":

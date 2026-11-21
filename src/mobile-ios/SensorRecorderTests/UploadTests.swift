@@ -412,8 +412,21 @@ final class UploadQueueStallTests: XCTestCase {
 /// the Stop copy's batchCount still counted (spec §6.2: batchCount is exact).
 final class BatchSeqWithoutHolesTests: XCTestCase {
     func testFailedEnqueueBurnsNoSeqAndLosesNoWindow() throws {
-        let dir = try makeTempDir().appendingPathComponent("upload_queue")
-        let q = UploadQueue(directory: dir, transport: MockTransport(), backgroundTime: nil,
+        // The first two batch-file writes fail (as on a full disk); every later write succeeds. Driven
+        // by write count, not by time or file permissions, so it behaves the same on a slow CI runner.
+        let failingWrites = 2
+        let batchWrites = Locked(0)
+        let recovered = expectation(description: "a batch was queued after the failures")
+        let q = UploadQueue(directory: try makeTempDir().appendingPathComponent("upload_queue"), transport: MockTransport(),
+                            backgroundTime: nil,
+                            writeFile: { data, url in
+                                if UploadQueue.parse(fileName: url.lastPathComponent) != nil {
+                                    let n = batchWrites.withLock { c -> Int in c += 1; return c }
+                                    if n <= failingWrites { throw CocoaError(.fileWriteOutOfSpace) }
+                                    if n == failingWrites + 1 { recovered.fulfill() }
+                                }
+                                try UploadQueue.atomicWrite(data, url)
+                            },
                             config: { UploadConfig(baseURL: URL(string: "https://fn.test"), deviceKey: "k") })
         let deps = RecordingSession.Dependencies(
             motion: SyntheticMotionSource(), location: nil, altimeter: nil, activity: nil, audio: nil,
@@ -421,20 +434,11 @@ final class BatchSeqWithoutHolesTests: XCTestCase {
             deviceInfo: .init(model: "x", name: "x", iosVersion: "x"))
         let session = try RecordingSession(store: SessionStore(root: try makeTempDir()), setup: SessionSetup(),
                                            preflight: nil, deps: deps)
-        func setWritable(_ w: Bool) {
-            try? FileManager.default.setAttributes([.posixPermissions: w ? 0o755 : 0o555], ofItemAtPath: dir.path)
-        }
-        defer { setWritable(true) }
-        let e = expectation(description: "run")
-        DispatchQueue.main.async {
-            session.start()
-            // The queue folder can't be written while the 4 s and 6 s batch ticks fire, then recovers;
-            // stop() queues what is still waiting before the Stop copy.
-            DispatchQueue.main.asyncAfter(deadline: .now() + 2.5) { setWritable(false) }
-            DispatchQueue.main.asyncAfter(deadline: .now() + 6.9) { setWritable(true) }
-            DispatchQueue.main.asyncAfter(deadline: .now() + 7.5) { session.stop(); e.fulfill() }
-        }
-        wait(for: [e], timeout: ciTimeout)
+        // Ticks 1 and 2 fail (window 1 is kept and retried), tick 3 queues windows 1-3, then Stop.
+        session.start()
+        wait(for: [recovered], timeout: ciTimeout)
+        session.stop()
+        XCTAssertGreaterThan(batchWrites.current, failingWrites)
 
         let log = try String(contentsOf: session.folder.appendingPathComponent("app_log.txt"), encoding: .utf8)
         XCTAssertTrue(log.contains("could not queue upload batch"), "the test really made an enqueue fail")

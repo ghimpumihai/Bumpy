@@ -104,6 +104,12 @@ final class UploadQueue: @unchecked Sendable {
     private let backgroundTime: BackgroundTimeProvider?
     private let backgroundHeld = Locked(false)
 
+    /// Writes one queue file. Atomic (temp + rename) so a half-written file is never uploaded;
+    /// injectable so tests can make an enqueue fail deterministically (full disk).
+    typealias FileWriter = @Sendable (Data, URL) throws -> Void
+    static let atomicWrite: FileWriter = { data, url in try data.write(to: url, options: .atomic) }
+    private let writeFile: FileWriter
+
     static let minBackoff: TimeInterval = 1
     static let maxBackoff: TimeInterval = 30
 
@@ -112,6 +118,7 @@ final class UploadQueue: @unchecked Sendable {
     init(directory: URL, transport: HTTPTransport = URLSessionTransport(),
          uptime: @escaping @Sendable () -> TimeInterval = { ProcessInfo.processInfo.systemUptime },
          backgroundTime: BackgroundTimeProvider? = UIKitBackgroundTime(),
+         writeFile: @escaping FileWriter = UploadQueue.atomicWrite,
          config: @escaping @Sendable () -> UploadConfig) {
         self.directory = directory
         failedDirectory = directory.deletingLastPathComponent().appendingPathComponent("upload_failed", isDirectory: true)
@@ -119,6 +126,7 @@ final class UploadQueue: @unchecked Sendable {
         self.configProvider = config
         self.uptime = uptime
         self.backgroundTime = backgroundTime
+        self.writeFile = writeFile
         try? FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
         try? FileManager.default.createDirectory(at: failedDirectory, withIntermediateDirectories: true)
         let existing = Self.queueFileNames(in: directory).compactMap { Self.parseItem(fileName: $0)?.createdMs }
@@ -206,7 +214,7 @@ final class UploadQueue: @unchecked Sendable {
     /// The Stop copy also asks iOS for background time until the queue is empty, and wakes the loop.
     func enqueueSessionMetadata(json: Data, sessionId: String, phase: MetaPhase, createdUtcMs: Int64) throws {
         let name = Self.fileName(createdUtcMs: nextCreatedMs(createdUtcMs), sessionId: sessionId, item: .sessionMeta(phase: phase))
-        try Gzip.compress(json).write(to: directory.appendingPathComponent(name), options: .atomic)
+        try writeFile(Gzip.compress(json), directory.appendingPathComponent(name))
         statusBox.withLock { $0.queueCount += 1 }
         if phase == .stop {
             holdBackgroundTimeUntilDrained()
@@ -217,7 +225,7 @@ final class UploadQueue: @unchecked Sendable {
     /// Writes the gzipped batch atomically (temp + rename): a half-written file is never uploaded.
     func enqueue(gzippedBody: Data, sessionId: String, seq: Int, createdUtcMs: Int64) throws {
         let name = Self.fileName(createdUtcMs: nextCreatedMs(createdUtcMs), sessionId: sessionId, seq: seq)
-        try gzippedBody.write(to: directory.appendingPathComponent(name), options: .atomic)
+        try writeFile(gzippedBody, directory.appendingPathComponent(name))
         statusBox.withLock { $0.queueCount += 1 }
     }
 

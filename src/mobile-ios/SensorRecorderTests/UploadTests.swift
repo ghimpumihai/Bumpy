@@ -121,7 +121,8 @@ final class UploadQueueTests: XCTestCase {
     }
 
     func testOldestFirstOneAtATime() async throws {
-        try enqueue(2); try enqueue(0); try enqueue(1)
+        // Enqueued 0, 1, 2 while the wall clock steps back each time: send order is still enqueue order.
+        for seq in 0..<3 { try enqueue(seq, created: 1_700_000_000_000 - Int64(seq) * 5_000) }
         for _ in 0..<3 { _ = await queue.processOnce() }
         let keys = transport.requests.map { $0.value(forHTTPHeaderField: "x-idempotency-key") }
         XCTAssertEqual(keys, ["S1:0", "S1:1", "S1:2"])
@@ -204,5 +205,185 @@ final class UploadQueueTests: XCTestCase {
         XCTAssertEqual(UploadConfig.parseBaseURL(" https://api.example.com/ ")?.absoluteString, "https://api.example.com")
         XCTAssertEqual(UploadConfig(baseURL: UploadConfig.parseBaseURL("http://localhost:8080"), deviceKey: "")
             .ingestURL?.absoluteString, "http://localhost:8080/api/ingest")
+    }
+
+}
+
+/// Records background-time requests instead of calling UIKit.
+final class FakeBackgroundTime: BackgroundTimeProvider, @unchecked Sendable {
+    private let state = Locked<(begins: Int, ends: Int, onExpire: (@Sendable () -> Void)?)>((0, 0, nil))
+    var begins: Int { state.current.begins }
+    var ends: Int { state.current.ends }
+    func begin(onExpire: @escaping @Sendable () -> Void) { state.withLock { $0.begins += 1; $0.onExpire = onExpire } }
+    func end() { state.withLock { $0.ends += 1; $0.onExpire = nil } }
+    /// iOS takes the time back.
+    func expire() { state.withLock { s -> (@Sendable () -> Void)? in defer { s.onExpire = nil }; return s.onExpire }?() }
+}
+
+/// Upload-queue review: the queue must never stall, re-order or hot-loop (spec §6, §6.1, §6.2; 02 D33).
+final class UploadQueueStallTests: XCTestCase {
+    private func makeQueue(_ t: MockTransport, dir: URL? = nil, background: BackgroundTimeProvider? = nil) throws -> UploadQueue {
+        UploadQueue(directory: try dir ?? makeTempDir().appendingPathComponent("upload_queue"), transport: t,
+                    backgroundTime: background,
+                    config: { UploadConfig(baseURL: URL(string: "https://fn.test"), deviceKey: "k") })
+    }
+
+    private func batch(_ q: UploadQueue, _ seq: Int, created: Int64) throws {
+        try q.enqueue(gzippedBody: Gzip.compress(Data("{}".utf8)), sessionId: "S", seq: seq, createdUtcMs: created)
+    }
+
+    private func keys(_ t: MockTransport) -> [String] {
+        t.requests.compactMap { $0.value(forHTTPHeaderField: "x-idempotency-key") }
+    }
+
+    private func setWritable(_ url: URL, _ writable: Bool) throws {
+        try FileManager.default.setAttributes([.posixPermissions: writable ? 0o755 : 0o555], ofItemAtPath: url.path)
+    }
+
+    // Bug: 5 server errors parked the Stop copy in upload_failed/ (backend never learnt batchCount)
+    // and rotated batches behind it.
+    func testLongOutageKeepsTheStopCopyQueuedAndLast() async throws {
+        let t = MockTransport()
+        let q = try makeQueue(t)
+        try batch(q, 0, created: 1_000)
+        try batch(q, 1, created: 3_000)
+        try q.enqueueSessionMetadata(json: Data("{}".utf8), sessionId: "S", phase: .stop, createdUtcMs: 3_001)
+        for _ in 0..<40 { t.enqueue(503) }
+        for _ in 0..<40 { _ = await q.processOnce() }
+        XCTAssertTrue(q.failedFiles().isEmpty)
+        for _ in 0..<3 { _ = await q.processOnce() }
+        XCTAssertEqual(Array(keys(t).suffix(3)), ["S:0", "S:1", "S:meta-stop"], "Stop copy after the last batch (02 D33)")
+        XCTAssertTrue(q.pendingFiles().isEmpty)
+    }
+
+    // Bug: a name that doesn't parse (Files-app copy) stayed at the head and blocked every upload.
+    func testForeignFileNameNeverBlocksTheQueue() async throws {
+        let t = MockTransport()
+        let dir = try makeTempDir().appendingPathComponent("upload_queue")
+        let q = try makeQueue(t, dir: dir)
+        let copy = "0000000000001_S_0000042 2.json.gz" // sorts before everything we wrote
+        let other = "0000000000001_S_0000042.json 2.gz" // not .json.gz at all: left alone
+        for n in [copy, other] { try Data([1, 2]).write(to: dir.appendingPathComponent(n)) }
+        try batch(q, 0, created: 1_000)
+        XCTAssertEqual(q.pendingFiles().map(\.lastPathComponent).filter { $0.contains("0000042") }, [], "never the head")
+        let first = await q.processOnce()
+        XCTAssertEqual(first, .uploaded(status: 200))
+        XCTAssertEqual(keys(t), ["S:0"])
+        XCTAssertEqual(q.failedFiles().map(\.lastPathComponent), [copy], "set aside, not deleted")
+        XCTAssertTrue(FileManager.default.fileExists(atPath: dir.appendingPathComponent(other).path))
+        let next = await q.processOnce()
+        XCTAssertEqual(next, .empty)
+    }
+
+    // Bug: an unreadable head file was retried as a network error forever.
+    func testUnreadableFileIsSetAsideAndTheNextOneIsSent() async throws {
+        let t = MockTransport()
+        let q = try makeQueue(t)
+        try batch(q, 0, created: 1_000)
+        try batch(q, 1, created: 2_000)
+        let head = try XCTUnwrap(q.pendingFiles().first)
+        try FileManager.default.setAttributes([.posixPermissions: 0o000], ofItemAtPath: head.path)
+        let first = await q.processOnce()
+        guard case .skipped = first else { return XCTFail("expected skipped, got \(first)") }
+        XCTAssertTrue(t.requests.isEmpty)
+        XCTAssertEqual(q.failedFiles().map(\.lastPathComponent), [head.lastPathComponent])
+        let second = await q.processOnce()
+        XCTAssertEqual(second, .uploaded(status: 200))
+        XCTAssertEqual(keys(t), ["S:1"])
+        XCTAssertEqual(q.status.failedCount, 1)
+    }
+
+    // Bug: a sent (or rejected) file that couldn't be deleted (or moved) was re-sent with wait = 0.
+    func testFileThatCannotBeDeletedIsNotResentInAHotLoop() async throws {
+        let t = MockTransport()
+        let dir = try makeTempDir().appendingPathComponent("upload_queue")
+        let q = try makeQueue(t, dir: dir)
+        try batch(q, 0, created: 1_000)
+        try batch(q, 1, created: 2_000)
+        try setWritable(dir, false)
+        defer { try? setWritable(dir, true) }
+        t.enqueue(200, 400)
+        let sent = await q.processOnce()
+        XCTAssertEqual(sent, .uploaded(status: 200))
+        let rejected = await q.processOnce()
+        XCTAssertEqual(rejected, .permanentFailure(status: 400))
+        for _ in 0..<5 {
+            let o = await q.processOnce()
+            XCTAssertEqual(o, .empty, "both files are done; neither is sent again")
+        }
+        XCTAssertEqual(keys(t), ["S:0", "S:1"])
+        XCTAssertEqual(Self.names(in: dir).count, 2, "the delete and the move really failed")
+        XCTAssertEqual(q.status.queueCount, 0)
+        try setWritable(dir, true)
+        _ = await q.processOnce()
+        XCTAssertEqual(Self.names(in: dir), [], "delete and move are finished once possible")
+        XCTAssertEqual(q.failedFiles().count, 1)
+        XCTAssertEqual(keys(t), ["S:0", "S:1"])
+    }
+
+    private static func names(in dir: URL) -> [String] {
+        ((try? FileManager.default.contentsOfDirectory(atPath: dir.path)) ?? []).filter { $0.hasSuffix(".json.gz") }
+    }
+
+    // Bug: one 404 parked the session metadata at once (function redeploy, URL fixed a minute later).
+    func testTransientMetadata404IsRetriedNotParked() async throws {
+        let t = MockTransport()
+        let q = try makeQueue(t)
+        try q.enqueueSessionMetadata(json: Data("{}".utf8), sessionId: "S", phase: .start, createdUtcMs: 1_000)
+        try batch(q, 0, created: 2_000)
+        t.enqueue(404, 404, 405, 404)
+        for _ in 0..<4 {
+            guard case .retry = await q.processOnce() else { return XCTFail("metadata 404/405 is retried first") }
+        }
+        _ = await q.processOnce(); _ = await q.processOnce()
+        XCTAssertEqual(Array(keys(t).suffix(2)), ["S:meta-start", "S:0"], "context first, then batch 0")
+        XCTAssertTrue(q.failedFiles().isEmpty)
+        XCTAssertTrue(q.pendingFiles().isEmpty)
+    }
+
+    // Bug: nothing kept the app alive after Stop, so the Stop copy waited for the next launch.
+    func testStopCopyHoldsBackgroundTimeUntilTheQueueIsEmpty() async throws {
+        let t = MockTransport()
+        let bg = FakeBackgroundTime()
+        let q = try makeQueue(t, background: bg)
+        try q.enqueueSessionMetadata(json: Data("{}".utf8), sessionId: "S", phase: .start, createdUtcMs: 1_000)
+        try batch(q, 0, created: 2_000)
+        XCTAssertEqual(bg.begins, 0, "only Stop asks for background time (recording keeps the app alive)")
+        try q.enqueueSessionMetadata(json: Data("{}".utf8), sessionId: "S", phase: .stop, createdUtcMs: 3_000)
+        XCTAssertEqual(bg.begins, 1)
+        XCTAssertTrue(q.isHoldingBackgroundTime)
+        t.enqueue(503)
+        for _ in 0..<4 { _ = await q.processOnce() } // 503 + three uploads
+        XCTAssertEqual(bg.ends, 0, "held while anything is queued")
+        let done = await q.processOnce()
+        XCTAssertEqual(done, .empty)
+        XCTAssertEqual(bg.ends, 1, "released once the queue is empty")
+        XCTAssertFalse(q.isHoldingBackgroundTime)
+        _ = await q.processOnce()
+        XCTAssertEqual(bg.ends, 1, "released once")
+
+        // iOS takes the time back: nothing is ended twice, and the next Stop asks again.
+        try q.enqueueSessionMetadata(json: Data("{}".utf8), sessionId: "T", phase: .stop, createdUtcMs: 4_000)
+        XCTAssertEqual(bg.begins, 2)
+        bg.expire()
+        XCTAssertFalse(q.isHoldingBackgroundTime)
+        _ = await q.processOnce(); _ = await q.processOnce()
+        XCTAssertEqual(bg.ends, 1)
+    }
+
+    // Bug: names came from the wall clock, so a step back could sort the Stop copy before the last batch.
+    func testWallClockStepBackCannotReorderTheStopCopy() async throws {
+        let t = MockTransport()
+        let dir = try makeTempDir().appendingPathComponent("upload_queue")
+        let q = try makeQueue(t, dir: dir)
+        try q.enqueueSessionMetadata(json: Data("{}".utf8), sessionId: "S", phase: .start, createdUtcMs: 10_000)
+        try batch(q, 0, created: 9_000) // the clock stepped back 1 s
+        try batch(q, 1, created: 12_000)
+        try q.enqueueSessionMetadata(json: Data("{}".utf8), sessionId: "S", phase: .stop, createdUtcMs: 11_000)
+        // A relaunch (new queue instance) continues after the files already on disk.
+        let relaunched = try makeQueue(t, dir: dir)
+        try relaunched.enqueue(gzippedBody: Gzip.compress(Data("{}".utf8)), sessionId: "U", seq: 0, createdUtcMs: 5_000)
+        for _ in 0..<5 { _ = await relaunched.processOnce() }
+        XCTAssertEqual(keys(t), ["S:meta-start", "S:0", "S:1", "S:meta-stop", "U:0"])
     }
 }

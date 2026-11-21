@@ -9,7 +9,7 @@ import { DataSourceMode, type DataSource } from "@/types/config";
 export class MissingApiBaseError extends Error {
   constructor() {
     super(
-      "The read API was selected (?mock=0, the settings dialog or VITE_DATA_SOURCE=api) but no API URL is configured: config.json has an empty apiBase.",
+      "The read API was selected (?mock=0 or the settings dialog) but no API URL is configured: config.json has an empty apiBase.",
     );
     this.name = "MissingApiBaseError";
   }
@@ -86,13 +86,13 @@ async function fetchRuntimeApiBase(): Promise<string> {
 const stripTrailingSlash = (url: string) => url.replace(/\/+$/, "");
 
 /**
- * Precedence: `?mock=` (remembered for the tab) → settings override → `VITE_DATA_SOURCE` → API if a base URL
+ * Precedence: `?mock=` (remembered for the tab) → settings override → API if a base URL
  * is known, else mock. Throws `MissingApiBaseError` when the API is required explicitly but has no URL, and
  * `RuntimeConfigError` when the deployed config.json is broken.
  */
 export async function resolveDataSource(search: string = window.location.search): Promise<DataSource> {
   const override = readDataSourceOverride();
-  const mode = forcedMode(search) ?? override?.mode ?? env.VITE_DATA_SOURCE;
+  const mode = forcedMode(search) ?? override?.mode ?? DataSourceMode.AUTO;
   if (mode === DataSourceMode.MOCK) return { kind: "mock" };
 
   const apiBase = override?.apiBase || env.VITE_API_BASE || (await fetchRuntimeApiBase());

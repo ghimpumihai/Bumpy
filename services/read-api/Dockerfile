@@ -1,6 +1,7 @@
 # Read API image. Build context is this folder:
 #   docker build -t read-api services/read-api
-# Listens on 8000: a non-root user can't bind ports below 1024. Terraform's ingress target_port is 8000.
+# Listens on 8000: a non-root user can't bind ports below 1024. deploy-services.yml (READ_API_PORT) switches
+# the ingress to 8000; Terraform creates it on 80 for the placeholder image and then ignores the port.
 FROM python:3.12-slim
 
 ENV PYTHONDONTWRITEBYTECODE=1 \

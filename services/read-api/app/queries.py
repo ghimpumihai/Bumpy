@@ -5,10 +5,10 @@ aggregate jobs; until a trip is finalized those routes answer with valid, empty 
 defaults and rules follow the dashboard's types (src/types/) and its mock backend (src/mock/), which is
 the working spec.
 
-Every list route runs a fixed number of queries, whatever the number of sessions: the per-session
-numbers (distance, GPS accuracy, public event counts, stream rates) are computed for all
-sessions at once with GROUP BY / LATERAL joins. Positions are returned untrimmed (D40); only fixes
-less accurate than MAX_HACC_M are left out.
+The per-session numbers (distance, GPS accuracy, public event counts, stream rates) are computed for
+many sessions at once with GROUP BY / LATERAL joins, never one query per session; the ones that read
+whole tracks are cached per trip and computed STATS_CHUNK trips per statement. Positions are returned
+untrimmed (D40); only fixes less accurate than MAX_HACC_M are left out.
 """
 
 from __future__ import annotations
@@ -16,6 +16,7 @@ from __future__ import annotations
 import datetime as dt
 import json
 import math
+import re
 from typing import TYPE_CHECKING
 
 from .fmt import epoch_ms, iso, rnd
@@ -32,6 +33,7 @@ REF_SPEED_KMH = 36.0
 SOURCES = ("upload", "live", "replay")
 VEHICLE_TYPES = ("car", "bus", "tram", "bike", "boat", "unknown")
 VEHICLE_FILTERS = ("all", "car", "bus", "tram")
+RATER_POSTURES = ("seated", "standing")  # the app's choices (SessionMetadata.swift People.postures)
 EVENT_TYPES = ("pothole", "speed_bump", "rail_joint")
 
 MOUNT_DEFAULTS = {"location": "", "phoneOrientation": "", "rigid": False, "handheld": False}
@@ -242,10 +244,10 @@ class TripStatsCache:
     """
 
     def __init__(self, max_entries: int = 20_000) -> None:
-        self._entries: dict[tuple[str, str], tuple[tuple, dict]] = {}
+        self._entries: dict[tuple[str, str], tuple[tuple, object]] = {}
         self._max_entries = max_entries
 
-    def get_many(self, kind: str, rows: list[dict], compute) -> dict[str, dict]:
+    def get_many(self, kind: str, rows: list[dict], compute) -> dict[str, object]:
         out, missing = {}, []
         for r in rows:
             hit = self._entries.get((kind, r["session_id"]))
@@ -253,33 +255,39 @@ class TripStatsCache:
                 out[r["session_id"]] = hit[1]
             else:
                 missing.append(r)
-        if missing:
-            fresh = compute([r["session_id"] for r in missing])
-            if len(self._entries) + len(missing) > self._max_entries:
+        # Each chunk is cached as soon as it is computed: if a later one fails (statement timeout), the
+        # next request continues from there instead of starting over and failing at the same point.
+        for i in range(0, len(missing), STATS_CHUNK):
+            chunk = missing[i:i + STATS_CHUNK]
+            fresh = compute([r["session_id"] for r in chunk])
+            if len(self._entries) + len(chunk) > self._max_entries:
                 self._entries.clear()
-            for r in missing:
+            for r in chunk:
                 self._entries[(kind, r["session_id"])] = (_version(r), fresh[r["session_id"]])
                 out[r["session_id"]] = fresh[r["session_id"]]
         return out
+
+
+# Trips per statement on a cold cache. Each statement reads every fix (or batch) of its trips, so a cold
+# /api/quality over all trips in one statement would grow with the data until it hit the statement
+# timeout, and then never succeed (nothing would be cached). 25 one-hour trips take well under a second.
+STATS_CHUNK = 25
 
 
 def _version(r: dict) -> tuple:
     return r["version_at"], r["status"]
 
 
-def _stats(conn: Connection, cache: TripStatsCache | None, kind: str, rows: list[dict]) -> dict[str, dict]:
+def _stats(conn: Connection, cache: TripStatsCache | None, kind: str, rows: list[dict]) -> dict:
     compute = {"track": lambda ids: _track_stats(conn, ids),
-               "streams": lambda ids: _stream_quality(conn, ids)}[kind]
-    if not rows:
-        return {}
-    if cache is None:
-        return compute([r["session_id"] for r in rows])
-    return cache.get_many(kind, rows, compute)
+               "streams": lambda ids: _stream_quality(conn, ids),
+               "heat": lambda ids: _heat_lines(conn, ids)}[kind]
+    return (cache or TripStatsCache()).get_many(kind, rows, compute)
 
 
 def _summaries(conn: Connection, cache: TripStatsCache | None, scope: str, with_gps: bool,
                **args) -> list[dict]:
-    """Session rows with their track numbers merged in: 1 query, plus 1 for trips that need them.
+    """Session rows with their track numbers merged in: 1 query, plus 1 per STATS_CHUNK trips that need them.
 
     A finalized trip has its track length in sessions.distance_m; only the others (and the GPS
     accuracy of the quality panel) are computed from track_points, and cached.
@@ -325,6 +333,16 @@ def _merge(defaults: dict, stored) -> dict:
     return out
 
 
+def _posture(value) -> str:
+    """session.json is stored as sent, so anything but the app's two postures gets the app's default."""
+    return value if value in RATER_POSTURES else PEOPLE_DEFAULTS["raterPosture"]
+
+
+def _people(stored) -> dict:
+    people = _merge(PEOPLE_DEFAULTS, stored)
+    return {**people, "raterPosture": _posture(people["raterPosture"])}
+
+
 def _sickness(r: dict) -> dict:
     """D49: the dose is vertical plus lateral, as energies, so the combined MSDV is the root sum of
     squares. A trip processed before the lateral dose existed has msdv_y null: vertical only."""
@@ -351,7 +369,7 @@ def _summary(r: dict) -> dict:
         "vehicle": {"type": r["vehicle_type"] or "unknown", "makeModel": r["vehicle_make_model"] or "",
                     "line": r["vehicle_line"]},
         "mount": mount,
-        "people": _merge(PEOPLE_DEFAULTS, r["people"]),
+        "people": _people(r["people"]),
         "startedAt": iso(r["started_at"]),
         "endedAt": iso(r["ended_at"]),
         "durationS": max(0.0, round((end - r["started_at"]).total_seconds(), 3)),
@@ -649,39 +667,57 @@ def segments(conn: Connection, vehicle: str | None) -> dict:
 
 
 # Where the aggregated trips drove, for the heat map: one line per trip, cut wherever the GPS went quiet, so the
-# dashboard can count how many trips cover each pixel (the way Strava's heatmap does).
+# dashboard can count how many trips cover each pixel (the way Strava's heatmap does). Built in SQL as GeoJSON
+# text and cached per trip version: a trip's fixes never pass through Python objects, which for every fix of
+# every trip took more memory than the container has (200 one-hour trips: ~450 MB).
+HEAT_TRIPS_SQL = """
+SELECT s.session_id, s.updated_at AS version_at, s.status FROM sessions s WHERE s.include_in_agg
+ORDER BY s.session_id
+"""
 HEAT_SQL = f"""
-SELECT p.session_id, ST_X(p.geom::geometry), ST_Y(p.geom::geometry), p.t
-FROM track_points p JOIN sessions s USING (session_id)
-WHERE s.include_in_agg AND {_accurate("p")}
-ORDER BY p.session_id, p.t
+WITH p AS (
+  SELECT p.session_id, p.t, p.geom::geometry AS g,
+         lag(p.t) OVER w AS prev_t, lag(p.geom::geometry) OVER w AS prev_g
+  FROM track_points p
+  WHERE p.session_id = ANY(%(ids)s) AND {_accurate("p")}
+  WINDOW w AS (PARTITION BY p.session_id ORDER BY p.t)
+), cut AS (
+  SELECT session_id, t, g,
+         sum(CASE WHEN prev_t IS NULL OR t - prev_t > make_interval(secs => %(gap_s)s)
+                    OR abs(ST_X(g) - ST_X(prev_g)) + abs(ST_Y(g) - ST_Y(prev_g)) > %(gap_deg)s
+                  THEN 1 ELSE 0 END) OVER (PARTITION BY session_id ORDER BY t) AS line
+  FROM p
+), lines AS (
+  SELECT session_id, line, ST_Simplify(ST_MakeLine(g ORDER BY t), %(tolerance)s) AS g
+  FROM cut GROUP BY session_id, line
+)
+SELECT session_id, ST_AsGeoJSON(ST_Multi(ST_Collect(g ORDER BY line)), 5, 0)
+FROM lines WHERE ST_NPoints(g) > 1 AND ST_Length(g) >= %(min_len)s
+GROUP BY session_id
 """
 HEAT_GAP_S = 10  # a longer silence ends the line: no straight line across a dead zone
 HEAT_GAP_DEG = 0.002  # about 200 m
-HEAT_STEP_DEG = 0.00004  # about 4 m: closer fixes add nothing to a heat line
+# Douglas-Peucker tolerance, about 2 m: under a pixel at street zoom, and it keeps a few % of the fixes of a
+# trip (straight stretches need only their ends).
+HEAT_TOLERANCE_DEG = 0.00002
+HEAT_MIN_LINE_DEG = 0.00004  # about 4 m: a shorter line is GPS jitter while standing still
 
 
-def heat(conn: Connection) -> dict:
-    trips: dict[str, list[list[list[float]]]] = {}
-    prev_sid = prev_t = prev_point = kept = None
-    for sid, lon, lat, t in conn.execute(HEAT_SQL, _params()).fetchall():
-        lines = trips.setdefault(sid, [])
-        point = [round(lon, 5), round(lat, 5)]
-        starts_line = (
-            sid != prev_sid
-            or (t - prev_t).total_seconds() > HEAT_GAP_S
-            or abs(point[0] - prev_point[0]) + abs(point[1] - prev_point[1]) > HEAT_GAP_DEG
-        )
-        if starts_line:
-            lines.append([point])
-            kept = point
-        elif abs(point[0] - kept[0]) + abs(point[1] - kept[1]) >= HEAT_STEP_DEG:
-            lines[-1].append(point)
-            kept = point
-        prev_sid, prev_t, prev_point = sid, t, point
-    return {"type": "FeatureCollection", "features": [
-        {"type": "Feature", "geometry": {"type": "MultiLineString", "coordinates": [ln for ln in lines if len(ln) > 1]}, "properties": {}}
-        for lines in trips.values() if any(len(ln) > 1 for ln in lines)]}
+def _heat_lines(conn: Connection, ids: list[str]) -> dict[str, str | None]:
+    """Each trip's MultiLineString as GeoJSON text, None for a trip without a line."""
+    out: dict[str, str | None] = {sid: None for sid in ids}
+    out.update(conn.execute(HEAT_SQL, _params(ids=ids, gap_s=HEAT_GAP_S, gap_deg=HEAT_GAP_DEG,
+                                              tolerance=HEAT_TOLERANCE_DEG, min_len=HEAT_MIN_LINE_DEG)).fetchall())
+    return out
+
+
+def heat(conn: Connection, cache: TripStatsCache | None = None) -> str:
+    """The HeatCollection as JSON text, ready to send."""
+    rows = _rows(conn, HEAT_TRIPS_SQL, {})
+    lines = _stats(conn, cache, "heat", rows)
+    features = ",".join(f'{{"type":"Feature","geometry":{lines[r["session_id"]]},"properties":{{}}}}'
+                        for r in rows if lines[r["session_id"]] is not None)
+    return f'{{"type":"FeatureCollection","features":[{features}]}}'
 
 
 # Every pass is returned, including ones finalized before D40 with the old `in_privacy_zone` flag.
@@ -701,11 +737,12 @@ def segment_detail(conn: Connection, h3: str) -> dict:
                           (h3,)).fetchone()
     if center is None:
         raise NotFound(f"segment {h3} has no observations")
-    order = "CASE a.vehicle_type WHEN 'all' THEN 0 WHEN 'car' THEN 1 WHEN 'bus' THEN 2 WHEN 'tram' THEN 3 ELSE 4 END"
+    # SegmentAggregate.vehicleType is a map filter: rows for other vehicle types would not match the type.
     by_vehicle = [_aggregate(r) for r in _rows(
-        conn, f"SELECT {AGG_COLUMNS} FROM segment_agg a WHERE a.h3 = %s ORDER BY {order}", (h3,))]
+        conn, f"SELECT {AGG_COLUMNS} FROM segment_agg a WHERE a.h3 = %(h3)s AND a.vehicle_type = ANY(%(vt)s) "
+              "ORDER BY array_position(%(vt)s, a.vehicle_type)", {"h3": h3, "vt": list(VEHICLE_FILTERS)})]
     sickness = [{
-        "vehicleType": vt, "raterSeat": seat, "raterPosture": posture, "sicknessAwRms": rnd(aw, 4),
+        "vehicleType": vt, "raterSeat": seat, "raterPosture": _posture(posture), "sicknessAwRms": rnd(aw, 4),
         "msi1hPct": rnd(msi, 4), "nSessions": n,
     } for vt, seat, posture, aw, msi, n in conn.execute(
         "SELECT vehicle_type, rater_seat, rater_posture, sickness_aw_rms, msi_1h_pct, n_sessions "
@@ -727,12 +764,10 @@ def segment_detail(conn: Connection, h3: str) -> dict:
     }
 
 
+# int(value, 16) would also take underscores, a sign and surrounding whitespace.
+H3_CELL = re.compile(r"8[0-9a-fA-F]{14}")
+
+
 def is_h3_cell(value: str) -> bool:
     """H3 cell index: 15 hex digits, mode 1 (cell), so the first digit is 8."""
-    if len(value) != 15 or value[0] != "8":
-        return False
-    try:
-        int(value, 16)
-    except ValueError:
-        return False
-    return True
+    return H3_CELL.fullmatch(value) is not None

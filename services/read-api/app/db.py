@@ -52,8 +52,10 @@ def _env_number(name: str, default: float) -> float:
 def make_pool(dbname: str | None = None) -> ConnectionPool:
     statement_timeout_ms = int(_env_number("READ_API_STATEMENT_TIMEOUT_MS", 10_000))
     kwargs: dict = {"autocommit": True, "application_name": "roadride-read-api",
-                    # Sent in the startup packet: applies to every statement on the connection.
-                    "options": f"-c statement_timeout={statement_timeout_ms}"}
+                    # Sent in the startup packet: applies to every statement on the connection. PostGIS's
+                    # cost estimates trip the JIT threshold, and compiling took longer (~0.7 s) than running
+                    # these sub-second queries.
+                    "options": f"-c statement_timeout={statement_timeout_ms} -c jit=off"}
     if dbname:
         kwargs["dbname"] = dbname
     return ConnectionPool(

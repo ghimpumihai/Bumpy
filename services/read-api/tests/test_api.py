@@ -5,6 +5,7 @@ contract: a missing or misspelled field would break a dashboard page without any
 """
 
 import datetime as dt
+import math
 import re
 
 import pytest
@@ -19,7 +20,7 @@ SUMMARY_KEYS = {
     "sessionId", "source", "isMock", "replayOf", "deviceId", "vehicle", "mount", "people", "audioEnabled",
     "startedAt", "endedAt", "durationS", "distanceM", "status", "incomplete", "qualityStatus",
     "validFraction", "includeInAgg", "exclusionReasons", "roughnessEligible", "sicknessExperimental",
-    "msdvZ", "msiPct", "eventCounts",
+    "msdv", "msdvZ", "msdvY", "msiPct", "eventCounts",
 }
 DETAIL_KEYS = SUMMARY_KEYS | {"quality", "detection", "sickness", "processedAt", "processorVersion"}
 QUALITY_KEYS = {"streams", "gps", "validFraction", "invalidSeconds", "rejectedBatches", "lateBatches",
@@ -120,7 +121,7 @@ def test_live_trip_end_to_end(client, seed, fixture_batch):
     d = _ok(client, f"/api/sessions/{SID}")
     assert set(d) == DETAIL_KEYS and set(d["quality"]) == QUALITY_KEYS
     assert d["quality"]["gps"]["fixes"] == 20
-    assert set(d["sickness"]) == {"msdvZ", "msiPct"}  # the calculated dose only, no ratings
+    assert set(d["sickness"]) == {"msdv", "msdvZ", "msdvY", "msiPct"}  # the calculated dose only, no ratings
 
     track = _ok(client, f"/api/sessions/{SID}/track")
     coords, times = track["geometry"]["coordinates"], track["properties"]["times"]
@@ -223,8 +224,11 @@ def test_signal_results_are_served(client, seed, fixture_batch):
     assert max(abs(v) for v in series["aVert"]) > 5  # the pothole spike
 
     s = _ok(client, f"/api/sessions/{SID}")
-    assert s["msdvZ"] > 0 and s["msiPct"] == pytest.approx(s["msdvZ"] / 3, abs=1e-4)
-    assert s["sickness"] == {"msdvZ": s["msdvZ"], "msiPct": s["msiPct"]}  # the calculated dose only (D47)
+    assert s["msdvZ"] > 0 and s["msdvY"] is not None
+    assert s["msdv"] == pytest.approx(math.hypot(s["msdvZ"], s["msdvY"]), abs=1e-4)
+    assert s["msiPct"] == pytest.approx(s["msdv"] / 3, abs=1e-4)
+    # The calculated dose only (D47): combined, its two parts, and the incidence.
+    assert s["sickness"] == {k: s[k] for k in ("msdv", "msdvZ", "msdvY", "msiPct")}
     assert s["eventCounts"] == {"pothole": 1, "speed_bump": 0, "rail_joint": 0}
 
     (ev,) = _ok(client, f"/api/sessions/{SID}/events")["features"]
@@ -235,7 +239,7 @@ def test_signal_results_are_served(client, seed, fixture_batch):
     assert props["speedKmh"] == 36.0 and props["vehicleType"] == "bus" and ISO.match(props["tUtc"])
 
     (dev,) = _ok(client, "/api/live")["devices"]
-    assert dev["msdvSoFar"] == pytest.approx(s["msdvZ"], rel=1e-3) and dev["roughnessNow"] is not None
+    assert dev["msdvSoFar"] == pytest.approx(s["msdv"], rel=1e-3) and dev["roughnessNow"] is not None
 
     # Not finalized, so not part of the shared map yet.
     assert _ok(client, "/api/events", vehicle="all")["features"] == []

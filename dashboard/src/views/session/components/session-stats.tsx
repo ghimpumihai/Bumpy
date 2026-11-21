@@ -9,7 +9,11 @@ export function SessionStats({ session }: { session: SessionDetail }) {
     <div className="grid grid-cols-2 gap-3 md:grid-cols-3 xl:grid-cols-6">
       <StatCard label="Duration" value={formatDuration(session.durationS)} />
       <StatCard label="Distance" value={formatDistance(session.distanceM)} />
-      <StatCard label="MSDV (vertical)" value={formatMsdv(session.msdvZ)} hint="ISO 2631-1, Wf weighting" />
+      <StatCard
+        label="MSDV"
+        value={formatMsdv(session.msdv)}
+        hint={`Vertical ${formatMsdv(session.msdvZ)} · sideways ${formatMsdv(session.msdvY)}`}
+      />
       <StatCard
         label="May vomit"
         value={formatPercent(session.msiPct)}

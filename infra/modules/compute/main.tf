@@ -178,8 +178,11 @@ resource "azurerm_container_app" "read_api" {
 
   ingress {
     external_enabled = true
-    target_port      = 8000 # the read-api image runs as non-root, which can't bind ports below 1024
-    transport        = "auto"
+    # 80 is where the placeholder image listens, so a fresh app starts healthy. The real read-api image
+    # runs as non-root and listens on 8000; deploy-services switches the port together with the image
+    # (READ_API_PORT) and Terraform then leaves it alone (ignore_changes below).
+    target_port = 80
+    transport   = "auto"
 
     traffic_weight {
       latest_revision = true
@@ -213,7 +216,8 @@ resource "azurerm_container_app" "read_api" {
   }
 
   lifecycle {
-    ignore_changes = [template[0].container[0].image]
+    # Image and port belong to the deployed code (deploy-services), not to Terraform.
+    ignore_changes = [template[0].container[0].image, ingress[0].target_port]
   }
 
   depends_on = [time_sleep.rbac]

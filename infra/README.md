@@ -29,7 +29,7 @@ Terraform creates every resource; the GitHub Actions deploys ship the code. Terr
 |---|---|---|
 | Function app `func-roadride-ingest-*` | the ingest function | `deploy-ingest` on merge to `main` |
 | Container app `ca-roadride-processor` | the stream processor + signal processing | `deploy-services` on merge to `main` |
-| Container app `ca-roadride-read-api` | the read API (port 8000) | `deploy-services` |
+| Container app `ca-roadride-read-api` | the read API (port 8000; a fresh app starts on 80 for the placeholder, deploy-services switches it) | `deploy-services` |
 | Job `caj-roadride-migrate` | database migrations + Entra roles | `deploy-services`, before the apps are updated |
 | Job `caj-roadride-finalize` | the finalize job (started by the `session-ready` queue) | `deploy-services` |
 | Job `caj-roadride-aggregate` | the aggregation step, started by hand | `deploy-services` |

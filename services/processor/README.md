@@ -14,7 +14,8 @@ One Python package and one Docker image for everything that needs the private da
 For every message from the ingest function (partition key = device, so each phone's messages arrive in order):
 
 - **`kind=session`** (`session.json` at Start and Stop): creates or updates the trip with its context (vehicle, mount, people). The Stop copy sets `ended_at` and `expected_batch_count`; a Start copy that arrives after the Stop copy is ignored.
-- **`kind=batch`**: records the batch in `ingest_batches`, where `(session_id, batch_seq)` is unique, so a repeat is counted as a duplicate and ignored. It also stores every GPS fix in `track_points` and the labels in `labels`, and updates `live_state` for the device (position, speed, battery, sample time and arrival time).
+- **`kind=batch`**: records the batch in `ingest_batches`, where `(session_id, batch_seq)` is unique, so a repeat is ignored. A repeat with a new `receivedAtUtc` is the phone sending it again and is counted in `duplicate_batches`; one with the same `receivedAtUtc` is the processor reading the same event twice (after a restart) and isn't counted. It also stores every GPS fix in `track_points` and the labels in `labels`, and updates `live_state` for the device (position, speed, battery, sample time and arrival time).
+  - The batch itself (`ingest_batches` row, counters, track) is all or nothing. Labels, the signal processing and `live_state` each run in their own savepoint: a bad value in one of them (say a NUL character in a label note) drops only that part, logged and counted as `dropped_<part>`, so the trip can still complete.
   - A batch older than one already processed is marked **late**: stored, but it doesn't move the live position.
   - A batch with no fix keeps the previous position of the same trip.
 - **Trip end**: once the Stop copy is in and every batch below `batchCount` has arrived, the trip goes from `live` to `processing`. A trip with no batch for 15 minutes is closed the same way, as `incomplete`.
@@ -22,9 +23,18 @@ For every message from the ingest function (partition key = device, so each phon
 - New data for a trip that already ended (a batch from the backlog after the 15-minute close, or a Stop copy that came late) reopens it: back to `processing` with `ready_sent_at` cleared, so it is finalized again with everything. A trip whose message is dead-lettered is parked (`ready_sent_at = infinity`) instead of being resent forever.
 - **`exclusion_reasons` / `include_in_agg`**: refreshed after every message, following the rules in `dashboard/API.md`.
 
-Every batch of events from one partition is written in **one transaction together with the partition's checkpoint** (`stream_checkpoints`), so a restart continues exactly where it stopped. A bad event is skipped inside a savepoint and logged. If the database stays unreachable after a reconnect, the process exits and Container Apps restarts it from the last checkpoint.
+Every batch of events from one partition is written in **one transaction together with the partition's checkpoint** (`stream_checkpoints`), so a restart continues exactly where it stopped. After the commit the SDK's in-memory checkpoint moves too, so a partition the SDK closes and claims again after an error resumes there, not at the start-up position.
 
-Each committed batch logs one line with the partition, the event count, the sequence number, `lag_s` (now minus the time Event Hubs received the last event) and the outcomes.
+- **A bad event is skipped** inside a savepoint, logged and counted as `skipped`; the other events and the checkpoint still commit. That includes database errors that psycopg reports as `OperationalError` but that would fail the same way on every retry (index row too large, disk full, timeouts). Deadlocks and serialization failures are retried up to three times first.
+- **Only a lost connection is retried** (broken connection, SQLSTATE class `08`, `57P01`–`57P03`, or a failed connect or Entra token): once on a fresh connection, then the process exits and Container Apps restarts it from the last checkpoint.
+- **On start**, each saved sequence number is checked against the event hub. If the hub was recreated (Terraform replaces it when `partition_count` changes, and its numbers restart at 0) or the next events have expired, the processor logs an error and reads from the earliest event kept instead of skipping everything up to the old number.
+- **One thread** serves all partitions in turn (the SDK's synchronous client). A partition's events are handed over once 100 are waiting or a second after the last call, so an event can wait about a second before it's written: within the 10 s budget from phone to screen.
+
+Each committed batch logs one line with the partition, the event count, the sequence number, `lag_s` (now minus the time Event Hubs received the last event) and the outcomes; the same values are separate fields in Application Insights.
+
+| Setting | Default | |
+|---|---|---|
+| `APPLICATIONINSIGHTS_CONNECTION_STRING` | unset | set by Terraform: logs of the `roadride` loggers and the metric `roadride.processor.lag` (seconds per partition, 0 when caught up; it keeps rising if the processor stalls) go to Application Insights. Tracing stays off, to keep the workspace under its daily cap. Unset, nothing is exported. |
 
 ## Signal processing (`roadride/dsp.py`)
 

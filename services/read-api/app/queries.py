@@ -386,14 +386,48 @@ def rating_value(value) -> int | None:
 
 
 def _ratings(conn: Connection, session_id: str) -> list[dict]:
+    """The passenger's MISC ratings, each with the motion-sickness dose accumulated up to that moment."""
     out = []
     for t, value in conn.execute(
             "SELECT t, value FROM labels WHERE session_id = %s AND type = %s ORDER BY t",
             (session_id, SICKNESS_LABEL)).fetchall():
         number = rating_value(value)
-        if number is not None:
-            out.append({"tUtc": iso(t), "value": number, "msdvSoFar": None})
+        if number is None:
+            continue
+        dose = conn.execute(
+            "SELECT msdv FROM session_series WHERE session_id = %s AND t <= %s ORDER BY t DESC LIMIT 1",
+            (session_id, t)).fetchone()
+        out.append({"tUtc": iso(t), "value": number, "msdvSoFar": None if dose is None else rnd(dose[0], 4)})
     return out
+
+
+def _ranks(values: list[float]) -> list[float]:
+    """1-based ranks, ties sharing their average rank."""
+    order = sorted(range(len(values)), key=lambda i: values[i])
+    ranks = [0.0] * len(values)
+    i = 0
+    while i < len(order):
+        j = i
+        while j + 1 < len(order) and values[order[j + 1]] == values[order[i]]:
+            j += 1
+        for k in range(i, j + 1):
+            ranks[order[k]] = (i + j) / 2 + 1
+        i = j + 1
+    return ranks
+
+
+def _spearman(ratings: list[dict]) -> float | None:
+    """Rank correlation between the ratings and the dose at that moment; None with fewer than 3 usable pairs."""
+    pairs = [(r["value"], r["msdvSoFar"]) for r in ratings if r["msdvSoFar"] is not None]
+    if len(pairs) < 3:
+        return None
+    rx, ry = _ranks([p[0] for p in pairs]), _ranks([p[1] for p in pairs])
+    mx, my = sum(rx) / len(rx), sum(ry) / len(ry)
+    sxx = sum((a - mx) ** 2 for a in rx)
+    syy = sum((b - my) ** 2 for b in ry)
+    if sxx == 0 or syy == 0:
+        return None
+    return round(sum((a - mx) * (b - my) for a, b in zip(rx, ry)) / (sxx * syy) ** 0.5, 3)
 
 
 def _require_session(conn: Connection, session_id: str) -> None:
@@ -413,13 +447,14 @@ def session_detail(conn: Connection, session_id: str, cache: TripStatsCache | No
         raise NotFound(f"session {session_id} not found")
     r = rows[0]
     streams = _session_streams(conn, cache, rows)[session_id]
+    ratings = _ratings(conn, session_id)
     return {
         **_summary(r),
         "quality": _quality(r, streams),
         "detection": _detection(r),
         "sickness": {"msdvZ": rnd(r["msdv_z"], 4),
                      "msiPct": None if r["msdv_z"] is None else round(r["msdv_z"] / 3, 4),
-                     "ratings": _ratings(conn, session_id), "spearman": None},
+                     "ratings": ratings, "spearman": _spearman(ratings)},
         "processedAt": iso(r["finalized_at"]),
         "processorVersion": None,
     }
@@ -653,6 +688,42 @@ def segments(conn: Connection, vehicle: str | None) -> dict:
         """, (vehicle or "all",))
     return {"type": "FeatureCollection", "features": [
         {"type": "Feature", "geometry": json.loads(r["boundary"]), "properties": _aggregate(r)} for r in rows]}
+
+
+# Where the aggregated trips drove, for the heat map: one line per trip, cut wherever the GPS went quiet, so the
+# dashboard can count how many trips cover each pixel (the way Strava's heatmap does).
+HEAT_SQL = f"""
+SELECT p.session_id, ST_X(p.geom::geometry), ST_Y(p.geom::geometry), p.t
+FROM track_points p JOIN sessions s USING (session_id)
+WHERE s.include_in_agg AND {_accurate("p")}
+ORDER BY p.session_id, p.t
+"""
+HEAT_GAP_S = 10  # a longer silence ends the line: no straight line across a dead zone
+HEAT_GAP_DEG = 0.002  # about 200 m
+HEAT_STEP_DEG = 0.00004  # about 4 m: closer fixes add nothing to a heat line
+
+
+def heat(conn: Connection) -> dict:
+    trips: dict[str, list[list[list[float]]]] = {}
+    prev_sid = prev_t = prev_point = kept = None
+    for sid, lon, lat, t in conn.execute(HEAT_SQL, _params()).fetchall():
+        lines = trips.setdefault(sid, [])
+        point = [round(lon, 5), round(lat, 5)]
+        starts_line = (
+            sid != prev_sid
+            or (t - prev_t).total_seconds() > HEAT_GAP_S
+            or abs(point[0] - prev_point[0]) + abs(point[1] - prev_point[1]) > HEAT_GAP_DEG
+        )
+        if starts_line:
+            lines.append([point])
+            kept = point
+        elif abs(point[0] - kept[0]) + abs(point[1] - kept[1]) >= HEAT_STEP_DEG:
+            lines[-1].append(point)
+            kept = point
+        prev_sid, prev_t, prev_point = sid, t, point
+    return {"type": "FeatureCollection", "features": [
+        {"type": "Feature", "geometry": {"type": "MultiLineString", "coordinates": [ln for ln in lines if len(ln) > 1]}, "properties": {}}
+        for lines in trips.values() if any(len(ln) > 1 for ln in lines)]}
 
 
 # Every pass is returned, including ones finalized before D40 with the old `in_privacy_zone` flag.

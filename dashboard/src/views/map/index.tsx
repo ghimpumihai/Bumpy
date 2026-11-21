@@ -1,78 +1,108 @@
 import { useNavigate, useSearch } from "@tanstack/react-router";
+import { useMemo, useState } from "react";
+
+import { useNarrowScreen } from "@/hooks/use-narrow-screen";
 
 import { eventsApi } from "@/api/events";
-import { overviewApi } from "@/api/overview";
 import { segmentsApi } from "@/api/segments";
 import { EventsLayer, eventsCircleLayerId } from "@/components/map/events-layer";
+import { HeatCanvasLayer } from "@/components/map/heat-canvas-layer";
 import { MapCanvas } from "@/components/map/map-canvas";
-import { MapLegend } from "@/components/map/map-legend";
+import { MAP_STYLE_DARK_URL } from "@/constants/map";
 import { ErrorAlert } from "@/components/error-alert";
 import type { Position } from "@/types/common";
+import { VehicleFilter } from "@/types/segments";
 import { boundsOf } from "@/utils/geo";
 
-import { MapControls } from "./components/map-controls";
+import { HeatLegend } from "./components/heat-legend";
 import { OverviewStrip } from "./components/overview-strip";
 import { SegmentHighlights } from "./components/segment-highlights";
+import { StreetFinder } from "./components/street-finder";
 import { SegmentPanel } from "./components/segment-panel";
 import { SegmentsLayer } from "./components/segments-layer";
 import type { MapSearch } from "./schema";
-import { EVENTS_SOURCE_ID } from "./utils/constants";
-import { metricScale } from "./utils/metric";
+import { EVENTS_SOURCE_ID, SEGMENT_HIT_LAYER_ID, SELECTED_SEGMENT_LAYER_ID } from "./utils/constants";
+
+/** Width of the road panel on a desktop screen (Tailwind `max-w-xl`) and its share of the height on a phone. */
+const PANEL_WIDTH_PX = 576;
+const PANEL_SHARE_NARROW = 0.55;
+
+/** Drawn above the heat image: the click targets, the selection ring and the event dots. */
+const HEAT_ABOVE_LAYERS = [SEGMENT_HIT_LAYER_ID, SELECTED_SEGMENT_LAYER_ID, eventsCircleLayerId(EVENTS_SOURCE_ID)];
 
 export function MapView() {
+  const [street, setStreet] = useState<string>();
   const search = useSearch({ from: "/map" });
   const navigate = useNavigate({ from: "/map" });
-  const overview = overviewApi.useOverview();
-  const segments = segmentsApi.useSegments(search.vehicle);
-  const events = eventsApi.useEvents(search.vehicle);
-  const scale = metricScale(search.metric, overview.data?.aggregation.method);
+    const segments = segmentsApi.useSegments(VehicleFilter.ALL);
+  const heat = segmentsApi.useHeat();
+  const events = eventsApi.useEvents(VehicleFilter.ALL);
 
   const update = (patch: Partial<MapSearch>) => void navigate({ search: (prev) => ({ ...prev, ...patch }), replace: true });
 
   // Fit to the selected segment (from the map or the keyboard list), otherwise to every segment.
   const selected = segments.data?.features.find((f) => f.properties.h3 === search.segment);
+  const selectedCenter = useMemo(() => {
+    const ring = selected?.geometry.coordinates[0];
+    return ring ? { lon: ring.reduce((sum, p) => sum + p[0], 0) / ring.length, lat: ring.reduce((sum, p) => sum + p[1], 0) / ring.length } : undefined;
+  }, [selected]);
+  // The detail panel covers the right of the screen (the bottom on a phone): zoom to the road beside it, not under it.
+  const narrow = useNarrowScreen();
+  const base = 48;
+  const fitPadding = !selected
+    ? undefined
+    : narrow
+      ? { top: base, left: base, right: base, bottom: Math.round(window.innerHeight * PANEL_SHARE_NARROW) + base }
+      : { top: base, left: base, bottom: base, right: PANEL_WIDTH_PX + base };
   const corners: Position[] = (selected ? [selected] : (segments.data?.features ?? [])).flatMap((f) => f.geometry.coordinates[0] as Position[]);
   const bounds = boundsOf(corners);
 
   return (
     <div className="relative flex-1">
       <MapCanvas
-        ariaLabel={`Map of road segments coloured by ${scale.title.toLowerCase()}`}
+        ariaLabel={"Heat map of trips per road segment"}
         className="absolute inset-0"
         bounds={bounds}
         boundsKey={bounds ? (selected?.properties.h3 ?? "all") : undefined}
+        fitPadding={fitPadding}
+        styleUrl={MAP_STYLE_DARK_URL}
       >
+        {heat.data && <HeatCanvasLayer id="heat" data={heat.data} keepAbove={HEAT_ABOVE_LAYERS} />}
         {segments.data && (
           <SegmentsLayer
             data={segments.data}
             beforeId={eventsCircleLayerId(EVENTS_SOURCE_ID)}
-            scale={scale} selectedH3={search.segment} onSelect={(h3) => update({ segment: h3 })} />
+            selectedH3={search.segment} onSelect={(h3) => update({ segment: h3 })} />
         )}
+        <StreetFinder center={selectedCenter} onFound={setStreet} />
         {search.events && events.data && <EventsLayer id={EVENTS_SOURCE_ID} data={events.data} />}
       </MapCanvas>
-      <div className="pointer-events-none absolute inset-x-3 top-3 flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
-        <div className="pointer-events-auto vertical max-w-sm gap-3">
-          <MapControls search={search} onChange={update} />
-          {segments.data && (
-            <SegmentHighlights data={segments.data} scale={scale} selectedH3={search.segment} onSelect={(h3) => update({ segment: h3 })} />
-          )}
-          {segments.error && <ErrorAlert title="Road segments" error={segments.error} onRetry={() => void segments.refetch()} />}
-          {search.events && events.error && <ErrorAlert title="Detected events" error={events.error} onRetry={() => void events.refetch()} />}
-        </div>
-        <div className="pointer-events-auto hidden sm:mr-12 sm:block">
+      <div className="pointer-events-none absolute top-[4.5rem] right-3 left-3 vertical items-end gap-2 sm:top-3 sm:right-14 sm:left-auto">
+        <div className="pointer-events-auto hidden sm:block">
           <OverviewStrip />
         </div>
+        {segments.error && (
+          <div className="pointer-events-auto w-full max-w-sm">
+            <ErrorAlert title="Road segments" error={segments.error} onRetry={() => void segments.refetch()} />
+          </div>
+        )}
+        {search.events && events.error && (
+          <div className="pointer-events-auto w-full max-w-sm">
+            <ErrorAlert title="Detected events" error={events.error} onRetry={() => void events.refetch()} />
+          </div>
+        )}
       </div>
       <div className="pointer-events-none absolute bottom-8 left-3">
-        <MapLegend
-          className="pointer-events-auto"
-          title={scale.title}
-          bands={scale.bands}
-          missingLabel="No data for this metric"
-          footnote={`${scale.footnote} Red outline: crowd-confirmed pothole.`}
-        />
+        <HeatLegend className="pointer-events-auto" showEvents={search.events} onShowEventsChange={(show) => update({ events: show })} />
       </div>
-      <SegmentPanel h3={search.segment} onClose={() => update({ segment: undefined })} />
+      {segments.data && (
+        <div className="pointer-events-none absolute right-3 bottom-20">
+          <div className="pointer-events-auto">
+            <SegmentHighlights data={segments.data} selectedH3={search.segment} onSelect={(h3) => update({ segment: h3 })} />
+          </div>
+        </div>
+      )}
+      <SegmentPanel h3={search.segment} street={street} narrow={narrow} onClose={() => update({ segment: undefined })} />
     </div>
   );
 }

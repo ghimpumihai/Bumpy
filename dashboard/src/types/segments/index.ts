@@ -1,4 +1,4 @@
-import type { FeatureCollection, Polygon } from "geojson";
+import type { FeatureCollection, MultiLineString, Polygon } from "geojson";
 
 import type { IsoDateTime, VehicleType } from "@/types/common";
 import type { RaterPosture } from "@/types/sessions";
@@ -74,6 +74,9 @@ export interface SegmentSicknessSplit {
   msi1hPct: number | null;
   nSessions: number;
 }
+
+/** `GET /api/heat`: one line per aggregated trip; the dashboard counts the overlap. */
+export type HeatCollection = FeatureCollection<MultiLineString, Record<string, never>>;
 
 /** `GET /api/segments/{h3}`. */
 export interface SegmentDetail {

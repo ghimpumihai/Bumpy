@@ -8,6 +8,7 @@ import {
   FIT_BOUNDS_DURATION_MS,
   FIT_BOUNDS_MAX_ZOOM,
   FIT_BOUNDS_PADDING_PX,
+  MAP_STYLE_DARK_URL,
   MAP_STYLE_URL,
 } from "@/constants/map";
 import { MapLibreMap, NavigationControl, ScaleControl } from "@/lib/maplibre";
@@ -18,6 +19,7 @@ import { useThemeColors } from "@/hooks/use-theme-colors";
 import { readCssColor } from "@/utils/css-color";
 
 import { MapContext } from "./map-context";
+import { quietDarkBasemap } from "./quiet-basemap";
 
 /**
  * Used when the OpenFreeMap style cannot be loaded (bad Wi-Fi in the presentation room, plan 02 §17):
@@ -44,10 +46,14 @@ interface MapCanvasProps {
   /** Fit the view to these bounds whenever `boundsKey` changes. */
   bounds?: [Position, Position] | null;
   boundsKey?: string;
+  /** Padding for the fit: leave room for a panel that covers part of the map. */
+  fitPadding?: { top: number; right: number; bottom: number; left: number };
+  /** Base map style; the light OpenFreeMap one by default. */
+  styleUrl?: string;
   children?: ReactNode;
 }
 
-export function MapCanvas({ ariaLabel, className, bounds, boundsKey, children }: MapCanvasProps) {
+export function MapCanvas({ ariaLabel, className, bounds, boundsKey, fitPadding, styleUrl = MAP_STYLE_URL, children }: MapCanvasProps) {
   const containerRef = useRef<HTMLDivElement>(null);
   const [state, setState] = useState<MapState | null>(null);
   const map = state?.map ?? null;
@@ -58,7 +64,7 @@ export function MapCanvas({ ariaLabel, className, bounds, boundsKey, children }:
     if (!containerRef.current) return;
     const instance = new MapLibreMap({
       container: containerRef.current,
-      style: MAP_STYLE_URL,
+      style: styleUrl,
       center: DEFAULT_MAP_CENTER,
       zoom: DEFAULT_MAP_ZOOM,
       attributionControl: { compact: true },
@@ -77,6 +83,7 @@ export function MapCanvas({ ariaLabel, className, bounds, boundsKey, children }:
     // wait for the base map on a slow network.
     instance.on("style.load", () => {
       styleReady = true;
+      if (styleUrl === MAP_STYLE_DARK_URL) quietDarkBasemap(instance);
       window.clearTimeout(styleTimeout);
       setState((previous) => ({ map: instance, styleGeneration: (previous?.styleGeneration ?? 0) + 1 }));
     });
@@ -105,7 +112,7 @@ export function MapCanvas({ ariaLabel, className, bounds, boundsKey, children }:
 
   useEffect(() => {
     if (!map || !bounds) return;
-    map.fitBounds(bounds, { padding: FIT_BOUNDS_PADDING_PX, maxZoom: FIT_BOUNDS_MAX_ZOOM, duration: FIT_BOUNDS_DURATION_MS });
+    map.fitBounds(bounds, { padding: fitPadding ?? FIT_BOUNDS_PADDING_PX, maxZoom: FIT_BOUNDS_MAX_ZOOM, duration: FIT_BOUNDS_DURATION_MS });
     // boundsKey decides when to re-fit, so live updates don't fight the user's panning.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [map, boundsKey]);

@@ -183,6 +183,11 @@ def create_app(pool: ConnectionPool | None = None) -> FastAPI:
         with pool.connection() as conn:
             return q.segments(conn, vehicle)
 
+    @app.get("/api/heat")
+    def heat():
+        with pool.connection() as conn:
+            return q.heat(conn)
+
     @app.get("/api/segments/{h3}")
     def segment(h3: str):
         if not q.is_h3_cell(h3):

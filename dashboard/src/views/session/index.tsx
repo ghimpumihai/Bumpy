@@ -18,7 +18,7 @@ export function SessionView() {
   const query = sessionsApi.useSession(sessionId);
   const session = query.data;
   return (
-    <main className="mx-auto vertical w-full max-w-7xl gap-6 px-4 py-6 sm:px-6">
+    <main className="mx-auto vertical w-full max-w-7xl gap-6 px-4 pt-20 pb-6 sm:px-6">
       <QueryState
         isPending={query.isPending}
         error={query.error}
@@ -36,12 +36,10 @@ export function SessionView() {
           <>
             <SessionHeader session={session} />
             <SessionStats session={session} />
+            <SicknessCard sickness={session.sickness} msiPct={session.msiPct} />
             <TrackMap session={session} />
             <SessionCharts session={session} />
-            <div className="grid gap-6 lg:grid-cols-2">
-              <DetectionCard detection={session.detection} />
-              <SicknessCard sickness={session.sickness} />
-            </div>
+            <DetectionCard detection={session.detection} />
             <ContextCard session={session} />
             <QualityPanel quality={session.quality} />
           </>

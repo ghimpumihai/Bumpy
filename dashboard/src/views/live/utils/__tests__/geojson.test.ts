@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 
 import type { LiveDevice } from "@/types/live";
-import { livePositions, liveTracks } from "@/views/live/utils/geojson";
+import { livePositions, liveTrails } from "@/views/live/utils/geojson";
 
 const device = (deviceId: string, track: [number, number][]): LiveDevice => ({
   deviceId,
@@ -25,9 +25,9 @@ const device = (deviceId: string, track: [number, number][]): LiveDevice => ({
 });
 
 describe("live GeoJSON", () => {
-  it("draws a track only once a device has two positions", () => {
-    const tracks = liveTracks([device("a", [[23.59, 46.77]]), device("b", [[23.59, 46.77], [23.6, 46.78]])]);
-    expect(tracks.features.map((f) => f.properties.deviceId)).toEqual(["b"]);
+  it("draws a trail only once a segment has two positions", () => {
+    const trails = liveTrails({ a: [[[23.59, 46.77]]], b: [[[23.59, 46.77], [23.6, 46.78]]] });
+    expect(trails.features.map((f) => f.properties.sessionId)).toEqual(["b"]);
   });
   it("puts every device's current position on the map", () => {
     const points = livePositions([device("a", []), { ...device("r", []), source: "replay" }]);

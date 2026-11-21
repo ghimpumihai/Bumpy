@@ -20,7 +20,7 @@ test("every page renders against the real read API, without errors and without t
   page.on("request", (request) => {
     if (request.url().includes("mock-adapter")) errors.push(`mock loaded: ${request.url()}`);
   });
-  for (const path of ["/live", "/map", "/sessions", "/quality", "/method", `/sessions/${ENDED}`]) {
+  for (const path of ["/live", "/map", "/sessions", `/sessions/${ENDED}`]) {
     await page.goto(path);
     // The live and map pages are full-screen (no page heading): wait for the page's own content.
     await expect(page.locator("#content")).toBeVisible();

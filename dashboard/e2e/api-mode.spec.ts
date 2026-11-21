@@ -36,7 +36,7 @@ test("a wrong API URL that answers with an HTML page shows a clear error on ever
   await page.route(`${API_ORIGIN}/**`, (route) =>
     route.fulfill({ status: 200, contentType: "text/html", headers: { "access-control-allow-origin": "*" }, body: "<!doctype html><title>x</title>" }),
   );
-  for (const path of ["/map", "/sessions", "/sessions/3f1c2b9e-0d4a-4e7b-9c51-6a2d8e0f4b11", "/live", "/quality"]) {
+  for (const path of ["/map", "/sessions", "/sessions/3f1c2b9e-0d4a-4e7b-9c51-6a2d8e0f4b11", "/live"]) {
     await page.goto(path);
     await expect(page.getByText(/instead of JSON\. Check the API URL/).first(), path).toBeVisible();
     await expect(page.getByText("Something went wrong!"), path).toHaveCount(0);

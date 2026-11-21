@@ -12,15 +12,9 @@ export function ContextCard({ session }: { session: SessionDetail }) {
   const known = !session.exclusionReasons.includes(ExclusionReason.UNKNOWN_CONTEXT);
   const orUnknown = (value: string) => (known && value.trim() ? value : UNKNOWN_CONTEXT_TEXT);
   const rows = [
-    { label: "Vehicle", value: orUnknown([session.vehicle.makeModel, session.vehicle.line && `line ${session.vehicle.line}`].filter(Boolean).join(", ")) },
     { label: "Mount", value: known && session.mount.location ? `${session.mount.location}${session.mount.rigid ? " (rigid)" : " (not rigid)"}` : UNKNOWN_CONTEXT_TEXT },
     { label: "Phone orientation", value: orUnknown(session.mount.phoneOrientation) },
-    { label: "Rater", value: known ? [session.people.raterSeat, session.people.raterPosture].filter(Boolean).join(", ") : UNKNOWN_CONTEXT_TEXT },
     { label: "Passengers", value: known ? String(session.people.passengerCount) : UNKNOWN_CONTEXT_TEXT },
-    {
-      label: "Audio recording",
-      value: session.audioEnabled ? "on" : session.vehicle.type === "bus" || session.vehicle.type === "tram" ? "off (public transport)" : "off",
-    },
     { label: "Device", value: session.deviceId ?? PLACEHOLDER },
     { label: "Processed", value: `${formatDateTime(session.processedAt)}${session.processorVersion ? ` · ${session.processorVersion}` : ""}` },
   ];

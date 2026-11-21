@@ -423,7 +423,6 @@ def session_detail(conn: Connection, session_id: str, cache: TripStatsCache | No
         raise NotFound(f"session {session_id} not found")
     r = rows[0]
     streams = _session_streams(conn, cache, rows)[session_id]
-    ratings = _ratings(conn, session_id)
     return {
         **_summary(r),
         "quality": _quality(r, streams),

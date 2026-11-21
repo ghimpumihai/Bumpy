@@ -36,7 +36,7 @@ Data source precedence: `?mock=1` / `?mock=0` in the URL → the browser overrid
 | Route | What it shows |
 |---|---|
 | `/live` (start page) | The main screen (plan 02 §5): phones and replays sending data right now, polled every 2 s — moving markers, recent track, speed, roughness now, MSDV so far, and how far behind the phone the data is (or "catching up" after a dead zone) |
-| `/map` | Aggregated map of every finalized trip: H3 road segments coloured by normalized roughness (ISO 2631-1 comfort bands) or by predicted motion sickness, detected events, crowd-confirmed potholes, per-vehicle filter, segment details |
+| `/map` | Strava-style heat map of the finalized trips: how many trips drove each road (from per-trip GPS lines), detected events, a list of the busiest roads, and a per-road panel (trips, roughness, potholes, sickness, every pass) |
 | `/sessions` | Every trip and what it found: distance, duration, potholes, sickness and one status; a trip opens to its track, events, charts and data quality |
 | `/sessions/{id}` | One trip: track coloured by speed, events, synchronized charts (road band, sway, speed, MSDV), detection precision/recall vs. taps, context, data-quality panel |
 

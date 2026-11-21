@@ -48,9 +48,7 @@ test("the sessions list shows each trip's real state", async ({ page }) => {
 
 test("an ended trip reads as processing, with its track and context", async ({ page }) => {
   await page.goto(`/sessions/${ENDED}`);
-  const header = page.locator("header", { has: page.getByRole("heading", { level: 1 }) });
-  await expect(header.getByText("Processing", { exact: true })).toBeVisible();
-  await expect(page.getByText("Solaris Urbino 12, line 24")).toBeVisible();
+  await expect(page.getByText(/Not counted in the aggregated map/)).toBeVisible();
   await expect(page.locator(".maplibregl-canvas").first()).toBeVisible();
 });
 

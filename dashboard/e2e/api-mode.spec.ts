@@ -23,7 +23,7 @@ test("the live view keeps polling the read API", async ({ page }) => {
   });
   await page.goto("/live");
   const panel = page.getByRole("complementary", { name: "Streaming devices" });
-  await expect(panel.locator('[data-slot="badge"]', { hasText: /^Replay$/ })).toBeVisible();
+  await expect(panel.getByText(/^Replay ·/)).toBeVisible();
   await expect.poll(() => livePolls, { timeout: 10_000 }).toBeGreaterThanOrEqual(3);
 });
 

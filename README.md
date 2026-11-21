@@ -82,7 +82,7 @@ Solid boxes and arrows are built. Dashed ones are not: the laptop upload script 
 | **Finalize + aggregate jobs** | [`services/processor/`](services/processor/README.md#finalize-job-roadridefinalizepy) | When a trip ends (Stop + all batches, or 15 minutes of silence) the processor queues it; the finalize job reruns the whole trip from the raw archive, replaces the live results, scores its data quality, splits it into H3 road-segment passes and rebuilds the shared map: vehicle-normalized roughness, crowd-confirmed potholes, sickness by seat. |
 | **Read API** | [`services/read-api/`](services/read-api/README.md) | All 12 routes of [`dashboard/API.md`](dashboard/API.md), read-only. Hides the first and last 200 m of every trip for privacy. |
 | **Replay tool** | [`tools/replay/`](tools/replay/README.md) | Re-sends a recorded trip through the live path as a new trip (`source=replay`, never aggregated), at real speed or faster. Used for the end-to-end test without driving, for the demo, and for tuning the pothole threshold on real data. |
-| **CI/CD** | [`.github/workflows/`](.github/workflows) | Tests on every PR, including integration tests against a real PostGIS. Merges to `main` deploy the ingest function and the processor + read API (migrations first, then a check that every API route answers). |
+| **CI/CD** | [`.github/workflows/`](.github/workflows) | Tests on every PR and every push to `staging` or `main`, including integration tests against a real PostGIS. Only `main` deploys: merges there ship the ingest function and the processor + read API (migrations first, then a check that every API route answers). |
 
 ### Done, waiting on one step
 
@@ -99,6 +99,17 @@ In the plan's build order:
 1. **Speed bumps**: need the vehicle's pitch axis.
 2. **Finalize for uploaded folders, Parquet output, detection scoring against manual taps, phone-moved / gravity-drift quality checks.**
 3. From the plan's cut list: laptop upload fallback, monitoring workbook, Terraform plan on PRs.
+
+## Branches
+
+```
+feature branch ──PR──▶ staging ──PR (release)──▶ main ──▶ deploys to Azure
+```
+
+- **`staging`** is the default branch: open every PR against it. Each push runs all the tests; nothing is deployed, so it's safe to merge into at any time.
+- **`main`** is production. A merge into it deploys, so promote with a `staging` → `main` PR only when staging is green, with the team's OK and outside a trip-collection window.
+- The deploy workflows refuse to run from any branch but `main`, even when started by hand.
+- There is no staging copy of the Azure stack: the first real check of a change on Azure is after it reaches `main`.
 
 ## Repository
 

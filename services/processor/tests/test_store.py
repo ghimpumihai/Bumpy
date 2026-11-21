@@ -168,7 +168,7 @@ def test_signal_processing_writes_series_events_and_dose(db, batch):
     msdv_z, msdv_y = _one(db, "SELECT msdv_z, msdv_y FROM sessions")
     rough, msdv_live = _one(db, "SELECT roughness_now, msdv_so_far FROM live_state")
     assert msdv_z > 0 and msdv_y is not None and rough is not None
-    assert math.isclose(msdv_live, math.hypot(msdv_z, msdv_y))  # live shows the combined dose (D41)
+    assert math.isclose(msdv_live, math.hypot(msdv_z, msdv_y))  # live shows the combined dose (D49)
     assert _one(db, "SELECT last_batch_seq, gaps FROM signal_state") == (29, 0)
 
     # A missing batch restarts the filters (counted) but keeps the dose.

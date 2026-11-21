@@ -80,7 +80,7 @@ final class SessionDeletionTests: XCTestCase {
 final class SessionVerdictTests: XCTestCase {
     private func meta(_ streams: [String: SessionMetadata.StreamStats], writeErrors: Int = 0) -> SessionMetadata {
         var m = SessionMetadataTests.sample()
-        m.stats = .init(durationSec: 60, streams: streams, labelsCount: 0, sicknessRatings: 0, sicknessMissed: 0,
+        m.stats = .init(durationSec: 60, streams: streams, labelsCount: 0,
                         audioFiles: [], fileSizes: [:], totalBytes: 0, writeErrors: writeErrors, uploadBatchesCreated: 0)
         return m
     }

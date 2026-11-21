@@ -6,8 +6,8 @@ The dashboard's only backend (plan §5, contract in [`dashboard/API.md`](../../d
 
 | Route | Data |
 |---|---|
-| `/api/live` | Devices heard from in the last 60 s (`live_state`), with the last 2 minutes of track, `roughnessNow`, `msdvSoFar` and the latest MISC rating. A device is listed from its first position, including for up to 60 s after its trip ends (D40). |
-| `/api/sessions`, `/api/sessions/{id}`, `/api/quality` | Built from `sessions`, `track_points`, `labels`, `events` and `ingest_batches`. Missing context gets the defaults the dashboard expects. Fills in distance (whole track length; `sessions.distance_m` once finalized), `msdv`/`msdvZ`/`msdvY`/`msiPct` (combined = √(z² + y²), D41), public event counts, GPS accuracy, per-stream quality, `validFraction`/`invalidSeconds`/`processedAt` from the finalize job, and late and duplicate batch counts. |
+| `/api/live` | Devices heard from in the last 60 s (`live_state`), with the last 2 minutes of track, `roughnessNow` and `msdvSoFar`. A device is listed from its first position, including for up to 60 s after its trip ends (D40). |
+| `/api/sessions`, `/api/sessions/{id}`, `/api/quality` | Built from `sessions`, `track_points`, `labels`, `events` and `ingest_batches`. Missing context gets the defaults the dashboard expects. Fills in distance (whole track length; `sessions.distance_m` once finalized), `msdv`/`msdvZ`/`msdvY`/`msiPct` (combined = √(z² + y²), D49), public event counts, GPS accuracy, per-stream quality, `validFraction`/`invalidSeconds`/`processedAt` from the finalize job, and late and duplicate batch counts. |
 | `/api/sessions/{id}/track` | 1 Hz track, whole (no start/end trim, D40); fixes less accurate than 50 m are left out. |
 | `/api/sessions/{id}/series` | The 5 Hz chart series from the signal processing. |
 | `/api/sessions/{id}/events` | Detected events that have a position. |

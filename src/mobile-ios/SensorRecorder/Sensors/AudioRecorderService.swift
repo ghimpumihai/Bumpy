@@ -6,7 +6,7 @@ import UIKit
 ///
 /// Design notes
 /// - Session: `.playAndRecord` + mode `.measurement` (no AGC / voice processing, spec §3.5). We use
-///   playAndRecord instead of `.record` only so the alert/sickness-prompt sounds can still play.
+///   playAndRecord instead of `.record` only so the alert sounds can still play.
 /// - Input is pinned to the built-in mic so a car Bluetooth hands-free system can't hijack it.
 /// - Files are written as **segments** (`audio_000.m4a`, `audio_001.m4a`, …) of 5 minutes. An
 ///   AAC/MP4 file is only playable once `stop()` writes its index, so a crash or kill would
@@ -187,12 +187,12 @@ final class AudioRecorderService: NSObject, AudioSource, AVAudioRecorderDelegate
     /// - `.mixWithOthers`: never stops the phone's music/navigation/CarPlay, and can (re)activate
     ///   while backgrounded (a non-mixable session fails there with `cannotInterruptOthers`).
     /// - Haptics + system sounds are muted by iOS during recording unless explicitly allowed —
-    ///   without this the sickness prompt and PROBLEM alerts would be silent and vibration-free.
+    ///   without this the PROBLEM alerts and label haptics would be silent and vibration-free.
     static func configure(_ session: AVAudioSession) throws {
         try session.setCategory(.playAndRecord, mode: .measurement, options: [.defaultToSpeaker, .mixWithOthers])
         try? session.setPreferredSampleRate(48_000)
         do { try session.setAllowHapticsAndSystemSoundsDuringRecording(true) } catch {
-            // Without this the sickness prompt / PROBLEM alerts are silent: make it visible.
+            // Without this the PROBLEM alerts are silent: make it visible.
             appLogger.error("allowHapticsAndSystemSoundsDuringRecording failed: \(error.localizedDescription, privacy: .public)")
         }
     }

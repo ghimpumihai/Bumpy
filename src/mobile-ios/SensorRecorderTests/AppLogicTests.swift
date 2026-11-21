@@ -1,39 +1,6 @@
 import XCTest
 @testable import SensorRecorder
 
-final class SicknessSchedulerTests: XCTestCase {
-    func testPromptsEveryIntervalAndAutoDismisses() {
-        var s = SicknessScheduler(start: 0, interval: 120, timeout: 30)
-        XCTAssertNil(s.tick(now: 119.9))
-        XCTAssertEqual(s.tick(now: 120), .prompt)
-        XCTAssertTrue(s.isPromptActive)
-        XCTAssertEqual(s.remaining(now: 130) ?? -1, 20, accuracy: 1e-9)
-        XCTAssertNil(s.tick(now: 149.9))
-        XCTAssertEqual(s.tick(now: 150), .missed)
-        XCTAssertFalse(s.isPromptActive)
-        XCTAssertNil(s.tick(now: 200))
-        XCTAssertEqual(s.tick(now: 240), .prompt) // fixed cadence from start
-        s.answered()
-        XCTAssertFalse(s.isPromptActive)
-        XCTAssertNil(s.tick(now: 260))
-        XCTAssertEqual(s.tick(now: 360), .prompt)
-    }
-
-    func testManualAnswerDoesNotShiftCadence() {
-        var s = SicknessScheduler(start: 0, interval: 120, timeout: 30)
-        s.answered() // manual rating at t=50
-        XCTAssertEqual(s.tick(now: 120), .prompt)
-    }
-
-    func testLongSuspensionDoesNotBurst() {
-        var s = SicknessScheduler(start: 0, interval: 120, timeout: 30)
-        XCTAssertEqual(s.tick(now: 1000), .prompt)
-        XCTAssertEqual(s.nextPromptAt, 1120)
-        XCTAssertEqual(s.tick(now: 1030), .missed)
-        XCTAssertNil(s.tick(now: 1031))
-    }
-}
-
 final class MotionTestAnalysisTests: XCTestCase {
     func testRatesAndStillness() {
         var accel: [Vec3Sample] = []

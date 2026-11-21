@@ -152,7 +152,7 @@ def make_session(folder, audio_enabled=True, write_audio=True, gyro_gap=None, lo
                                        f"satisfied,wifi")
     labels = [
         f"{T0_UP + 5:.6f},{utc(T0_UP + 5)},pothole,,",
-        f"{T0_UP + 10:.6f},{utc(T0_UP + 10)},sickness,4,",
+        f"{T0_UP + 10:.6f},{utc(T0_UP + 10)},speed_bump,,",
         # multi-line quoted note with a comma and an escaped quote: must count as ONE label
         f'{T0_UP + 15:.6f},{utc(T0_UP + 15)},note,,"first line, with comma\nsecond ""line"""',
     ]

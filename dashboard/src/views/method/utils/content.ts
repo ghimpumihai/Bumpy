@@ -41,7 +41,7 @@ export const METHOD_SECTIONS = [
   {
     title: "Potholes and speed bumps",
     points: [
-      "A pothole is a sharp jump in high-passed vertical acceleration, counted only above 15 km/h; a speed bump is a double peak in pitch rate (front axle, then rear axle).",
+      "A pothole is a sharp jump in band-passed (1–30 Hz) vertical acceleration, counted only above 15 km/h; a speed bump is a double peak in pitch rate (front axle, then rear axle).",
       "Detections are scored against the passenger's taps within ±1.5 s (precision and recall).",
       "A pothole is confirmed on the map when it was detected in at least k of n passes, with thresholds per vehicle type. Tram rail joints are labelled separately.",
     ],
@@ -50,7 +50,7 @@ export const METHOD_SECTIONS = [
     title: "Motion sickness",
     points: [
       "Vertical acceleration is weighted with the ISO 2631-1 Wf filter, side-to-side acceleration with the Donohew & Griffin (2004) lateral weighting (flat to 0.25 Hz, then −12 dB per octave). The two add as energies: MSDV = √(∫ (a_wz² + a_wy²) dt) = √(MSDV_z² + MSDV_y²).",
-      "Roughly MSDV / 3 percent of unadapted people may vomit. The prediction is compared with the passengers' MISC ratings (0–10).",
+      "Roughly MSDV / 3 percent of unadapted people may vomit. The number comes from the measured motion only; passengers aren't asked how they feel (D47).",
       "Sickness is not normalized across vehicles: “the bus is worse than the car on this route” is a finding. Results are split by seat and by seated or standing.",
       "Known limits: the lateral weighting is not part of ISO 2631-1 and its exact coefficients weren't published, and the MSDV / 3 rule was fitted to vertical motion. Sideways sway is only counted once the phone's forward axis has been learned from GPS speed changes.",
     ],

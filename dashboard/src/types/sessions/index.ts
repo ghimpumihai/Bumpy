@@ -87,16 +87,15 @@ export interface SessionSummary {
   roughnessEligible: boolean;
   /** Non-rigid or handheld: sickness numbers are experimental. */
   sicknessExperimental: boolean;
-  /** Motion sickness dose value, vertical and lateral combined: √(msdvZ² + msdvY²), m/s^1.5 (D41). */
+  /** Motion sickness dose value, vertical and lateral combined: √(msdvZ² + msdvY²), m/s^1.5 (D49). */
   msdv: number | null;
   /** The vertical part (ISO 2631-1 Wf), m/s^1.5. */
   msdvZ: number | null;
-  /** The lateral (side-to-side sway) part (Donohew & Griffin weighting), m/s^1.5; null for trips processed before D41. */
+  /** The lateral (side-to-side sway) part (Donohew & Griffin weighting), m/s^1.5; null for trips processed before D49. */
   msdvY: number | null;
   /** Predicted motion sickness incidence, % ≈ msdv / 3. */
   msiPct: number | null;
   eventCounts: RoadEventCounts;
-  ratingsCount: number;
 }
 
 export interface SessionListResponse {
@@ -138,7 +137,8 @@ export interface SessionQuality {
   duplicateBatches: number;
 }
 
-/** Detections scored against manual taps within ±1.5 s (plan 02 §9 step 5). */
+/** Detections scored against manual taps within ±1.5 s (plan 02 §9 step 5). True/false positives
+ * count detections, false negatives count taps: precision is over detections, recall over taps. */
 export interface DetectionScore {
   truePositives: number;
   falsePositives: number;
@@ -152,21 +152,12 @@ export interface DetectionMetrics {
   speed_bump: DetectionScore;
 }
 
-export interface SicknessRating {
-  tUtc: IsoDateTime;
-  /** MISC 0–10. */
-  value: number;
-  msdvSoFar: number | null;
-}
-
+/** The calculated motion-sickness dose of the whole trip (ISO 2631-1); no passenger ratings (D47). */
 export interface SicknessSummary {
   msdv: number | null;
   msdvZ: number | null;
   msdvY: number | null;
   msiPct: number | null;
-  ratings: SicknessRating[];
-  /** Spearman rank correlation between MISC ratings and MSDV so far. */
-  spearman: number | null;
 }
 
 /** `GET /api/sessions/{id}`. */
@@ -212,7 +203,7 @@ export interface RoadEventProperties {
   type: RoadEventType;
   tUtc: IsoDateTime;
   speedKmh: number | null;
-  /** Peak high-passed vertical acceleration (pothole) or pitch rate (speed bump). */
+  /** m/s²: peak |band-passed (1–30 Hz) vertical acceleration|, at the jolt (pothole) or at either axle (speed bump). */
   magnitude: number;
   /** 0–1. */
   confidence: number;

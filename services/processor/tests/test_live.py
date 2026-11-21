@@ -77,3 +77,11 @@ def test_exclusion_reasons():
     assert exclusion_reasons("live", "complete", True, {"rigid": False, "handheld": True}) == \
         ["not_rigid", "handheld"]
     assert exclusion_reasons("live", "complete", True, rigid, "bad") == ["bad_quality"]
+
+
+def test_a_time_without_a_zone_is_utc():
+    from roadride.live import parse_iso
+
+    utc = dt.timezone.utc
+    assert parse_iso("2026-11-21T09:12:03.512") == dt.datetime(2026, 11, 21, 9, 12, 3, 512000, tzinfo=utc)
+    assert parse_iso("2026-11-21T09:12:03.512Z") == parse_iso("2026-11-21T11:12:03.512+02:00")

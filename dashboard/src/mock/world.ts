@@ -80,7 +80,7 @@ export interface Route {
 export interface CellTruth {
   /** Reference roughness for a car at 36 km/h, m/s². */
   roughness: number;
-  /** Weighted RMS for a car, vertical (Wf) and lateral (Wy) combined, m/s² (D41). */
+  /** Weighted RMS for a car, vertical (Wf) and lateral (Wy) combined, m/s² (D49). */
   awRms: number;
   /** The lateral part of awRms: sway in curves. */
   awLatRms: number;

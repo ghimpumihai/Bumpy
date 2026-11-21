@@ -6,7 +6,7 @@ defaults and rules follow the dashboard's types (src/types/) and its mock backen
 the working spec.
 
 Every list route runs a fixed number of queries, whatever the number of sessions: the per-session
-numbers (distance, GPS accuracy, ratings, public event counts, stream rates) are computed for all
+numbers (distance, GPS accuracy, public event counts, stream rates) are computed for all
 sessions at once with GROUP BY / LATERAL joins. Positions are returned untrimmed (D40); only fixes
 less accurate than MAX_HACC_M are left out.
 """
@@ -36,7 +36,9 @@ EVENT_TYPES = ("pothole", "speed_bump", "rail_joint")
 
 MOUNT_DEFAULTS = {"location": "", "phoneOrientation": "", "rigid": False, "handheld": False}
 PEOPLE_DEFAULTS = {"operatorSeat": "", "raterSeat": "", "raterPosture": "seated", "passengerCount": 0}
-SICKNESS_LABEL = "sickness"
+# D47: no MISC ratings. Older app builds may still send `sickness` labels; they are stored with the other
+# labels but never returned.
+RATING_LABEL = "sickness"
 
 # ingest_batches.sample_counts key → (dashboard stream name, expected rate in Hz, as in the mock).
 STREAMS = {
@@ -68,8 +70,7 @@ def enum_param(value: str | None, name: str, allowed: tuple[str, ...]) -> str | 
 
 def _params(**extra) -> dict:
     """Named parameters shared by the fragments below, plus the query's own."""
-    return {"max_hacc": MAX_HACC_M, "silence_s": TRIP_SILENCE_CLOSE_S,
-            "sickness": SICKNESS_LABEL, **extra}
+    return {"max_hacc": MAX_HACC_M, "silence_s": TRIP_SILENCE_CLOSE_S, **extra}
 
 
 # A trip has ended when any sign says so, even if its status is still 'live': status not 'live', an
@@ -94,7 +95,7 @@ SESSION_FILTERS = {
 
 
 def _summary_sql(where: str) -> str:
-    """The sessions' own columns plus everything cheap: ratings, public event counts, last sample time."""
+    """The sessions' own columns plus everything cheap: public event counts, last sample time."""
     return f"""
 WITH s AS MATERIALIZED (
   SELECT s.session_id, s.source, s.replay_of, s.device_id, s.status, s.incomplete, s.quality_status,
@@ -105,11 +106,6 @@ WITH s AS MATERIALIZED (
          s.valid_fraction, s.quality AS stored_quality, s.finalized_at, s.distance_m AS stored_distance_m,
          {ENDED_SQL} AS ended
   FROM sessions s WHERE {where}
-),
-rt AS (
-  SELECT l.session_id, count(*) AS ratings FROM labels l
-  WHERE l.type = %(sickness)s AND l.session_id IN (SELECT session_id FROM s)
-  GROUP BY l.session_id
 ),
 ev AS (
   SELECT e.session_id,
@@ -122,10 +118,9 @@ ev AS (
 SELECT s.*,
        (SELECT b.end_utc FROM ingest_batches b WHERE b.session_id = s.session_id
         ORDER BY b.batch_seq DESC LIMIT 1) AS last_sample_at,
-       COALESCE(rt.ratings, 0) AS ratings,
        COALESCE(ev.pothole, 0) AS ev_pothole, COALESCE(ev.speed_bump, 0) AS ev_speed_bump,
        COALESCE(ev.rail_joint, 0) AS ev_rail_joint
-FROM s LEFT JOIN rt USING (session_id) LEFT JOIN ev USING (session_id)
+FROM s LEFT JOIN ev USING (session_id)
 ORDER BY s.started_at DESC, s.session_id
 """
 
@@ -136,14 +131,32 @@ def _rows(conn: Connection, sql: str, args: dict) -> list[dict]:
     return [dict(zip(cols, row)) for row in cur.fetchall()]
 
 
+# The trip-distance rule of the finalize job (roadride/finalize.py trip_distance_m): fixes with a known
+# accuracy of at most MAX_HACC_M, and a step counts only when either end moves at least this fast (or
+# neither has a speed), so GPS jitter while parked adds nothing.
+DISTANCE_MIN_SPEED_MS = 1.0
+
 # Whole-track numbers: the only part of a session summary that reads every fix of a trip.
 TRACK_STATS_SQL = """
+WITH steps AS (
+  SELECT tp.session_id,
+         ST_Distance(lag(tp.geom) OVER w, tp.geom) AS step_m,
+         GREATEST(lag(tp.speed_ms) OVER w, tp.speed_ms) AS fastest,
+         lag(tp.speed_ms) OVER w IS NULL AND tp.speed_ms IS NULL AS no_speed
+  FROM track_points tp
+  WHERE tp.session_id = ANY(%(ids)s) AND tp.h_acc_m IS NOT NULL AND tp.h_acc_m <= %(max_hacc)s
+  WINDOW w AS (PARTITION BY tp.session_id ORDER BY tp.t)
+), dist AS (
+  SELECT session_id, sum(step_m) FILTER (WHERE no_speed OR fastest >= %(min_speed)s) AS distance_m
+  FROM steps GROUP BY session_id
+)
 SELECT tp.session_id,
-       ST_Length(ST_MakeLine(tp.geom::geometry ORDER BY tp.t)::geography),
+       COALESCE(max(d.distance_m), 0),
        count(*),
        percentile_cont(0.5) WITHIN GROUP (ORDER BY tp.h_acc_m),
        percentile_cont(0.95) WITHIN GROUP (ORDER BY tp.h_acc_m)
-FROM track_points tp WHERE tp.session_id = ANY(%(ids)s)
+FROM track_points tp LEFT JOIN dist d USING (session_id)
+WHERE tp.session_id = ANY(%(ids)s)
 GROUP BY tp.session_id
 """
 
@@ -182,7 +195,8 @@ STREAMS_SQL = _streams_sql()
 
 def _track_stats(conn: Connection, ids: list[str]) -> dict[str, dict]:
     out = {sid: {"distance_m": 0.0, "fixes": 0, "hacc_median": None, "hacc_p95": None} for sid in ids}
-    for sid, distance, fixes, median, p95 in conn.execute(TRACK_STATS_SQL, {"ids": ids}).fetchall():
+    args = {"ids": ids, "max_hacc": MAX_HACC_M, "min_speed": DISTANCE_MIN_SPEED_MS}
+    for sid, distance, fixes, median, p95 in conn.execute(TRACK_STATS_SQL, args).fetchall():
         out[sid] = {"distance_m": float(distance or 0), "fixes": int(fixes), "hacc_median": median,
                     "hacc_p95": p95}
     return out
@@ -287,16 +301,21 @@ def _stored_quality(r: dict) -> dict:
 
 
 def _session_streams(conn: Connection, cache: TripStatsCache | None, rows: list[dict]) -> dict[str, dict]:
-    """The finalize job's per-stream quality (from the whole trip) when there is one, else the live
-    batches'. The finalize job names streams by their batch block (deviceMotion); the dashboard by
+    """Per stream, the finalize job's quality (from the whole trip) where it has one, else the live
+    batches'. A trip finalized from the live archive only stores deviceMotion and location (the batches
+    carry no sample times for the other streams), so those keep their live numbers instead of
+    disappearing. The finalize job names streams by their batch block (deviceMotion); the dashboard by
     its file (device_motion), so stored names are mapped."""
+    live = _stats(conn, cache, "streams", rows)
     out = {}
     for r in rows:
+        sid = r["session_id"]
         stored = _stored_quality(r).get("streams")
-        if isinstance(stored, dict) and stored:
-            out[r["session_id"]] = {STREAMS.get(k, (k,))[0]: v for k, v in stored.items()}
-    live = _stats(conn, cache, "streams", [r for r in rows if r["session_id"] not in out])
-    return {**live, **out}
+        merged = dict(live.get(sid, {}))
+        if isinstance(stored, dict):
+            merged.update({STREAMS.get(k, (k,))[0]: v for k, v in stored.items()})
+        out[sid] = merged
+    return out
 
 
 def _merge(defaults: dict, stored) -> dict:
@@ -307,7 +326,7 @@ def _merge(defaults: dict, stored) -> dict:
 
 
 def _sickness(r: dict) -> dict:
-    """D41: the dose is vertical plus lateral, as energies, so the combined MSDV is the root sum of
+    """D49: the dose is vertical plus lateral, as energies, so the combined MSDV is the root sum of
     squares. A trip processed before the lateral dose existed has msdv_y null: vertical only."""
     z, y = r["msdv_z"], r["msdv_y"]
     msdv = None if z is None else math.sqrt(z ** 2 + (y or 0.0) ** 2)
@@ -348,7 +367,6 @@ def _summary(r: dict) -> dict:
         "sicknessExperimental": not roughness_eligible,
         **_sickness(r),
         "eventCounts": {t: int(r[f"ev_{t}"]) for t in EVENT_TYPES},
-        "ratingsCount": int(r["ratings"]),
     }
 
 
@@ -388,24 +406,6 @@ def _detection(r: dict) -> dict | None:
     return out
 
 
-def rating_value(value) -> int | None:
-    """A MISC rating's number, or None for a label without one (a skipped prompt)."""
-    try:
-        return int(float(value))
-    except (TypeError, ValueError, OverflowError):
-        return None
-
-
-def _ratings(conn: Connection, session_id: str) -> list[dict]:
-    out = []
-    for t, value in conn.execute(
-            "SELECT t, value FROM labels WHERE session_id = %s AND type = %s ORDER BY t",
-            (session_id, SICKNESS_LABEL)).fetchall():
-        number = rating_value(value)
-        if number is not None:
-            out.append({"tUtc": iso(t), "value": number, "msdvSoFar": None})
-    return out
-
 
 def _require_session(conn: Connection, session_id: str) -> None:
     if conn.execute("SELECT 1 FROM sessions WHERE session_id = %s", (session_id,)).fetchone() is None:
@@ -428,8 +428,7 @@ def session_detail(conn: Connection, session_id: str, cache: TripStatsCache | No
         **_summary(r),
         "quality": _quality(r, streams),
         "detection": _detection(r),
-        "sickness": {**_sickness(r),
-                     "ratings": _ratings(conn, session_id), "spearman": None},
+        "sickness": _sickness(r),
         "processedAt": iso(r["finalized_at"]),
         "processorVersion": None,
     }
@@ -465,8 +464,8 @@ def session_track(conn: Connection, session_id: str) -> dict:
 
 def session_labels(conn: Connection, session_id: str) -> dict:
     _require_session(conn, session_id)
-    rows = conn.execute("SELECT t, type, value, note FROM labels WHERE session_id = %s ORDER BY t",
-                        (session_id,)).fetchall()
+    rows = conn.execute("SELECT t, type, value, note FROM labels WHERE session_id = %s AND type <> %s "
+                        "ORDER BY t", (session_id, RATING_LABEL)).fetchall()
     return {"labels": [{"tUtc": iso(t), "type": ty, "value": v, "note": n} for t, ty, v, n in rows]}
 
 
@@ -536,7 +535,7 @@ def all_events(conn: Connection, vehicle: str | None, etype: str | None) -> dict
 LIVE_SQL = f"""
 SELECT ls.device_id, ls.session_id, s.source, s.status, s.vehicle_type, ls.updated_at, ls.received_at,
        ls.lat, ls.lon, ls.speed_ms, ls.course_deg, ls.h_acc_m, ls.roughness_now, ls.msdv_so_far,
-       ls.battery, ls.thermal, tr.lons, tr.lats, rt.ts, rt.vals
+       ls.battery, ls.thermal, tr.lons, tr.lats
 FROM live_state ls JOIN sessions s USING (session_id)
 LEFT JOIN LATERAL (
   SELECT array_agg(ST_X(p.geom::geometry) ORDER BY p.t) AS lons,
@@ -544,10 +543,6 @@ LEFT JOIN LATERAL (
   FROM track_points p
   WHERE p.session_id = ls.session_id AND p.t >= ls.updated_at - make_interval(secs => %(track_s)s)
     AND {_accurate("p")}) tr ON true
-LEFT JOIN LATERAL (
-  SELECT array_agg(l.t ORDER BY l.t DESC) AS ts, array_agg(l.value ORDER BY l.t DESC) AS vals
-  FROM (SELECT t, value FROM labels WHERE session_id = ls.session_id AND type = %(sickness)s
-        ORDER BY t DESC LIMIT 5) l) rt ON true
 WHERE ls.received_at > %(since)s AND ls.lat IS NOT NULL AND ls.lon IS NOT NULL
 ORDER BY ls.device_id
 """
@@ -559,12 +554,6 @@ def live(conn: Connection, now: dt.datetime) -> dict:
     rows = _rows(conn, LIVE_SQL, _params(since=now - dt.timedelta(seconds=LIVE_WINDOW_S), track_s=LIVE_TRACK_S))
     devices = []
     for r in rows:
-        latest = None
-        for t, value in zip(r["ts"] or [], r["vals"] or []):
-            number = rating_value(value)
-            if number is not None:
-                latest = {"value": number, "tUtc": iso(t)}
-                break
         devices.append({
             "deviceId": r["device_id"],
             "sessionId": r["session_id"],
@@ -580,7 +569,6 @@ def live(conn: Connection, now: dt.datetime) -> dict:
             "hAccM": rnd(r["h_acc_m"], 1),
             "roughnessNow": rnd(r["roughness_now"], 3),
             "msdvSoFar": rnd(r["msdv_so_far"], 3),
-            "latestRating": latest,
             "battery": rnd(r["battery"], 2),
             "thermal": r["thermal"],
             "track": [[rnd(lon), rnd(lat)] for lon, lat in zip(r["lons"] or [], r["lats"] or [])],
@@ -613,7 +601,7 @@ def overview(conn: Connection) -> dict:
     ).fetchone()
     speed_bumps = conn.execute(
         "SELECT count(*) FROM events e JOIN sessions s USING (session_id) "
-        "WHERE s.include_in_agg AND e.type = 'speed_bump'").fetchone()[0]
+        "WHERE s.include_in_agg AND e.type = 'speed_bump' AND e.geom IS NOT NULL").fetchone()[0]  # as /api/events
     return {
         "sessions": {"total": total, "upload": upload, "live": live_n, "replay": replay,
                      "includedInAgg": included, "mock": mock},

@@ -37,7 +37,7 @@ Both features come from the **same motion signal, in different frequency bands**
 | **Road quality** | Where is the road rough? Where are the potholes, speed bumps and cobblestones? | **~1–30 Hz** plus sharp transients | Vertical acceleration, pitch/roll rate, GPS position and speed, road noise (audio) |
 | **Motion sickness** | How likely is this ride to make passengers sick? Which road sections cause it? | **~0.08–0.5 Hz** (slow sway) | Lateral, longitudinal and vertical acceleration over minutes; roll/pitch; gravity orientation |
 
-Motion sickness is computed with **ISO 2631-1 MSDV**. Frequency-weight the acceleration with filter **Wf**, then compute `MSDV = sqrt(∫ a_w(t)² dt)`. Rule of thumb: **% of people who may vomit ≈ MSDV / 3**. We validate this against **real passenger sickness ratings (MISC scale)** collected in the app during the drive.
+Motion sickness is computed with **ISO 2631-1 MSDV**. Frequency-weight the acceleration with filter **Wf**, then compute `MSDV = sqrt(∫ a_w(t)² dt)`. Rule of thumb: **% of people who may vomit ≈ MSDV / 3**. The motion-sickness number is this calculation only (MSDV from the accelerometers, on the backend). *Removed (D47): validating it against passenger MISC ratings collected in the app; there is no time to ask real people how they feel.*
 
 Road quality is roughly band-passed vertical acceleration → RMS per ~10 m of road, normalized by speed → roughness score, plus spike detection → pothole events with GPS position.
 
@@ -85,7 +85,7 @@ Priority:
 | # | Stream | API | Rate | Fields (unit) | Why | Prio |
 |---|---|---|---|---|---|---|
 | M1 | **Device motion (fused)** | `CMMotionManager.startDeviceMotionUpdates(using: .xArbitraryZVertical, to:)` | 100 Hz | `userAcceleration.x/y/z` (g), `gravity.x/y/z` (g), `rotationRate.x/y/z` (rad/s), `attitude.quaternion.w/x/y/z`, `attitude.roll/pitch/yaw` (rad) | Gravity vector = "which way is down", used to rotate into the vehicle frame. Attitude gives roll/pitch for sickness. userAcceleration is handy for road spikes | **P0** |
-| M2 | **Raw accelerometer** | `startAccelerometerUpdates` | 100 Hz | `x/y/z` (g, gravity included) | **Unfused** signal. The fused userAcceleration can filter out the very slow 0.1–0.5 Hz motion that MSDV needs, so the backend must have raw data | **P0** |
+| M2 | **Raw accelerometer** | `startAccelerometerUpdates` | 100 Hz | `x/y/z` (g, gravity included) | **Unfused** signal, kept to cross-check the fused one after the real drive. MSDV and roughness use userAcceleration (D46): vertical heave can't leak into the unit-length gravity estimate | **P0** |
 | M3 | **Raw gyroscope** | `startGyroUpdates` | 100 Hz | `x/y/z` (rad/s, includes bias) | Unfused rotation; pitch spikes help confirm potholes (front then rear axle) | **P0** |
 | M4 | Raw magnetometer | `startMagnetometerUpdates` | 50 Hz | `x/y/z` (µT) | Car metal distorts it, but it's cheap and may help heading or detect electrical noise | P2 |
 
@@ -145,7 +145,7 @@ The operator is **a passenger, never the driver.**
 
 | # | Label | UI | Why | Prio |
 |---|---|---|---|---|
-| H1 | **Sickness rating (MISC 0–10)** | Prompted **every 2 minutes** with a haptic and a short sound. Big 0–10 grid with short descriptions. Auto-dismisses after 30 s with no answer (logged as `missed`). Can also be entered any time | Ground truth to validate MSDV predictions. **Without it the sickness feature is unvalidated** | **P0** |
+| H1 | ~~Sickness rating (MISC 0–10)~~ | *Removed (D47).* The app no longer prompts for or records ratings; motion sickness comes only from the backend's MSDV calculation | | |
 | H2 | **Bump / pothole** | One big button, tapped the moment the bump is felt | Ground truth for pothole detection | **P0** |
 | H3 | Speed bump | Button | Different signature from a pothole | **P0** |
 | H4 | Surface segment | Toggle buttons with start/end: `cobblestones`, `rough asphalt`, `smooth asphalt`, `gravel`, `tram rails` | Labeled training data for roughness and surface classification | **P0** |
@@ -154,10 +154,7 @@ The operator is **a passenger, never the driver.**
 | H7 | **Sync tap** | Button + instructions (§5) | Alignment of audio and motion | P1 |
 | H8 | Free-text note | Small text field | Anything unexpected | P1 |
 
-**MISC (Misery Scale) labels for the grid:**
-`0` no problems · `1` slight discomfort, no specific symptoms · `2` dizziness, warmth, headache, stomach awareness, sweating: vague · `3` same: some · `4` same: medium · `5` same: severe · `6` nausea: some · `7` nausea: medium · `8` nausea: severe · `9` retching · `10` vomiting
-
-Note: looking at a phone screen itself increases motion sickness. The person rating should only glance at the phone when prompted. Record **who is rating and their seat** in the session metadata.
+Seat and posture (`people.raterSeat`, `people.raterPosture` in §3.8) still describe the passenger whose ride the backend splits the calculated sickness by; the keys keep their names for compatibility.
 
 ### 3.8 Session metadata (entered before recording, in `session.json`)
 
@@ -236,7 +233,7 @@ Common leading columns on every sensor CSV:
 | `activity.csv` | `stationary,walking,running,automotive,cycling,unknown,confidence` |
 | `audio_level.csv` | `avg_dbfs,peak_dbfs` |
 | `device.csv` | `battery_level,battery_state,thermal_state,low_power,free_disk_bytes,net_status,net_type` |
-| `labels.csv` | `type,value,note` (e.g. `sickness,4,` / `pothole,,` / `surface_start,cobblestones,` / `surface_end,cobblestones,` / `phone_moved,,` / `sickness_missed,,`) |
+| `labels.csv` | `type,value,note` (e.g. `pothole,,` / `surface_start,cobblestones,` / `surface_end,cobblestones,` / `phone_moved,,`). The types `sickness`, `sickness_prompt` and `sickness_missed` are no longer written (D47); folders from older builds may still contain them |
 | `clock.csv` | `t_up,t_utc_ms,source` (no extra columns) |
 
 Use the same numeric precision everywhere: 6 decimals for sensor values, 8 decimals for lat/lon.
@@ -396,14 +393,13 @@ One glance must answer: **is everything recording correctly right now?**
 │ [POTHOLE] [SPEED BUMP] [PHONE MOVED]     │  ← big buttons, haptic feedback on tap
 │ Surface: [cobble][rough][smooth][gravel] │  ← toggles, highlighted while active
 │ Segment: [winding][roundabout][stop&go]  │
-│ [SICKNESS 0–10]  [SYNC TAP]  [NOTE]      │
+│ [SYNC TAP]  [NOTE]                       │
 │                    (hold 2 s to STOP) ■  │
 └──────────────────────────────────────────┘
 ```
 
 - Every row has a **status dot**: green / amber / red.
 - **Last label** shows briefly as a toast ("Pothole logged 09:23:41") so the operator knows the tap registered.
-- Each sickness prompt shows a countdown; answering gives haptic confirmation.
 - Use high contrast, big text, and support for bright sunlight. Dark mode is fine.
 - UI refresh at **5–10 Hz** (not per sample). Plots draw from ring buffers, decimated.
 
@@ -423,12 +419,11 @@ One glance must answer: **is everything recording correctly right now?**
 | Battery < 20 % and not charging | WARN |
 | App went to background | WARN (recording continues via background modes; log it) |
 | Upload queue > 30 batches or last success > 60 s | WARN (never PROBLEM: data is safe on disk) |
-| Sickness prompt missed | info (logged) |
 
 On PROBLEM: red banner with the reason, a strong haptic, and a sound, plus an `app_log.txt` entry with a timestamp.
 
 ### Screen 5: Session summary (after Stop)
-- Duration, per-stream sample count, **mean measured rate**, longest gap per stream, labels count, sickness ratings count, file sizes, upload status.
+- Duration, per-stream sample count, **mean measured rate**, longest gap per stream, labels count, file sizes, upload status.
 - Any stream with gaps > 1 s is listed in red. This is the immediate answer to "did we get good data?"
 - **Export** button.
 
@@ -465,7 +460,6 @@ On PROBLEM: red banner with the reason, a strong haptic, and a sound, plus an `a
 - **Stop-and-go** traffic (longitudinal sway)
 - Some faster road segment if possible
 - If possible, drive one rough segment **twice at different speeds** (e.g. 20 and 40 km/h). This lets us prove the speed normalization works.
-- Sickness ratings every 2 min from a rear passenger.
 
 **After the drive**
 1. 30 s stationary, engine idling, then SYNC TAP + 3 knocks, then **hold to Stop**.
@@ -504,7 +498,7 @@ Pass criteria: motion streams ~100 Hz with max gap < 0.1 s; GPS ~1 Hz with sane 
 
 1. **Recorder core:** CoreMotion M1–M3 + GPS L1 → CSV writer + clock anchors + idle-timer off. *(Minimum viable: this alone is enough for the drive.)*
 2. **Live dashboard:** stream table with rates, sample counts, ages, status dots, and the banner.
-3. **Labels:** pothole / speed bump / phone moved / surface toggles / sickness prompt.
+3. **Labels:** pothole / speed bump / phone moved / surface toggles.
 4. Preflight checklist + session setup + summary + export.
 5. Audio recording + level meter, barometer, activity, device health.
 6. Live plots + mini map.

@@ -64,10 +64,10 @@ struct SessionSetupView: View {
                 Picker("Operator seat", selection: $model.setup.people.operatorSeat) {
                     ForEach(withCurrent(seats.filter { $0 != "driver" }, model.setup.people.operatorSeat), id: \.self) { Text($0) }
                 }
-                Picker("Sickness rater seat", selection: $model.setup.people.raterSeat) {
+                Picker("Passenger seat (sickness)", selection: $model.setup.people.raterSeat) {
                     ForEach(withCurrent(seats, model.setup.people.raterSeat), id: \.self) { Text($0) }
                 }
-                Picker("Rater posture", selection: $model.setup.people.raterPosture) {
+                Picker("Passenger posture", selection: $model.setup.people.raterPosture) {
                     ForEach(SessionMetadata.People.postures, id: \.self) { Text($0) }
                 }
                 .accessibilityIdentifier("raterPosture")

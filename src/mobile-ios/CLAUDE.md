@@ -59,7 +59,7 @@ The app ships real sensors only: no mock or demo mode. Fakes live in the test ta
 
 ## Testing
 - Tests are required where data can be lost: `Upload/`, the on-disk schema (`StreamFile`, `SessionWriter`), `session.json` and the contract types. Elsewhere, skip them.
-- Launch arguments: `-uiTesting`, `-uiTestingReset`, `-sicknessInterval <s>`, `-sicknessTimeout <s>`, `-upload.baseURL <url>`.
+- Launch arguments: `-uiTesting`, `-uiTestingReset`, `-upload.baseURL <url>`.
 
 ```bash
 xcodebuild -project SensorRecorder.xcodeproj -scheme SensorRecorder \

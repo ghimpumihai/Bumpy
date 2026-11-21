@@ -174,7 +174,8 @@ class Pipeline:
         self.rough_ema = s.get("rough_ema")
         self.grid = s.get("grid")  # None until the first sample, then the segment's resampling state
         # Fixes newer than the last processed sample wait here, so they're taken at their own time
-        # whatever the batch boundaries are.
+        # whatever the batch boundaries are. A fix fed after the samples around its time (it arrived
+        # late) is taken at the next sample; finalize.fixes_by_window avoids that.
         self.pending_fixes = [tuple(f) for f in s.get("pending_fixes", [])]
         self.held = [list(h) for h in s.get("held", [])]  # potholes [t, peak, speed] waiting for POTHOLE_HOLD_S
         self.last_bump_t = s.get("last_bump_t")

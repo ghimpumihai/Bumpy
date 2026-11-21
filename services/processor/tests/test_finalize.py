@@ -121,6 +121,25 @@ def test_invalid_windows_do_not_count_for_roughness():
     assert p.roughness_rms is None and p.mean_speed_ms == 10.0
 
 
+def test_pass_sickness_counts_moving_valid_windows_only():
+    """Plan §10: idling is separated out of sickness, and so is the phone being handled (the windows
+    roughness drops too). aw_rms stays the whole pass, as measured."""
+    series = _series(10)
+    for k in range(3):  # stopped: 0.3 m/s, with a big dose
+        series[k].speed, series[k].dose_inc = 0.3, 1.0 * 0.2
+    series[3].dose_inc = 2.0 * 0.2  # handled
+    for k in range(4, 10):
+        series[k].dose_inc = 0.16 * 0.2  # a_w 0.4 while moving
+    invalid = np.zeros(10, dtype=bool)
+    invalid[3] = True
+    (p,) = fz.build_passes(series, [(T0, 46, 23), (T0 + 3, 46, 23)], [], cell_of=_band_cell, invalid=invalid)
+    assert p.sickness_s == pytest.approx(6 * 0.2)
+    assert p.sickness_aw_rms == pytest.approx(0.4)
+    assert p.aw_rms == pytest.approx(math.sqrt((3 * 1.0 + 2.0 + 6 * 0.16) / 10))
+    (p,) = fz.build_passes(_series(10, speed=0.3), [(T0, 46, 23), (T0 + 3, 46, 23)], [], cell_of=_band_cell)
+    assert p.sickness_s == 0.0 and p.sickness_aw_rms is None
+
+
 def test_real_h3_cells_at_resolution_11():
     import h3
 
@@ -246,6 +265,9 @@ def test_finalize_reproduces_a_clean_live_trip_and_aggregates_it(db, batch, sess
     assert msdv == pytest.approx(live_msdv, rel=1e-9) and valid > 0.9 and finalized
 
     assert _one(db, "SELECT count(*) FROM segment_observations")[0] > 10
+    # D45: every pass stores its moving, valid time (the trip moves throughout, so all of it).
+    assert _one(db, "SELECT bool_and(sickness_s IS NOT NULL AND sickness_aw_rms IS NOT NULL "
+                    "AND sickness_s <= duration_s) FROM segment_observations")[0]
     method, n_sessions = _one(db, "SELECT method, n_sessions FROM aggregation_fit")
     assert (method, n_sessions) == ("percentile", 1)  # one trip can't fit the model
     assert _one(db, "SELECT count(*) FROM segment_agg WHERE vehicle_type = 'all'")[0] == \

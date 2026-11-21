@@ -10,6 +10,7 @@ on:
     branches: [main, staging] # staging: the integration branch before main (no deploys)
     paths:
       - "tools/upload/**"
+      - ".github/workflows/upload-ci.yml"
       - "!**/*.md"
 
 permissions:

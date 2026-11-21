@@ -12,7 +12,9 @@ on:
     branches: [main, staging] # staging: the integration branch before main (no deploys)
     paths:
       - "services/read-api/**"
+      - "services/processor/roadride/**"
       - "db/**"
+      - ".github/workflows/read-api-ci.yml"
       - "!**/*.md"
 
   # deploy-services runs this first and deploys only if it passes.

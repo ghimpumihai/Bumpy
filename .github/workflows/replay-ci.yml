@@ -13,6 +13,10 @@ on:
     branches: [main, staging] # staging: the integration branch before main (no deploys)
     paths:
       - "tools/replay/**"
+      - "services/ingest/ingest_core/**"
+      - "services/processor/roadride/live.py"
+      - "src/mobile-ios/tools/fixtures/**"
+      - ".github/workflows/replay-ci.yml"
       - "!**/*.md"
 
 permissions:

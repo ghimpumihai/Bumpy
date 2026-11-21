@@ -17,6 +17,7 @@ on:
       - "db/**"
       - "tools/upload/**"
       - "tools/replay/**"
+      - ".github/workflows/processor-ci.yml"
       - "!**/*.md"
 
   # deploy-services runs this first and deploys only if it passes.

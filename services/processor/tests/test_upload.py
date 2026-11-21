@@ -225,6 +225,22 @@ def test_unparseable_value_falls_back_to_the_forgiving_reader(folder):
     assert np.isnan(fast["rr_z"][77])  # an empty field
 
 
+def test_a_torn_last_line_with_every_column_is_dropped(folder):
+    """After a crash the last line can be cut inside its last value (0.987654 written as 0.) and still
+    have every column; without its newline it can't be trusted (the app's CSVRepair drops it too)."""
+    data = (folder / "device_motion.csv").read_bytes()
+    whole = data[: data.rfind(b"\n") + 1]  # without make_folder's short torn line
+    last = whole.splitlines()[-1].decode().split(",")
+    torn = (",".join([f"{float(last[0]) + 0.01:.6f}", *last[1:-1], "0.987654"])[:-6]).encode()
+    assert torn.endswith(b",0.") and len(torn.split(b",")) == len(last)
+    fast = up.read_columns(whole + torn, up.MOTION_COLS + ("yaw",))
+    # An unparseable value sends the file through the forgiving reader.
+    slow = up.read_columns((whole + torn).replace(b",-1.000000,", b",abc,", 1), up.MOTION_COLS + ("yaw",))
+    assert len(fast["t_up"]) == len(slow["t_up"]) == SECONDS * 100
+    assert fast["t_up"][-1] == slow["t_up"][-1] == float(last[0])
+    assert len(up.read_columns(whole, up.MOTION_COLS)["t_up"]) == SECONDS * 100  # a clean end loses nothing
+
+
 def test_an_infinite_value_reads_as_zero_as_the_app_sends_it(tmp_path):
     """The app's batches carry a non-finite sensor value as 0 (IngestBatch round6); an upload must give
     the same numbers, not 1.8e308 (np.nan_to_num's default for inf)."""

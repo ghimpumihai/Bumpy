@@ -149,6 +149,12 @@ def read_columns(data: bytes, numeric: tuple[str, ...], text: tuple[str, ...] = 
     rows without a `t_up` and torn or truncated rows (after a crash) are dropped. Text columns are
     object arrays with None for an empty field."""
     numeric = ("t_up", "t_utc_ms") + tuple(c for c in numeric if c not in ("t_up", "t_utc_ms"))
+    end = data.rfind(b"\n")
+    if 0 <= end < len(data) - 1:
+        # A last line without its newline was cut mid-write: it can have every column and still be
+        # wrong (0.987654 written as 0.). The app's own recovery drops it the same way
+        # (CSVRepair.repairTornLines).
+        data = data[: end + 1]
     try:
         out = _read_arrow(data, numeric, text)
     except Exception:  # noqa: BLE001 - a value Arrow can't parse: take the slow, forgiving path

@@ -88,6 +88,19 @@ def test_slow_pass_has_no_roughness():
     assert p.roughness_rms is None and p.mean_speed_ms == pytest.approx(0.3)
 
 
+def test_invalid_windows_do_not_count_for_roughness():
+    series = _series(10)
+    fixes = [(T0, 46, 23), (T0 + 3, 46, 23)]
+    invalid = np.zeros(10, dtype=bool)
+    invalid[:4] = True  # the first 4 windows (roughness 1, 2, 1, 2) were handled
+    (p,) = fz.build_passes(series, fixes, [], cell_of=_band_cell, invalid=invalid)
+    assert p.roughness_rms == pytest.approx(math.sqrt((1 + 4 + 1 + 4 + 1 + 4) / 6))
+    assert p.n_windows == 10 and p.aw_rms == pytest.approx(0.2)  # the dose still counts
+    invalid[:] = True
+    (p,) = fz.build_passes(series, fixes, [], cell_of=_band_cell, invalid=invalid)
+    assert p.roughness_rms is None and p.mean_speed_ms == 10.0
+
+
 def test_real_h3_cells_at_resolution_11():
     import h3
 
@@ -330,3 +343,47 @@ def test_ready_sweep_sends_once_and_closes_silent_trips(db, batch, session_meta)
     assert sorted(json.loads(b)["sessionId"] for b in sent) == ["ended", "silent"]
     assert _one(db, "SELECT status, incomplete FROM sessions WHERE session_id = 'silent'") == ("processing", True)
     assert _one(db, "SELECT status, incomplete FROM sessions WHERE session_id = 'ended'") == ("processing", False)
+
+
+def _label(b, rel, typ):
+    b["labels"] = b.get("labels", []) + [{"t": rel, "type": typ, "value": None, "note": None}]
+
+
+@requires_db
+def test_finalize_scores_detections_and_marks_handled_and_drifting_windows(db, batch, session_meta, tmp_path):
+    """Pothole at 21 s (tapped 0.8 s later), a speed bump tap with no detection, the phone handled
+    at 50 s (a jolt there is not a pothole) and tilted 30° in its mount for 4 s from 32 s."""
+    sid = "trip-checks"
+    jolt = _vert(T0 + 21.0)
+    vert = lambda t: jolt(t) + 15.0 * np.exp(-((t - (T0 + 51.0)) / 0.01) ** 2)  # noqa: E731
+    batches = [motion_batch(batch, sid, seq, T0 + 2 * seq, vert) for seq in range(30)]
+    for b in batches:
+        b["deviceId"] = session_meta["deviceId"]
+    _label(batches[10], 1.8, "pothole")
+    _label(batches[20], 0.5, "speed_bump")
+    _label(batches[25], 0.0, "phone_moved")
+    tilt = math.radians(30)
+    for b in batches[16:18]:
+        b["deviceMotion"]["g_y"] = [math.sin(tilt)] * 200
+        b["deviceMotion"]["g_z"] = [-math.cos(tilt)] * 200
+    start = dict(session_meta, sessionId=sid)
+    _write_archive(tmp_path, sid, batches, [start, dict(start, batchCount=30)])
+    fz.finalize_session(db, fz.DirArchive(tmp_path), sid)
+
+    events = db.execute("SELECT type, t, matched_label FROM events").fetchall()
+    assert [(typ, round(t.timestamp() - T0), m) for typ, t, m in events] == [("pothole", 21, True)]
+    q = _one(db, "SELECT quality FROM sessions")[0]
+    assert q["detection"]["pothole"] == {"truePositives": 1, "falsePositives": 0, "falseNegatives": 0,
+                                         "precision": 1.0, "recall": 1.0}
+    assert q["detection"]["speed_bump"]["falseNegatives"] == 1
+    inv = q["invalidSeconds"]
+    assert inv["phone_moved"] == pytest.approx(10, abs=0.4)
+    assert inv["gravity_drift"] == pytest.approx(4, abs=1.0)
+    assert inv["gyro_gps_mismatch"] == 0
+    valid, status = _one(db, "SELECT valid_fraction, quality_status FROM sessions")
+    assert valid == pytest.approx(1 - 14 / 60, abs=0.03)
+    assert status == "degraded"  # 10 s of 60 handled: over the 10 % limit
+    # Handled or tilted windows don't count for roughness; their passes still exist.
+    rough_windows = _one(db, "SELECT sum(n_windows) FILTER (WHERE roughness_rms IS NOT NULL) FROM segment_observations")[0]
+    all_windows = _one(db, "SELECT sum(n_windows) FROM segment_observations")[0]
+    assert all_windows - rough_windows >= 50

@@ -7,11 +7,17 @@ The phone's front door (plan §5, "Azure Functions"). Python 3.12 on Flex Consum
 | `POST /api/ingest` | one gzipped 2-second batch | `200 {"ok":true,"sessionId","batchSeq"}` |
 | `PUT /api/ingest/sessions/{sessionId}` | gzipped `session.json`, at Start and at Stop | `200 {"ok":true,"sessionId","phase"}` |
 
-Every request is checked in the same order as [`mock_ingest_server.py`](../../src/mobile-ios/tools/mock_ingest_server.py), the server the app was built against: device key (401) → headers (400) → gunzip and size (413/400) → JSON (400) → schema (400) → idempotency header (400). The app's connectivity probe `{"probe":true}` gets a 400 that means "reachable, key accepted". Then the message:
+Every request is checked in the same order as [`mock_ingest_server.py`](../../src/mobile-ios/tools/mock_ingest_server.py), the server the app was built against: device key (401) → Content-Type (400) → gunzip and size (413/400) → JSON (400) → schema and string limits (400) → the key's device (403) → idempotency header (400). The app's connectivity probe `{"probe":true}` gets a 400 that means "reachable, key accepted".
+
+- **Gzip is decided by the magic bytes** `1f 8b`, not by `Content-Encoding`: the Functions host may inflate the body itself and drop the header (plan §5). A body without them is taken as JSON the host already inflated, within the same size limit.
+- **Size:** at most 200 KB decompressed. The app setting `MAX_BODY_BYTES` can lower it; it can't go above 240 KB (an Event Hubs Basic event is at most 256 KB).
+- **Strings:** `deviceId` at most 128 characters, `labels[].type` at most 64, every other string and object key at most 2000; no NUL character or unpaired surrogate anywhere (PostgreSQL text/jsonb can't store them; IDs and label types are in primary keys). The app sends UUIDs, label types of at most 15 characters and short notes.
+
+Then the message:
 
 1. goes to Event Hubs `ingest` as plain JSON, with the device ID as the partition key and the properties `kind` (`batch`/`session`), `sessionId`, `deviceId`, `batchSeq` or `phase`, and `receivedAtUtc`;
 2. is archived to `lake/raw/session=<sessionId>/<batchSeq:08d>.json.gz` (batches) or `session-start.json.gz` / `session-stop.json.gz` (metadata);
-3. gets `200`. Retries of the same batch overwrite the same blob; repeats on Event Hubs are dropped in the database.
+3. gets `200`. Blobs are never overwritten: a retry of the same batch finds its blob already there and still gets `200` (logged as `archive=already-there`), so the archive keeps the first copy, as the database does (`ON CONFLICT DO NOTHING`). Repeats on Event Hubs are dropped in the database.
 
 If Key Vault, Event Hubs or Storage fails, the answer is `503` and the app retries later.
 
@@ -21,7 +27,7 @@ If Key Vault, Event Hubs or Storage fails, the answer is `503` and the app retri
 function_app.py      Azure Functions routes + Azure SDK clients (thin)
 ingest_core/
   contract.py        decoding and schema checks, ported from the mock server
-  keys.py            device-key hashes from Key Vault, constant-time check, reload for new keys
+  keys.py            device-key hashes from Key Vault, constant-time check, reload, key → deviceId
   handler.py         the request flow above, independent of Azure
 tests/               pytest; test_parity.py runs the same bodies through the mock and this code
 deploy.ps1           deploy from a laptop
@@ -29,7 +35,15 @@ deploy.ps1           deploy from a laptop
 
 ## Device keys
 
-`infra/scripts/add-device-key.ps1 -DeviceId <name>` adds a key's SHA-256 hash to the Key Vault secret `device-key-hashes`. The function reloads the secret by itself when it sees an unknown key (at most once a minute), so no restart is needed.
+`infra/scripts/add-device-key.ps1 -DeviceId <the app's Device ID>` adds a key's SHA-256 hash to the Key Vault secret `device-key-hashes` (`{"<deviceId>": "<sha256 hex>"}`). The app shows its Device ID in Settings. The function reloads the secret by itself when it sees an unknown key (at most once a minute), so no restart is needed.
+
+A key may only send batches and session metadata whose `deviceId` is the name it is stored under (case-insensitive), so one key can't post as another phone. Otherwise the answer is `403`, which the app retries with backoff, so nothing is lost while a key's name is fixed. For [the replay tool](../../tools/replay/README.md): a key stored as `replay` (or `replay-<anything>`) may send any `replay-…` device ID but never a phone's, and a phone's key may send `replay-<its own ID>`.
+
+To rename an existing entry to the phone's Device ID without issuing a new key: `add-device-key.ps1 -DeviceId <Device ID> -RenameFrom <old name>`.
+
+## Telemetry
+
+Terraform sets `APPLICATIONINSIGHTS_CONNECTION_STRING` (`site_config.application_insights_connection_string`). The Functions host reads it itself: requests, failures and the function's `logging` lines (one per request, with status and reason) go to Application Insights without any SDK in `requirements.txt`. Sampling is set in `host.json` and never drops requests or exceptions.
 
 ## Test and deploy
 
@@ -54,6 +68,7 @@ try { Invoke-WebRequest $url -Method Post -Body $ms.ToArray() -ContentType 'appl
 ## Differences from the mock and the plan
 
 - Session IDs must match `[A-Za-z0-9_-]{1,128}` in batches too (the mock accepts any string): the ID becomes part of a blob path. The app uses UUIDs.
+- The mock has a single key and doesn't check the key's device (the `403` above).
 - A new batch and a repeat both get `200` (the mock says `201` for new). The app treats every 2xx as delivered.
-- Session metadata is archived as one blob per phase instead of a single `session.json.gz`, so a late retry of the Start copy can't overwrite the Stop copy.
+- Session metadata is archived as one blob per phase instead of a single `session.json.gz`, so a late retry of the Start copy can't touch the Stop copy. Plan §5 says a retry overwrites its blob; it now keeps the first copy instead, so a key can't replace an archived trip.
 - Validation is plain Python ported from the mock instead of pydantic (plan §5), so the two can be tested for identical behaviour.

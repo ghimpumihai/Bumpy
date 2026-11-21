@@ -7,6 +7,10 @@ Settings (set by Terraform, infra/modules/compute):
   EVENTHUB_FULLY_QUALIFIED_NAMESPACE, EVENTHUB_NAME
   STORAGE_BLOB_ENDPOINT, LAKE_CONTAINER
   KEY_VAULT_URI, DEVICE_KEYS_SECRET_NAME
+  MAX_BODY_BYTES                      decompressed body limit; default and upper bound in
+                                      ingest_core/contract.py (200 KB, at most 240 KB)
+  APPLICATIONINSIGHTS_CONNECTION_STRING  read by the Functions host itself: requests, failures and
+                                      the `logging` lines below go to Application Insights
 """
 
 from __future__ import annotations
@@ -17,16 +21,22 @@ import os
 import threading
 
 import azure.functions as func
-from azure.core.exceptions import ResourceNotFoundError
+from azure.core.exceptions import ResourceExistsError, ResourceNotFoundError
 from azure.eventhub import EventData, EventHubProducerClient
 from azure.identity import DefaultAzureCredential
 from azure.keyvault.secrets import SecretClient
 from azure.storage.blob import BlobServiceClient, ContentSettings
 
+from ingest_core import contract
 from ingest_core.handler import Response, handle_batch, handle_session
 from ingest_core.keys import KeyStore, parse_secret
 
 app = func.FunctionApp(http_auth_level=func.AuthLevel.ANONYMOUS)  # auth is the device key
+
+_MAX_INFLATED = contract.inflated_limit(os.environ.get("MAX_BODY_BYTES"))
+if str(_MAX_INFLATED) != os.environ.get("MAX_BODY_BYTES", str(contract.MAX_INFLATED)):
+    logging.warning("MAX_BODY_BYTES=%r is invalid or above %d: using %d",
+                    os.environ.get("MAX_BODY_BYTES"), contract.MAX_INFLATED_HARD, _MAX_INFLATED)
 
 _credential = DefaultAzureCredential(exclude_interactive_browser_credential=True)
 
@@ -53,21 +63,26 @@ class AzureSinks:
             batch.add(event)
             self._producer.send_batch(batch)
 
-    def archive(self, blob_name: str, gz_body: bytes) -> None:
-        # Name comes from the message, so a retried batch overwrites the same blob (plan §5).
-        self._lake.upload_blob(
-            blob_name, gz_body, overwrite=True,
-            content_settings=ContentSettings(content_type="application/json", content_encoding="gzip"),
-        )
+    def archive(self, blob_name: str, gz_body: bytes) -> bool:
+        # The name comes from the message, so a retried batch finds its blob already there. Never
+        # overwrite: the first copy stays, as in the database (ON CONFLICT DO NOTHING).
+        try:
+            self._lake.upload_blob(
+                blob_name, gz_body, overwrite=False,
+                content_settings=ContentSettings(content_type="application/json", content_encoding="gzip"),
+            )
+        except ResourceExistsError:
+            return False
+        return True
 
 
-def _load_device_key_hashes() -> list[str]:
+def _load_device_key_hashes() -> dict[str, frozenset[str]]:
     client = SecretClient(os.environ["KEY_VAULT_URI"], credential=_credential)
     try:
         value = client.get_secret(os.environ.get("DEVICE_KEYS_SECRET_NAME", "device-key-hashes")).value
     except ResourceNotFoundError:
         logging.warning("device key secret not found: every request will get 401 until a key is added")
-        return []
+        return {}
     return parse_secret(value)
 
 
@@ -93,14 +108,16 @@ def _to_http(resp: Response, route: str) -> func.HttpResponse:
 
 @app.route(route="ingest", methods=["POST"])
 def ingest_batch(req: func.HttpRequest) -> func.HttpResponse:
-    resp = handle_batch(dict(req.headers), req.get_body(), _keys, _LazySinks())
+    resp = handle_batch(dict(req.headers), req.get_body(), _keys, _LazySinks(),
+                        max_inflated=_MAX_INFLATED)
     return _to_http(resp, "POST /api/ingest")
 
 
 @app.route(route="ingest/sessions/{sessionId}", methods=["PUT"])
 def ingest_session(req: func.HttpRequest) -> func.HttpResponse:
     path_id = req.route_params.get("sessionId", "")
-    resp = handle_session(path_id, dict(req.headers), req.get_body(), _keys, _LazySinks())
+    resp = handle_session(path_id, dict(req.headers), req.get_body(), _keys, _LazySinks(),
+                          max_inflated=_MAX_INFLATED)
     return _to_http(resp, "PUT /api/ingest/sessions/{id}")
 
 
@@ -111,5 +128,5 @@ class _LazySinks:
     def publish(self, partition_key: str, body: bytes, properties: dict) -> None:
         _get_sinks().publish(partition_key, body, properties)
 
-    def archive(self, blob_name: str, gz_body: bytes) -> None:
-        _get_sinks().archive(blob_name, gz_body)
+    def archive(self, blob_name: str, gz_body: bytes) -> bool:
+        return _get_sinks().archive(blob_name, gz_body)

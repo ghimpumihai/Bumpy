@@ -30,10 +30,25 @@ env:
   AGGREGATE_JOB: caj-roadride-aggregate
   PROCESSOR_APP: ca-roadride-processor
   READ_API_APP: ca-roadride-read-api
-  READ_API_PORT: "8000" # also infra/modules/compute target_port
+  READ_API_PORT: "8000" # where the read-api image listens (services/read-api/Dockerfile)
 
 jobs:
+  # The same tests as on the PR, on the code being deployed: failing tests never ship.
+  processor-tests:
+    uses: ./.github/workflows/processor-ci.yml
+    permissions:
+      contents: read
+
+  read-api-tests:
+    uses: ./.github/workflows/read-api-ci.yml
+    permissions:
+      contents: read
+
   deploy:
+    # Production deploys only from main: a manual run started from staging or any other branch
+    # is skipped instead of shipping unmerged code to prod.
+    if: github.ref == 'refs/heads/main'
+    needs: [processor-tests, read-api-tests]
     runs-on: ubuntu-latest
     environment: prod
     steps:
@@ -98,15 +113,21 @@ jobs:
           RG: ${{ vars.RESOURCE_GROUP }}
           IMAGE: ${{ steps.image.outputs.read_api }}
         run: |
-          # The port is in Terraform too; setting it here keeps image and ingress in step whichever runs first.
-          az containerapp ingress update -n "$READ_API_APP" -g "$RG" --target-port "$READ_API_PORT" --output none
           az containerapp update -n "$READ_API_APP" -g "$RG" --image "$IMAGE" --output none
+          # Terraform creates the app on port 80 for the placeholder image and then ignores the port, so
+          # only the first deploy to a fresh stack changes it; after that it is already 8000. The image goes
+          # first: until the port follows, the placeholder revision keeps serving.
+          port=$(az containerapp show -n "$READ_API_APP" -g "$RG" --query properties.configuration.ingress.targetPort -o tsv)
+          if [ "$port" != "$READ_API_PORT" ]; then
+            echo "ingress target port $port -> $READ_API_PORT"
+            az containerapp ingress update -n "$READ_API_APP" -g "$RG" --target-port "$READ_API_PORT" --output none
+          fi
           fqdn=$(az containerapp show -n "$READ_API_APP" -g "$RG" --query properties.configuration.ingress.fqdn -o tsv)
           # Wait for the new revision, then require the main database-backed routes to answer 200.
           # PostgreSQL checks the `reader` role's grants even when the tables are empty, so this proves
           # the login and grants work. It doesn't read every table: session_series, segment_observations
           # and segment_sickness are only covered because the grants are schema-wide.
-          for i in $(seq 1 30); do
+          for _ in $(seq 1 30); do
             code=$(curl -s -o /dev/null -w '%{http_code}' "https://$fqdn/api/overview" || true)
             echo "GET /api/overview -> $code"
             [ "$code" = "200" ] && break

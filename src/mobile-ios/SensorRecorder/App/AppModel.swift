@@ -29,8 +29,10 @@ final class AppModel {
     var setup: SessionSetup
     var recording: RecordingController?
     var lastRecoveredCount = 0
-    /// Read from the upload loop's background thread.
-    @ObservationIgnored let activeSession = Locked<RecordingSession?>(nil)
+    /// The session whose app_log.txt receives upload events (spec §4). It stays set after Stop and
+    /// after Done — the final batches and the Stop metadata upload later — until the next recording
+    /// starts or the session is deleted. Read from the upload loop's background thread.
+    @ObservationIgnored let uploadLogSession = Locked<RecordingSession?>(nil)
     var isRecovering = false
 
     init() {
@@ -57,8 +59,8 @@ final class AppModel {
         sicknessInterval = interval > 0 ? interval : 120
         sicknessTimeout = timeout > 0 ? timeout : 30
         setup = SetupDefaults.load()
-        // Upload events go to the active session's app_log.txt (spec §4) and to the unified log.
-        let active = activeSession
+        // Upload events go to the latest session's app_log.txt (spec §4) and to the unified log.
+        let logTarget = uploadLogSession
         // Force-quit / system termination while recording: stop cleanly (final flush, endedAtUtc,
         // stats) instead of leaving a "recovered" session that lost its last half second.
         NotificationCenter.default.addObserver(forName: UIApplication.willTerminateNotification, object: nil, queue: .main) { [weak self] _ in
@@ -69,7 +71,7 @@ final class AppModel {
         }
         uploadQueue.onEvent = { level, msg in
             appLogger.log(level: level == .info ? .info : .error, "\(msg, privacy: .public)")
-            active.current?.log(level, msg)
+            logTarget.current?.log(level, msg)
         }
     }
 
@@ -85,6 +87,8 @@ final class AppModel {
         let store = self.store
         let active = recording?.session.folder
         Task.detached(priority: .userInitiated) {
+            // Zips left in tmp/ by an export that never finished (app killed with the share sheet open).
+            FolderZipper.removeStaleExports()
             let recovered = store.recoverUnfinishedSessions(excluding: active)
             let list = store.list()
             await MainActor.run {
@@ -112,6 +116,9 @@ final class AppModel {
         if let active = recording?.session.folder, active.standardizedFileURL == folder.standardizedFileURL,
            recording?.isFinished == false {
             throw CocoaError(.fileWriteNoPermission)
+        }
+        uploadLogSession.withLock { s in
+            if s?.folder.standardizedFileURL == folder.standardizedFileURL { s = nil }
         }
         let store = self.store, queue = uploadQueue
         try await Task.detached(priority: .userInitiated) {
@@ -161,20 +168,22 @@ final class AppModel {
                                              sicknessTimeout: sicknessTimeout)
         location.stopPreview()
         recording = controller
-        activeSession.withLock { $0 = session }
+        uploadLogSession.withLock { $0 = session }
         controller.start()
         uploadQueue.kick()
     }
 
     /// Called from the summary screen's "Done".
+    /// `uploadLogSession` is kept: this session's last uploads may still be in flight.
     func closeRecording() {
-        activeSession.withLock { $0 = nil }
         recording = nil
         setup.mountPhotoJPEG = nil
         path = NavigationPath()
         refreshSessions()
     }
 
+    /// `.active` also follows inactive-only trips (Control Center, alerts); the session ignores a
+    /// "foreground" note unless it was really in the background.
     func handleScenePhase(_ phase: ScenePhase) {
         guard let rec = recording, !rec.isFinished else { return }
         switch phase {

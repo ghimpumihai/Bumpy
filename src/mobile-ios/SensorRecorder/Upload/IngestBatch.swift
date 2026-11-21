@@ -207,7 +207,18 @@ final class BatchAccumulator: @unchecked Sendable {
         pending.withLock { $0.labels.append((t, type, value, note)) }
     }
 
+    /// Batches durably queued so far (= the §6.1 `batchCount`): sequence numbers `0..<batchesCreated`.
     var batchesCreated: Int { seq.current }
+
+    /// The sequence number the next queued batch gets.
+    var nextSeq: Int { seq.current }
+
+    /// Call once batch `seq` is durably in the upload queue: only then is its number used. A batch
+    /// that could not be queued (disk full, encode error) leaves no hole, so `batchCount` is exact
+    /// (spec §6.2). Batches are queued from one place at a time (batch timer, then stop()).
+    func markQueued(seq queued: Int) {
+        seq.withLock { if $0 == queued { $0 += 1 } }
+    }
 
     /// Drops the current window without building a batch or consuming a sequence number (upload
     /// OFF): batchSeq stays contiguous over the batches actually queued, so the §6.1 `batchCount`
@@ -216,19 +227,15 @@ final class BatchAccumulator: @unchecked Sendable {
         pending.withLock { $0 = Pending() }
     }
 
-    /// Takes everything collected since the previous drain and builds batch `batchSeq` (0-based,
-    /// strictly increasing). `t0Up` is the window start.
+    /// Takes everything collected since the previous drain and builds a batch numbered `nextSeq`
+    /// (0-based). The number is consumed only by `markQueued(seq:)`. `t0Up` is the window start.
     func drain(t0Up: Double, t0UtcMs: Double, device: DeviceStatus) -> IngestBatch {
         let p = pending.withLock { p -> Pending in
             let out = p
             p = Pending()
             return out
         }
-        let n = seq.withLock { s -> Int in
-            let v = s
-            s += 1
-            return v
-        }
+        let n = nextSeq
         let rel = { (t: Double) in round6(t - t0Up) }
 
         var b = IngestBatch(sessionId: sessionId, deviceId: deviceId, batchSeq: n,

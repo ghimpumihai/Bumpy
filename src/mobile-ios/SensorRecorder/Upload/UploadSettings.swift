@@ -10,18 +10,29 @@ struct UploadConfig: Equatable, Sendable {
 
     var isEnabled: Bool { baseURL != nil }
 
-    var ingestURL: URL? { baseURL?.appendingPathComponent("api/ingest") }
+    /// Spec §6: the ingest route, relative to the base URL.
+    static let ingestPath = "api/ingest"
+
+    var ingestURL: URL? { baseURL?.appendingPathComponent(Self.ingestPath) }
     /// Spec §6.1: `PUT {API}/api/ingest/sessions/{sessionId}`.
     func sessionURL(_ sessionId: String) -> URL? {
-        baseURL?.appendingPathComponent("api/ingest/sessions").appendingPathComponent(sessionId)
+        baseURL?.appendingPathComponent(Self.ingestPath).appendingPathComponent("sessions").appendingPathComponent(sessionId)
     }
 
     static let disabled = UploadConfig(baseURL: nil, deviceKey: "")
 
     /// Accepts `https://host[:port][/path]` (trailing slash ignored). Empty / invalid -> nil (= upload off).
+    /// A pasted full endpoint (`…/api/ingest`) is reduced to its base, because `ingestURL` and
+    /// `sessionURL` append `api/ingest` themselves (otherwise every request would 404).
     static func parseBaseURL(_ raw: String) -> URL? {
         var s = raw.trimmingCharacters(in: .whitespacesAndNewlines)
         while s.hasSuffix("/") { s.removeLast() }
+        let endpointPath = "/" + ingestPath
+        if let pasted = URL(string: s), pasted.query == nil, pasted.fragment == nil,
+           pasted.path.lowercased().hasSuffix(endpointPath), s.lowercased().hasSuffix(endpointPath) {
+            s.removeLast(endpointPath.count)
+            while s.hasSuffix("/") { s.removeLast() }
+        }
         guard !s.isEmpty, let url = URL(string: s),
               let scheme = url.scheme?.lowercased(), scheme == "https" || scheme == "http",
               let host = url.host, !host.isEmpty,

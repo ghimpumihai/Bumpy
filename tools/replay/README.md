@@ -16,11 +16,16 @@ Python 3, standard library only.
 ## Run it
 
 1. Export the session from the app (Session detail → Export), and AirDrop or copy the folder or `.zip` to the laptop.
-2. Use any device key, or create one just for replays. Keys aren't tied to a device ID:
+2. Create a key just for replays (once):
 
    ```powershell
    .\infra\scripts\add-device-key.ps1 -DeviceId replay
    ```
+
+   Each key may only send as the device it was stored under. The replay key (stored as `replay` or
+   `replay-<anything>`) may send any `replay-…` device ID, never a phone's. A phone's own key also
+   works for replaying that phone's trips (`replay-<its device ID>`, the default). Anything else
+   gets `403` and the replay stops.
 
 3. Replay:
 
@@ -29,6 +34,18 @@ Python 3, standard library only.
    $env:REPLAY_API_URL = "https://<ingest function>.azurewebsites.net"
    python tools/replay/replay.py <session folder or .zip>
    ```
+
+   On macOS or Linux, run step 2 in `pwsh` (`brew install --cask powershell`) as
+   `./infra/scripts/add-device-key.ps1 -DeviceId replay`, then in bash or zsh:
+
+   ```bash
+   export REPLAY_DEVICE_KEY='<the key>'
+   export REPLAY_API_URL='https://<ingest function>.azurewebsites.net'
+   python3 tools/replay/replay.py <session folder or .zip>
+   ```
+
+   `REPLAY_API_URL` is `ingest_base_url` from `./infra/tf.ps1 output`: the function's host with no path,
+   the same value as in the app. A URL that already ends in `/api/ingest` works too (the tool strips it).
 
 | Option | What it does |
 |---|---|
@@ -65,9 +82,9 @@ The replay is a separate trip from the original:
 
 ## Tests
 
-```powershell
-pip install pytest
-pytest -q tools/replay
+```bash
+python3 -m pip install pytest
+python3 -m pytest -q tools/replay
 ```
 
 The tests build a session folder in the app's CSV format (`src/mobile-ios/tools/fixtures/csv_headers.json`).

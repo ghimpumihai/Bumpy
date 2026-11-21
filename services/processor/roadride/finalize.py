@@ -2,16 +2,20 @@
 
 Started by KEDA when "session ready" lands in the Service Bus queue. For each message it:
 1. reads the trip's whole raw archive from the `lake` container (`raw/session=<id>/`: every batch
-   the ingest function accepted, plus the Start and Stop copies of session.json);
+   the ingest function accepted, plus the Start and Stop copies of session.json), or the session
+   folder a laptop uploaded to the `sessions` container (upload.py). A complete upload always wins,
+   also for a message from the stream processor (a live backlog that reopened the trip later): it
+   has every sample, while the live path may have lost batches (plan §5, §7);
 2. runs the same signal pipeline as the stream processor over the complete trip in one pass, batch
    by batch in sequence order, so late batches count too and the filters restart only at real holes;
-3. replaces the trip's live results (series, events) and writes one segment observation per H3
+3. writes the trip's samples and results as Parquet to `lake` (`processed/session=<id>/`);
+4. replaces the trip's live results (series, events) and writes one segment observation per H3
    cell pass, the trip's quality measurements and status `complete`, in one transaction;
-4. rebuilds the aggregates (aggregate.rebuild), then completes the message.
+5. rebuilds the aggregates (aggregate.rebuild), then completes the message.
 
-Everything it writes is deleted and rewritten per trip, so a redelivered or resent message is
-harmless. Messages from Event Grid (a laptop upload's `_complete.json`) are dead-lettered for now:
-reading the uploaded CSV folder isn't built yet, and a dead letter keeps the message for later.
+Everything it writes is deleted or overwritten per trip, so a redelivered or resent message is
+harmless. An upload that doesn't match its `_complete.json` is dead-lettered with the reason; a new
+upload sends a new message.
 
 Thresholds in the quality checks are PROVISIONAL, like the pothole threshold in dsp.py.
 """
@@ -19,6 +23,7 @@ Thresholds in the quality checks are PROVISIONAL, like the pothole threshold in 
 from __future__ import annotations
 
 import gzip
+import io
 import json
 import logging
 import math
@@ -34,7 +39,7 @@ import numpy as np
 from psycopg import Connection
 from psycopg.types.json import Jsonb
 
-from . import aggregate
+from . import aggregate, quality, upload
 from .dsp import Event, Pipeline, SeriesPoint
 from .live import BatchFacts, parse_batch, parse_session
 from .store import Store, from_epoch
@@ -64,6 +69,7 @@ _SUBJECT_RE = re.compile(r"/containers/[^/]+/blobs/([^/]+)/_complete\.json$")
 class Archive(Protocol):
     def list_names(self, session_id: str) -> list[str]: ...
     def read(self, name: str) -> bytes: ...
+    def write(self, name: str, data: bytes) -> None: ...
 
 
 class BlobArchive:
@@ -82,6 +88,9 @@ class BlobArchive:
     def read(self, name: str) -> bytes:
         return self._client.download_blob(name).readall()
 
+    def write(self, name: str, data: bytes) -> None:
+        self._client.upload_blob(name, data, overwrite=True)
+
 
 class DirArchive:
     """A local copy of the `lake` container (tests, and `ARCHIVE_DIR` for local runs)."""
@@ -97,12 +106,26 @@ class DirArchive:
     def read(self, name: str) -> bytes:
         return (self.root / name).read_bytes()
 
+    def write(self, name: str, data: bytes) -> None:
+        path = self.root / name
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(data)
+
 
 @dataclass
 class Trip:
     session_id: str
     batches: list[BatchFacts]  # unique batch_seq, ascending
     meta: list[dict]  # session.json copies: Start first, then Stop
+    origin: str = "archive"  # the live raw archive, or "upload"
+    source: str | None = None  # sessions.source for a trip the database doesn't know yet
+    streams: dict[str, dict] = field(default_factory=dict)  # quality.streams beyond motion and location
+    incomplete: bool | None = None  # None: from the batch count (live), else known (upload)
+
+
+def from_upload(t: upload.UploadedTrip) -> Trip:
+    return Trip(t.session_id, t.batches, [t.meta], origin="upload", source="upload", streams=t.streams,
+                incomplete=t.incomplete)
 
 
 def load_trip(archive: Archive, session_id: str) -> Trip:
@@ -157,6 +180,7 @@ def run_pipeline(batches: list[BatchFacts]) -> TripSignal:
             np.asarray(f.motion_g, dtype=float).reshape(-1, 3),
             [(x.t.timestamp() - off, x.speed_ms) for x in f.fixes],
             reset=prev is not None and f.batch_seq != prev + 1,
+            rr=np.asarray(f.motion_rr, dtype=float).reshape(-1, 3),
         )
         for p in res.series:
             p.t += off
@@ -166,6 +190,11 @@ def run_pipeline(batches: list[BatchFacts]) -> TripSignal:
         out.events += res.events
         out.resets += int(res.reset)
         prev = f.batch_seq
+    if batches:  # the trip is over: potholes still held back for a possible speed bump are final
+        off = batches[-1].clock_offset
+        for e in pipe.flush():
+            e.t += off
+            out.events.append(e)
     out.msdv = math.sqrt(pipe.dose)
     out.state = pipe.to_state()
     out.last_batch_seq = prev
@@ -205,9 +234,10 @@ def track_distance(fixes: list[tuple[float, float, float]]) -> np.ndarray:
 
 
 def build_passes(series: list[SeriesPoint], fixes: list[tuple[float, float, float]],
-                 pothole_times: list[float], cell_of=None) -> list[Pass]:
+                 pothole_times: list[float], cell_of=None, invalid: np.ndarray | None = None) -> list[Pass]:
     """Splits the 5 Hz series into passes through H3 cells. A window's position is interpolated
-    between the GPS fixes around it; a window without one ends the current pass."""
+    between the GPS fixes around it; a window without one ends the current pass. `invalid` windows
+    (the phone was handled or had moved in its mount) don't count for roughness."""
     if cell_of is None:
         import h3
 
@@ -238,7 +268,8 @@ def build_passes(series: list[SeriesPoint], fixes: list[tuple[float, float, floa
         if not run:
             return
         pts = [series[k] for k in run]
-        moving = [p for p in pts if p.speed is not None and p.speed >= MOVING_SPEED_MS]
+        moving = [series[k] for k in run if series[k].speed is not None and series[k].speed >= MOVING_SPEED_MS
+                  and not (invalid is not None and invalid[k])]
         known = [p.speed for p in pts if p.speed is not None]
         if len(moving) >= MIN_MOVING_WINDOWS:
             rough = math.sqrt(sum(p.rough_rms ** 2 for p in moving) / len(moving))
@@ -283,11 +314,17 @@ def stream_quality(times: list[float], expected_hz: float | None) -> dict:
             "gapsOver1s": int(np.count_nonzero(gaps > 1.0))}
 
 
+INVALID_DEGRADED_SHARE = 0.10  # PROVISIONAL: more of the trip than this handled / moved / mismatched
+
+
 def assess(trip: Trip, sig: TripSignal, expected_batches: int | None,
-           fixes: list[tuple[float, float, float, float | None]]) -> tuple[str, float | None, dict]:
-    """Returns (quality_status, valid_fraction, quality json). PROVISIONAL rules:
+           fixes: list[tuple[float, float, float, float | None]],
+           invalid: dict[str, np.ndarray] | None = None) -> tuple[str, float | None, dict]:
+    """Returns (quality_status, valid_fraction, quality json). `invalid` holds the per-window masks
+    of quality.py (phone_moved, gravity_drift, gyro_gps_mismatch). PROVISIONAL rules:
     bad = no motion or no GPS, or under half the expected motion samples;
-    degraded = missing batches, filter restarts, under 90 % of the motion samples or mostly poor GPS."""
+    degraded = missing batches, filter restarts, under 90 % of the motion samples, mostly poor GPS,
+    or over 10 % of the trip invalid for one of the reasons above."""
     motion_t = [x for f in trip.batches for x in f.motion_t]
     motion = stream_quality(motion_t, MOTION_HZ)
     location = stream_quality([f[0] for f in fixes], 1.0)
@@ -301,32 +338,39 @@ def assess(trip: Trip, sig: TripSignal, expected_batches: int | None,
     missing = max(0, expected_batches - len({s for s in seqs if s < expected_batches})) \
         if expected_batches is not None else None
 
-    # Seconds of the trip without a usable fix (no fix within the window, or a poor one).
-    poor_s = 0.0
+    # Windows of the trip without a usable fix (no fix within the window, or a poor one).
+    poor = np.zeros(len(sig.series), dtype=bool)
     if sig.series:
         ft = np.asarray([f[0] for f in fixes]) if fixes else np.zeros(0)
         acc = np.asarray([f[3] if f[3] is not None else np.inf for f in fixes]) if fixes else np.zeros(0)
-        for p in sig.series:
+        for i, p in enumerate(sig.series):
             j = int(np.searchsorted(ft, p.t)) if len(ft) else 0
             near = [k for k in (j - 1, j) if 0 <= k < len(ft) and abs(ft[k] - p.t) <= 2.0]
-            if not near or min(acc[k] for k in near) > GPS_GOOD_HACC_M:
-                poor_s += WINDOW_S
+            poor[i] = not near or min(acc[k] for k in near) > GPS_GOOD_HACC_M
+    masks = {k: np.zeros(len(sig.series), dtype=bool) for k in ("phone_moved", "gravity_drift", "gyro_gps_mismatch")}
+    masks.update(invalid or {})
     trip_s = len(sig.series) * WINDOW_S
+    invalid_any = poor.copy()
+    for m in masks.values():
+        invalid_any |= m
     valid = None
     if coverage is not None and trip_s > 0:
-        valid = round(max(0.0, coverage * (1.0 - poor_s / trip_s)), 4)
+        valid = round(max(0.0, coverage * (1.0 - float(invalid_any.sum()) * WINDOW_S / trip_s)), 4)
+    worst_share = max(float(m.sum()) * WINDOW_S / trip_s for m in masks.values()) if trip_s > 0 else 0.0
 
     if not sig.series or not fixes or coverage is None or coverage < 0.5:
         status = "bad"
-    elif (missing or 0) > 0 or sig.resets > 0 or coverage < 0.9 or (good_gps is not None and good_gps < 0.5):
+    elif (missing or 0) > 0 or sig.resets > 0 or coverage < 0.9 or (good_gps is not None and good_gps < 0.5) \
+            or worst_share > INVALID_DEGRADED_SHARE:
         status = "degraded"
     else:
         status = "ok"
     quality = {
-        "streams": {"deviceMotion": motion, "location": location},
+        "streams": {"deviceMotion": motion, **trip.streams, "location": location},
+        "finalizedFrom": trip.origin,
         "validFraction": valid,
-        "invalidSeconds": {"phone_moved": 0, "gravity_drift": 0, "gyro_gps_mismatch": 0,
-                           "gps_poor": round(poor_s, 1)},
+        "invalidSeconds": {**{k: round(float(m.sum()) * WINDOW_S, 1) for k, m in masks.items()},
+                           "gps_poor": round(float(poor.sum()) * WINDOW_S, 1)},
         "missingBatches": missing,
         "filterRestarts": sig.resets,
         "motionCoverage": None if coverage is None else round(coverage, 4),
@@ -334,28 +378,142 @@ def assess(trip: Trip, sig: TripSignal, expected_batches: int | None,
     return status, valid, quality
 
 
+@dataclass
+class TripChecks:
+    masks: dict[str, np.ndarray]  # per series window: phone_moved, gravity_drift, gyro_gps_mismatch
+    taps: list[tuple[float, str]]  # every label as (epoch s, type), ascending
+
+    def handled_at(self, t: float) -> bool:
+        return bool(quality.handled(np.array([t]), self.taps)[0])
+
+
+def trip_checks(trip: Trip, sig: TripSignal, fixes: list) -> TripChecks:
+    """quality.py's whole-trip checks on the trip's samples, on UTC like the series."""
+    t = np.concatenate([np.asarray(f.motion_t, dtype=float) + f.clock_offset for f in trip.batches]) \
+        if trip.batches else np.zeros(0)
+
+    def stack(attr: str) -> np.ndarray:
+        parts = [np.asarray(getattr(f, attr), dtype=float).reshape(-1, 3) for f in trip.batches]
+        return np.vstack(parts) if parts else np.zeros((0, 3))
+
+    motion = quality.Motion(t=t, g=stack("motion_g"), rr=stack("motion_rr"))
+    labels = sorted((lab.t.timestamp(), lab.type) for f in trip.batches for lab in f.labels)
+    mids = quality.window_mids([p.t for p in sig.series], WINDOW_S)
+    masks = {
+        "phone_moved": quality.handled(mids, labels),
+        "gravity_drift": quality.gravity_drift(mids, motion),
+        "gyro_gps_mismatch": quality.gyro_gps_mismatch(
+            mids, motion, [(x.t.timestamp(), x.speed_ms, x.course_deg) for x in fixes]),
+    }
+    return TripChecks(masks=masks, taps=labels)
+
+
+# --- Parquet (plan §5 "Finalize job") ------------------------------------------------------
+
+def _parquet(columns: dict[str, np.ndarray]) -> bytes:
+    import pyarrow as pa
+    import pyarrow.parquet as pq
+
+    buf = io.BytesIO()
+    pq.write_table(pa.table(columns), buf, compression="zstd")
+    return buf.getvalue()
+
+
+def _utc(seconds: np.ndarray) -> np.ndarray:
+    return (np.asarray(seconds, dtype=float) * 1e6).round().astype("datetime64[us]")
+
+
+def write_parquet(archive: Archive, trip: Trip, sig: TripSignal) -> list[str]:
+    """The trip's samples and 5 Hz results under `processed/session=<id>/`, one file each, overwritten
+    on a rerun. Raw values in the phone's units and frame (g, rad/s), UTC times; readable with
+    pandas, or DuckDB over every trip (`read_parquet('processed/*/motion.parquet', hive_partitioning=1)`)."""
+    def cat(attr: str, width: int | None = None) -> np.ndarray:
+        parts = [np.asarray(getattr(f, attr), dtype=float) for f in trip.batches]
+        parts = [x.reshape(-1, width) if width else x.reshape(-1) for x in parts]
+        return np.concatenate(parts) if parts else np.zeros((0, width) if width else 0)
+
+    t_up = cat("motion_t")
+    t_utc = np.concatenate([np.asarray(f.motion_t, dtype=float) + f.clock_offset for f in trip.batches])
+    ua, g, rr = cat("motion_ua", 3), cat("motion_g", 3), cat("motion_rr", 3)
+    motion = {"t_utc": _utc(t_utc), "t_up": t_up}
+    for name, arr in (("ua", ua), ("g", g), ("rr", rr)):
+        for i, axis in enumerate("xyz"):
+            motion[f"{name}_{axis}"] = arr[:, i]
+    fixes = sorted({x.t.timestamp(): x for f in trip.batches for x in f.fixes}.items())
+    location = {
+        "t_utc": _utc(np.array([t for t, _ in fixes])),
+        "lat": np.array([x.lat for _, x in fixes], dtype=float),
+        "lon": np.array([x.lon for _, x in fixes], dtype=float),
+        **{col: np.array([np.nan if getattr(x, attr) is None else getattr(x, attr) for _, x in fixes], dtype=float)
+           for col, attr in (("speed_ms", "speed_ms"), ("course_deg", "course_deg"), ("h_acc_m", "h_acc_m"))},
+    }
+    series = {
+        "t_utc": _utc(np.array([p.t for p in sig.series])),
+        **{col: np.array([np.nan if getattr(p, col) is None else getattr(p, col) for p in sig.series], dtype=float)
+           for col in ("a_vert", "a_lat", "a_lon", "speed", "msdv", "rough_rms", "dose_inc")},
+    }
+    names = []
+    for name, cols in (("motion", motion), ("location", location), ("series", series)):
+        blob = f"processed/session={trip.session_id}/{name}.parquet"
+        archive.write(blob, _parquet(cols))
+        names.append(blob)
+    return names
+
+
 # --- Writing --------------------------------------------------------------------------------
 
-def finalize_session(conn: Connection, archive: Archive, session_id: str) -> dict | None:
-    """Finalizes one trip; returns a short summary, or None if the archive has nothing for it."""
-    trip = load_trip(archive, session_id)
+def pick_trip(archive: Archive, uploads: upload.Uploads | None, session_id: str, *,
+              require_upload: bool = False) -> Trip:
+    """The uploaded folder if there is a complete one, else the live archive. Raises
+    upload.UploadInvalid only when `require_upload` (a message for that upload)."""
+    if uploads is not None and (require_upload or upload.has_upload(uploads, session_id)):
+        try:
+            return from_upload(upload.load(uploads, session_id))
+        except upload.UploadInvalid as e:
+            if require_upload:
+                raise
+            log.warning("upload of %s can't be used (%s); finalizing from the live archive", session_id, e)
+    return load_trip(archive, session_id)
+
+
+def finalize_session(conn: Connection, archive: Archive, session_id: str,
+                     uploads: upload.Uploads | None = None, *, require_upload: bool = False) -> dict | None:
+    """Finalizes one trip; returns a short summary, or None if there's nothing to finalize it from."""
+    trip = pick_trip(archive, uploads, session_id, require_upload=require_upload)
     if not trip.batches:
         return None
     sig = run_pipeline(trip.batches)
-    by_time = {x.t.timestamp(): (x.t.timestamp(), x.lat, x.lon, x.h_acc_m) for f in trip.batches for x in f.fixes}
-    fixes = [by_time[k] for k in sorted(by_time)]
+    by_time = {x.t.timestamp(): x for f in trip.batches for x in f.fixes}
+    fix_objs = [by_time[k] for k in sorted(by_time)]
+    fixes = [(x.t.timestamp(), x.lat, x.lon, x.h_acc_m) for x in fix_objs]
+    checks = trip_checks(trip, sig, fix_objs)
+    events = [e for e in sig.events if not checks.handled_at(e.t)]  # the phone being handled, not the road
+    detection, matched = quality.score_detections([(e.t, e.type) for e in events], checks.taps)
+    # A secondary output: a failed write must not keep the trip from being finalized (5 failures would
+    # dead-letter it). It's logged and recorded in quality.parquetError; the next finalize writes it.
+    try:
+        parquet, parquet_error = write_parquet(archive, trip, sig), None
+    except Exception as e:  # noqa: BLE001
+        log.exception("Parquet output of %s failed; finalizing without it", session_id)
+        parquet, parquet_error = [], f"{type(e).__name__}: {e}"[:500]
     store = Store(conn)
 
     with conn.transaction():
         first = trip.batches[0]
         store._touch_device(first.device_id)
+        # A trip that also streamed keeps its source ('live'); one that only came by upload is 'upload'.
         conn.execute(
             "INSERT INTO sessions (session_id, device_id, source, started_at) VALUES (%s, %s, %s, %s) "
             "ON CONFLICT (session_id) DO NOTHING",
-            (session_id, first.device_id, first.source, first.t0_utc),
+            (session_id, first.device_id, trip.source or first.source, first.t0_utc),
         )
         for m in trip.meta:  # in case a copy never reached the stream processor
             store.apply_session(parse_session(m))
+        if trip.origin == "upload":
+            # The folder has every fix and tap. Its label times come from the CSV, which can differ by a
+            # millisecond from the live batch's, so the live rows go rather than appear twice.
+            for table in ("track_points", "labels"):
+                conn.execute(f"DELETE FROM {table} WHERE session_id = %s", (session_id,))
 
         with conn.cursor() as cur:
             cur.executemany(
@@ -396,18 +554,19 @@ def finalize_session(conn: Connection, archive: Archive, session_id: str) -> dic
             )
             cur.executemany(
                 """
-                INSERT INTO events (session_id, type, t, geom, speed_ms, magnitude, confidence)
+                INSERT INTO events (session_id, type, t, geom, speed_ms, magnitude, confidence, matched_label)
                 VALUES (%s, %s, %s,
                         (SELECT geom FROM track_points WHERE session_id = %s
                          ORDER BY abs(extract(epoch FROM t - %s)) LIMIT 1),
-                        %s, %s, %s)
+                        %s, %s, %s, %s)
                 ON CONFLICT (session_id, type, t) DO NOTHING
                 """,
                 [(session_id, e.type, from_epoch(e.t), session_id, from_epoch(e.t), e.speed, e.magnitude,
-                  e.confidence) for e in sig.events],
+                  e.confidence, m) for e, m in zip(events, matched)],
             )
             passes = build_passes(sig.series, [f[:3] for f in fixes],
-                                  [e.t for e in sig.events if e.type == "pothole"])
+                                  [e.t for e in events if e.type == "pothole"],
+                                  invalid=checks.masks["phone_moved"] | checks.masks["gravity_drift"])
             cur.executemany(
                 """
                 INSERT INTO segment_observations (session_id, pass_idx, h3, t_start, duration_s,
@@ -419,10 +578,16 @@ def finalize_session(conn: Connection, archive: Archive, session_id: str) -> dic
                  for i, p in enumerate(passes)],
             )
 
-        expected = conn.execute("SELECT expected_batch_count FROM sessions WHERE session_id = %s",
-                                (session_id,)).fetchone()[0]
-        status, valid, quality = assess(trip, sig, expected, fixes)
-        missing = quality["missingBatches"]
+        # An upload's batches are rebuilt windows, not the phone's numbering: no batch count applies.
+        expected = None if trip.origin == "upload" else conn.execute(
+            "SELECT expected_batch_count FROM sessions WHERE session_id = %s", (session_id,)).fetchone()[0]
+        status, valid, q = assess(trip, sig, expected, fixes, checks.masks)
+        q["detection"] = detection
+        q["parquet"] = parquet
+        if parquet_error:
+            q["parquetError"] = parquet_error
+        missing = q["missingBatches"]
+        incomplete = trip.incomplete if trip.incomplete is not None else expected is None or (missing or 0) > 0
         last_t = sig.series[-1].t if sig.series else trip.batches[-1].end_utc.timestamp()
         conn.execute(
             """
@@ -431,14 +596,14 @@ def finalize_session(conn: Connection, archive: Archive, session_id: str) -> dic
               ended_at = COALESCE(ended_at, %s), updated_at = now()
             WHERE session_id = %s
             """,
-            (expected is None or (missing or 0) > 0, sig.msdv, status, valid, Jsonb(quality),
+            (incomplete, sig.msdv, status, valid, Jsonb(q),
              float(track_distance([f[:3] for f in fixes])[-1]) if fixes else 0.0, from_epoch(last_t),
              session_id),
         )
         store._refresh_exclusions(session_id)
 
-    summary = {"batches": len(trip.batches), "series": len(sig.series), "events": len(sig.events),
-               "passes": len(passes), "msdv": round(sig.msdv, 4), "quality": status}
+    summary = {"batches": len(trip.batches), "series": len(sig.series), "events": len(events),
+               "passes": len(passes), "msdv": round(sig.msdv, 4), "quality": status, "from": trip.origin}
     log.info("finalized %s %s", session_id, " ".join(f"{k}={v}" for k, v in summary.items()))
     return summary
 
@@ -472,17 +637,26 @@ def park(conn: Connection, session_id: str) -> None:
                      (session_id,))
 
 
-def handle(conn: Connection, archive: Archive, body: bytes) -> tuple[str, str]:
+def handle(conn: Connection, archive: Archive, body: bytes,
+           uploads: upload.Uploads | None = None) -> tuple[str, str]:
     """Returns ("complete" | "dead_letter", reason). Raises on a failure worth retrying."""
     kind, sid = parse_message(body)
     if kind == "invalid":
         return "dead_letter", "unreadable message"
     if kind == "upload":
-        return "dead_letter", f"upload finalize not built yet (session {sid})"
-    summary = finalize_session(conn, archive, sid)
-    if summary is None:
-        park(conn, sid)
-        return "dead_letter", f"no raw archive for session {sid}"
+        if uploads is None:
+            return "dead_letter", f"no sessions container configured (upload of {sid})"
+        try:
+            summary = finalize_session(conn, archive, sid, uploads, require_upload=True)
+        except upload.UploadInvalid as e:
+            return "dead_letter", f"upload of {sid} can't be used: {e}"
+        if summary is None:
+            return "dead_letter", f"upload of {sid} has no samples"
+    else:
+        summary = finalize_session(conn, archive, sid, uploads)
+        if summary is None:
+            park(conn, sid)
+            return "dead_letter", f"no raw archive for session {sid}"
     aggregate.rebuild(conn)
     return "complete", sid
 
@@ -495,6 +669,8 @@ def run() -> None:
 
     archive: Archive = DirArchive(os.environ["ARCHIVE_DIR"]) if os.environ.get("ARCHIVE_DIR") else \
         BlobArchive(os.environ["STORAGE_BLOB_ENDPOINT"], os.environ.get("LAKE_CONTAINER", "lake"))
+    uploads: upload.Uploads = upload.DirUploads(os.environ["UPLOAD_DIR"]) if os.environ.get("UPLOAD_DIR") else \
+        upload.BlobUploads(os.environ["STORAGE_BLOB_ENDPOINT"], os.environ.get("SESSIONS_CONTAINER", "sessions"))
     started = time.monotonic()
     failures = 0
     credential = DefaultAzureCredential(exclude_interactive_browser_credential=True)
@@ -512,7 +688,7 @@ def run() -> None:
             renewer.register(receiver, msg)
             body = b"".join(bytes(part) for part in msg.body)
             try:
-                outcome, reason = handle(conn, archive, body)
+                outcome, reason = handle(conn, archive, body, uploads)
             except Exception:  # noqa: BLE001 - back to the queue; dead-lettered after 5 tries
                 log.exception("finalize failed (delivery %d); abandoning the message", msg.delivery_count or 0)
                 failures += 1

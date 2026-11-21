@@ -15,7 +15,19 @@ import re
 import zlib
 
 MAX_BODY = 20 * 1024 * 1024  # compressed (413)
-MAX_INFLATED = 200 * 1024  # decompressed (413), plan §5
+MAX_INFLATED = 200 * 1024  # decompressed (413), plan §5; MAX_BODY_BYTES can lower it
+# Event Hubs Basic takes at most 256 KB per event (body + properties), so MAX_BODY_BYTES can't
+# raise the decompressed limit past this.
+MAX_INFLATED_HARD = 240 * 1024
+
+# String limits (400). The processor keeps IDs and label types in primary keys (a btree row is at
+# most 2704 bytes) and every other string in text/jsonb, which can't hold NUL or a lone surrogate.
+# The app sends UUIDs, label types of at most 15 characters and short free text; nothing it sends
+# comes near these.
+MAX_ID_LEN = 128  # deviceId (also the Event Hubs partition key, at most 128 characters)
+MAX_LABEL_TYPE_LEN = 64
+MAX_TEXT_LEN = 2000  # any other string or object key: notes, vehicle, mount, ...
+_BAD_CHARS = re.compile(r"[\x00\ud800-\udfff]")
 
 # Stricter than the mock, which accepts any non-empty string: the session ID becomes part of a blob
 # path, so it must not contain "/" or "..". The app uses UUIDs.
@@ -34,6 +46,10 @@ COLUMNAR = {
     "audioLevel": ["avgDbfs", "peakDbfs"],
 }
 LOCATION_KEYS = ["lat", "lon", "alt", "hAcc", "speed", "speedAcc", "course"]
+# Additive full-dataset blocks (02 D32): optional, validated when present.
+OPTIONAL_COLUMNAR = {"magRaw": ["x", "y", "z"], "absAltitude": ["altitudeM", "accuracyM", "precisionM"]}
+HEADING_NUM = ["magHeading", "trueHeading", "headingAcc", "x", "y", "z"]
+ACTIVITY_BOOL = ["stationary", "walking", "running", "automotive", "cycling", "unknown"]
 T0_UTC_RE = re.compile(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$")
 
 PROBE_PREFIX = "probe request"
@@ -79,6 +95,32 @@ def is_gzip(raw: bytes) -> bool:
     return raw[:2] == b"\x1f\x8b"
 
 
+def decode_body(raw: bytes, limit: int = MAX_INFLATED) -> tuple[bytes, bool]:
+    """Returns (JSON bytes, was gzip). Decided by the gzip magic bytes, not by Content-Encoding:
+    the Functions host may inflate the body itself and drop the header (plan §5, "works either
+    way"). Raises TooLarge past `limit`, ValueError for broken gzip."""
+    if is_gzip(raw):
+        return gunzip_one_member(raw, limit), True
+    if len(raw) > limit:
+        raise TooLarge(f"decompressed body larger than {limit} bytes")
+    return raw, False
+
+
+def not_gzip_reason(json_error: str) -> str:
+    """The 400 reason for a body that is neither gzip nor JSON."""
+    return f"body is neither gzip (no 1f 8b magic bytes) nor valid JSON ({json_error})"
+
+
+def inflated_limit(setting: str | None) -> int:
+    """The decompressed limit from the MAX_BODY_BYTES app setting: MAX_INFLATED when unset or
+    invalid, never more than MAX_INFLATED_HARD."""
+    try:
+        v = int(setting) if setting not in (None, "") else MAX_INFLATED
+    except ValueError:
+        return MAX_INFLATED
+    return MAX_INFLATED if v <= 0 else min(v, MAX_INFLATED_HARD)
+
+
 def _reject_constant(name):
     raise ValueError(f"non-finite number {name} not allowed")
 
@@ -99,9 +141,39 @@ def parse_json(body: bytes):
         raise ValueError(f"invalid JSON: {e}")
     except ValueError as e:
         raise ValueError(f"invalid JSON: {e}")
+    except RecursionError:
+        raise ValueError("invalid JSON: nested too deeply")
 
 
 # --- Schema -------------------------------------------------------------------------------
+
+def _short(path: str) -> str:
+    return path if len(path) <= 80 else path[:77] + "..."
+
+
+def check_strings(doc, limit: int = MAX_TEXT_LEN) -> None:
+    """Every string and object key in `doc`: at most `limit` characters, no NUL, no lone
+    surrogate. Iterative, so nesting depth doesn't matter. Raises Invalid(reason)."""
+    stack = [("", doc)]
+    while stack:
+        path, v = stack.pop()
+        if isinstance(v, str):
+            if len(v) > limit:
+                raise Invalid(f"{_short(path or 'body')}: string longer than {limit} characters")
+            if _BAD_CHARS.search(v):
+                raise Invalid(f"{_short(path or 'body')}: string contains NUL or an unpaired surrogate")
+        elif isinstance(v, dict):
+            for k, x in v.items():
+                if len(k) > limit or _BAD_CHARS.search(k):
+                    raise Invalid(f"{_short(path or 'body')}: object key longer than {limit} characters "
+                                  "or containing NUL or an unpaired surrogate")
+                if isinstance(x, (str, dict, list)):
+                    stack.append((f"{path}.{k}" if path else k, x))
+        elif isinstance(v, list):
+            for i, x in enumerate(v):
+                if isinstance(x, (str, dict, list)):
+                    stack.append((f"{path}[{i}]", x))
+
 
 def validate_batch(b) -> None:
     """Raises Invalid(reason) if the batch does not match the schemaVersion 1 contract."""
@@ -118,6 +190,8 @@ def validate_batch(b) -> None:
     for k in ("sessionId", "deviceId", "t0Utc"):
         if not isinstance(b[k], str) or not b[k]:
             raise Invalid(f"{k} must be a non-empty string")
+    if len(b["deviceId"]) > MAX_ID_LEN:
+        raise Invalid(f"deviceId must be at most {MAX_ID_LEN} characters")
     if not SESSION_ID_RE.match(b["sessionId"]):
         raise Invalid("sessionId must be 1-128 characters from A-Z a-z 0-9 _ -")
     if not is_int(b["batchSeq"]) or b["batchSeq"] < 0:
@@ -161,6 +235,36 @@ def validate_batch(b) -> None:
             if not all(is_num(v) for v in arr):
                 raise Invalid(f"{block}.{c} contains non-numeric values")
 
+    for block, cols in OPTIONAL_COLUMNAR.items():
+        if block not in b:
+            continue
+        blk = b[block]
+        if not isinstance(blk, dict) or not isinstance(blk.get("t"), list):
+            raise Invalid(f"{block} must be an object with a t array")
+        n = len(blk["t"])
+        for c in ["t"] + cols:
+            if c not in blk:
+                raise Invalid(f"{block}.{c} missing")
+        for c, arr in blk.items():
+            if not isinstance(arr, list) or len(arr) != n or not all(is_num(v) for v in arr):
+                raise Invalid(f"{block}.{c} must be a numeric array of length {n}")
+    if "heading" in b:
+        if not isinstance(b["heading"], list):
+            raise Invalid("heading must be an array")
+        for i, h in enumerate(b["heading"]):
+            if not isinstance(h, dict) or not is_int(h.get("tUtcMs")) \
+                    or not all(is_num(h.get(k)) for k in HEADING_NUM):
+                raise Invalid(f"heading[{i}] needs int tUtcMs and numeric {', '.join(HEADING_NUM)}")
+    if "activity" in b:
+        if not isinstance(b["activity"], list):
+            raise Invalid("activity must be an array")
+        for i, a in enumerate(b["activity"]):
+            if (not isinstance(a, dict) or not is_num(a.get("t")) or not is_int(a.get("startUtcMs"))
+                    or not all(isinstance(a.get(k), bool) for k in ACTIVITY_BOOL)
+                    or not is_int(a.get("confidence")) or a["confidence"] not in (0, 1, 2)):
+                raise Invalid(f"activity[{i}] needs numeric t, int startUtcMs, booleans "
+                              f"{', '.join(ACTIVITY_BOOL)}, confidence 0|1|2")
+
     if not isinstance(b["location"], list):
         raise Invalid("location must be an array")
     for i, loc in enumerate(b["location"]):
@@ -188,6 +292,8 @@ def validate_batch(b) -> None:
                 raise Invalid(f"labels[{i}].{k} missing (use explicit null)")
         if not is_num(lab["t"]) or not isinstance(lab["type"], str):
             raise Invalid(f"labels[{i}]: t must be a number and type a string")
+        if len(lab["type"]) > MAX_LABEL_TYPE_LEN:
+            raise Invalid(f"labels[{i}].type must be at most {MAX_LABEL_TYPE_LEN} characters")
         for k in ("value", "note"):
             if lab[k] is not None and not isinstance(lab[k], str):
                 raise Invalid(f"labels[{i}].{k} must be a string or null")
@@ -198,6 +304,7 @@ def validate_batch(b) -> None:
     if not is_num(d.get("battery")) or not isinstance(d.get("thermal"), str) \
             or not isinstance(d.get("lowPower"), bool):
         raise Invalid("device must have battery (number), thermal (string), lowPower (bool)")
+    check_strings(b)
 
 
 def validate_session_meta(m, path_id: str) -> str:
@@ -209,6 +316,11 @@ def validate_session_meta(m, path_id: str) -> str:
         raise Invalid("sessionId must be a non-empty string")
     if m["sessionId"] != path_id:
         raise Invalid(f"body sessionId {m['sessionId']!r} != path sessionId {path_id!r}")
+    # Required since the device key is bound to it; every app build that sends metadata sets it.
+    if not isinstance(m.get("deviceId"), str) or not m["deviceId"]:
+        raise Invalid("deviceId must be a non-empty string")
+    if len(m["deviceId"]) > MAX_ID_LEN:
+        raise Invalid(f"deviceId must be at most {MAX_ID_LEN} characters")
     if not isinstance(m.get("startedAtUtc"), str) or not m["startedAtUtc"]:
         raise Invalid("startedAtUtc must be a non-empty string")
     if not is_num(m.get("startUptimeSec")):
@@ -224,10 +336,10 @@ def validate_session_meta(m, path_id: str) -> str:
             raise Invalid(f"{k} must be an object")
     if "audioEnabled" in m and not isinstance(m["audioEnabled"], bool):
         raise Invalid("audioEnabled must be true/false when present")
-    if "batchCount" not in m:
-        return "start"
-    if not is_int(m["batchCount"]) or m["batchCount"] < 0:
-        raise Invalid(f"batchCount must be a non-negative integer, got {m['batchCount']!r}")
-    if m["endedAtUtc"] is None and m["recovered"] is not True:
-        raise Invalid("Stop copy (batchCount present) needs endedAtUtc set or recovered true")
-    return "stop"
+    if "batchCount" in m:
+        if not is_int(m["batchCount"]) or m["batchCount"] < 0:
+            raise Invalid(f"batchCount must be a non-negative integer, got {m['batchCount']!r}")
+        if m["endedAtUtc"] is None and m["recovered"] is not True:
+            raise Invalid("Stop copy (batchCount present) needs endedAtUtc set or recovered true")
+    check_strings(m)
+    return "stop" if "batchCount" in m else "start"

@@ -6,6 +6,13 @@ export const DEFAULT_GC_TIME_MS = 15 * SECONDS_PER_MINUTE * MS_PER_SECOND;
 /** The live view polls the read API every 2–5 s (plan 02 §5). */
 export const LIVE_POLL_INTERVAL_MS = 2 * MS_PER_SECOND;
 export const LIVE_SESSION_POLL_INTERVAL_MS = 5 * MS_PER_SECOND;
+/** A "live" trip silent for this long is about to be closed by the processor (plan §5: 15 min); check it slowly. */
+export const SILENT_LIVE_SESSION_AFTER_MS = 20 * SECONDS_PER_MINUTE * MS_PER_SECOND;
+export const SILENT_LIVE_SESSION_POLL_INTERVAL_MS = 60 * MS_PER_SECOND;
+/** A trip being processed changes once, when the finalize job is done; check it every half minute… */
+export const PROCESSING_SESSION_POLL_INTERVAL_MS = 30 * MS_PER_SECOND;
+/** …but only for a while: a trip still processing hours after it ended won't finish while the page is open. */
+export const PROCESSING_SESSION_POLL_FOR_MS = 2 * 60 * SECONDS_PER_MINUTE * MS_PER_SECOND;
 /** Aggregates change whenever a trip is finalized; refresh them while the page is open. */
 export const AGGREGATE_REFRESH_INTERVAL_MS = 60 * MS_PER_SECOND;
 export const API_TIMEOUT_MS = 15 * MS_PER_SECOND;

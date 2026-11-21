@@ -44,11 +44,11 @@ Sessions → **New session** → setup (pre-filled with your last values, plus a
 | `altimeter.csv`, `abs_altitude.csv` | CMAltimeter relative (kPa, m) and absolute altitude |
 | `activity.csv` | CMMotionActivity (+ `start_utc_ms`) |
 | `audio_000.m4a`, `audio_001.m4a`, … | AAC 48 kHz mono 64 kbps, in 5-minute segments |
-| `audio_segments.csv` | `t_up,t_utc_ms,event,file`: start/stop/interrupted per segment |
+| `audio_segments.csv` | `t_up,t_utc_ms,event,file`: start/stop/interrupted/reset per segment; `blocked_background` (empty `file`) when iOS refuses to restart the mic while the app is in the background — the gap lasts until the next `start` |
 | `audio_level.csv` | RMS and peak dBFS at 10 Hz |
 | `device.csv` | battery, thermal, Low Power Mode, free disk, network, every 5 s |
 | `labels.csv` | `t_up,t_utc_ms,type,value,note` (all human labels and sickness ratings) |
-| `app_log.txt` | warnings, problems, permission state, interruptions, upload rejections |
+| `app_log.txt` | warnings, problems, permission state, interruptions, upload rejections (also those after Stop: the file can grow past the size in `session.json` stats) |
 | `mount.jpg` | mount photo |
 
 Every sensor CSV starts with `t_up` (seconds since boot, the CoreMotion clock, 6 decimals) and
@@ -70,6 +70,10 @@ Label `type` values: `pothole`, `speed_bump`, `phone_moved`, `surface_start/surf
   drive's audio. Segments overlap at rotation (no gap), and each start time is logged, so
   segment *n* starts at the *n*-th `audio_start` row in `clock.csv`. After an interruption
   (phone call, Siri) a *new* segment starts, so every file maps linearly onto `t_up`.
+  If that interruption happens while the screen is locked, iOS may refuse to start the mic again
+  until the app is opened (`cannotStartRecording`): the app writes a `blocked_background` row and a
+  PROBLEM line, retries every 60 s, and restarts at once when the app comes to the foreground.
+  **After a call during a drive, unlock the phone and open the app.**
 - **Audio session `.playAndRecord` + mode `.measurement` + `.mixWithOthers`** (spec: `.record`).
   - Measurement mode still disables AGC and voice processing.
   - playAndRecord plus `allowHapticsAndSystemSoundsDuringRecording` is needed so the prompt and
@@ -80,14 +84,17 @@ Label `type` values: `pothole`, `speed_bump`, `phone_moved`, `surface_start/surf
   written. `audio_level.csv` (S1) still comes from a live level meter (`AVAudioEngine` tap, numbers
   only). A stalled meter is a PROBLEM on the dashboard.
 - **Extra files/columns:** `audio_segments.csv`, `abs_altitude.csv` (B2), `activity.csv … start_utc_ms`.
-- **One poison batch can't block the queue:** after 5 server errors (5xx/408/429) for the same
-  batch, it moves to the back of the queue. Network errors don't count, and nothing is deleted.
-  Upload batches are queued only while an API URL is set (spec §6: empty URL = upload disabled), so
+- **Nothing can stall or re-order the queue:** 5xx/408/429/network errors retry the same file in
+  place (the backend's 503 means an outage, never a bad payload), so the Stop copy always follows
+  the last batch. A file the queue can't send at all (a Files-app copy with a changed name, an
+  unreadable file) is moved to `upload_failed/`; a sent file that can't be deleted is not re-sent.
+  After Stop the app asks iOS for background time until the queue is empty. Upload batches are queued only while an API URL is set (spec §6: empty URL = upload disabled), so
   set the URL before the drive: live upload is the main path to the cloud (02 D32), and laptop
   upload of the session folder is the fallback. The session folder stays the local source of truth.
 - **401/403 are retried with backoff** instead of moved to `upload_failed/`; otherwise a mistyped
   key would dump the whole queue. 408/429/5xx/network errors are retried; other 4xx go to
-  `upload_failed/` (Settings → *Move failed batches back to queue*).
+  `upload_failed/` (Settings → *Move failed batches back to queue*). A pasted API URL ending in
+  `/api/ingest` is reduced to its base (the app appends that path itself).
 - **The upload test is a probe POST**, because the backend has no `/api/health` route.
   - The app sends `{"probe":true}` (gzipped, with the device key and `x-probe: 1`) to `/api/ingest`.
   - The ingest function checks the key first, then the schema. 400/422 therefore means
@@ -129,13 +136,16 @@ Backend: please don't use pydantic `extra="forbid"` or a fixed `units` literal.
   to `<createdMs>_<sessionId>_<seq>.json.gz` for batches.
 - The idempotency key is `<sessionId>:meta-start|stop`.
 - `batchSeq` is assigned only to batches actually queued, so `batchCount` tells the backend exactly
-  which `0…batchCount-1` to expect. Windows recorded while upload was OFF don't consume a number.
+  which `0…batchCount-1` to expect. Windows recorded while upload was OFF don't consume a number;
+  a batch whose enqueue failed (full disk) gets its number only when a later tick queues it.
+- File names use a strictly increasing `createdMs`, so a wall-clock step can't re-order them.
 - Batches are about 30–50 KB of JSON; a warning is logged above 180 KB (the function's limit is 200 KB).
 
 One request at a time, oldest first, with backoff 1 → 30 s; 2xx/409 means done.
-- **404 / 401 / 403** are retried; they mean a config error.
+- **404 / 401 / 403** are retried; they mean a config error. Session metadata 404/405 (no PUT route
+  yet) is retried about 2 minutes, then set aside in `upload_failed/` so the batches can go.
 - **Redirects** are refused.
-- **A batch that keeps failing on the server** moves to the back of the queue.
+- **5xx / 408 / 429** are retried in place, never re-ordered or set aside.
 
 The API URL and key are entered in **Settings** at runtime (key in the Keychain); nothing secret is
 in the repo.

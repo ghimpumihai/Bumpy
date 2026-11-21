@@ -1,6 +1,6 @@
 # Infrastructure (Terraform)
 
-- Run Terraform only through `infra/tf.ps1` (it loads the gitignored `infra/.env`). Its commands are `bootstrap|init|plan|apply|output|destroy`; `init`, `plan` and `output` are safe. `bootstrap`, `apply` and `destroy` change Azure: never without the user's OK.
+- Run Terraform only through `infra/tf.ps1` (it loads the gitignored `infra/.env`). Its commands are `bootstrap|init|plan|apply|output|destroy|fix-ingest-storage`; `init`, `plan` and `output` are safe. `bootstrap`, `apply`, `destroy` and `fix-ingest-storage` (deletes the provider-written `AzureWebJobsStorage` setting, `infra/README.md`) change Azure: never without the user's OK. The same goes for the `terraform-apply` workflow.
 - azurerm is pinned `~> 4.40`; v3 examples use removed attributes, so check current docs (context7) before writing resources.
 - Role assignments granted to a module's own identities stay in that module (e.g. Event Grid → queue in storage); the other cross-module roles go in `main/rbac.tf`.
 - Role assignments take time to propagate: anything that uses a new one right away waits on a `time_sleep` (60 s), like the existing ones.

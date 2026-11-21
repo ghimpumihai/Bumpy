@@ -18,7 +18,7 @@ trip after a change to the signal processing (e.g. tuning the pothole threshold)
 
 Python 3 standard library only.
 
-    $env:REPLAY_DEVICE_KEY = "<key from add-device-key.ps1>"
+    $env:REPLAY_DEVICE_KEY = "<key from add-device-key.ps1 -DeviceId replay>"
     python tools/replay/replay.py <session folder or .zip> --url https://<func>.azurewebsites.net
     python tools/replay/replay.py <folder> --url ... --speed 4 --from 600 --duration 300
     python tools/replay/replay.py <folder> --dry-run out/      # write the batches, send nothing
@@ -404,8 +404,11 @@ class Sender:
                 status, text = 0, str(getattr(e, "reason", e))
             if 200 <= status < 300 or status == 409:
                 return
-            if status in (401, 403):
-                raise ReplayError(f"{status}: device key rejected ({text.strip()[:200]})")
+            if status == 401:
+                raise ReplayError(f"401: device key rejected ({text.strip()[:200]})")
+            if status == 403:  # a valid key that may not send as this deviceId
+                raise ReplayError(f"403: {text.strip()[:300]} - use the replay key "
+                                  "(add-device-key.ps1 -DeviceId replay) or --device-id replay-<this key's device ID>")
             if status == 404:
                 raise ReplayError(f"404 for {self.base_url + path}: wrong --url?")
             if status not in (0, 429) and status < 500:

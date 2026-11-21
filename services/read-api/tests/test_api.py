@@ -280,7 +280,8 @@ def test_finalized_trip_reaches_the_map(client, seed, dbname, fixture_batch, tmp
     s = _ok(client, f"/api/sessions/{SID}")
     assert (s["status"], s["includeInAgg"], s["exclusionReasons"]) == ("complete", True, [])
     assert 0 < s["validFraction"] <= 1 and ISO.match(s["processedAt"])
-    assert s["quality"]["streams"]["deviceMotion"]["expectedHz"] == 100.0
+    # The finalize job's streams, under the dashboard's names (src/views/quality: device_motion).
+    assert s["quality"]["streams"]["device_motion"]["expectedHz"] == 100.0
 
     fc = _ok(client, "/api/segments", vehicle="all")
     assert fc["type"] == "FeatureCollection" and len(fc["features"]) > 5
@@ -319,3 +320,132 @@ def test_cors_only_for_configured_origin(dbname, monkeypatch):
         assert ok.headers.get("access-control-allow-origin") == "https://dash.example"
         other = c.get("/api/overview", headers={"Origin": "https://evil.example"})
         assert "access-control-allow-origin" not in other.headers
+
+
+# --- Errors carry CORS headers too --------------------------------------------------------
+
+@pytest.fixture
+def cors_client(dbname, monkeypatch):
+    from fastapi.testclient import TestClient
+
+    from app.db import make_pool
+    from app.main import create_app
+
+    monkeypatch.setenv("CORS_ALLOWED_ORIGINS", "https://dash.example")
+    with TestClient(create_app(make_pool(dbname))) as c:
+        yield c
+
+
+ORIGIN = {"Origin": "https://dash.example"}
+
+
+def test_500_is_json_with_cors_and_logged(cors_client, monkeypatch, caplog):
+    # Without CORS headers on a 500, the browser reports a network error ("API unreachable").
+    import app.queries as q
+
+    def boom(conn):
+        raise RuntimeError("kaboom")
+
+    monkeypatch.setattr(q, "overview", boom)
+    r = cors_client.get("/api/overview", headers=ORIGIN)
+    assert r.status_code == 500 and r.json() == {"error": "internal error"}
+    assert r.headers.get("access-control-allow-origin") == "https://dash.example"
+    assert any("unhandled error on /api/overview" in rec.getMessage() and rec.exc_info
+               for rec in caplog.records)
+
+
+@pytest.mark.parametrize("path,status", [
+    ("/api/sessions/nope", 404), ("/api/nothing-here", 404), ("/api/sessions?source=satellite", 400),
+])
+def test_4xx_carry_cors(cors_client, path, status):
+    r = cors_client.get(path, headers=ORIGIN)
+    assert r.status_code == status and set(r.json()) == {"error"}
+    assert r.headers.get("access-control-allow-origin") == "https://dash.example"
+
+
+def test_slow_query_is_cancelled_with_503(dbname, monkeypatch):
+    from fastapi.testclient import TestClient
+
+    import app.queries as q
+    from app.db import make_pool
+    from app.main import create_app
+
+    monkeypatch.setenv("READ_API_STATEMENT_TIMEOUT_MS", "200")
+    monkeypatch.setenv("CORS_ALLOWED_ORIGINS", "https://dash.example")
+    monkeypatch.setattr(q, "overview", lambda conn: conn.execute("SELECT pg_sleep(5)").fetchone())
+    with TestClient(create_app(make_pool(dbname))) as c:
+        r = c.get("/api/overview", headers=ORIGIN)
+        assert r.status_code == 503 and set(r.json()) == {"error"}
+        assert r.headers.get("access-control-allow-origin") == "https://dash.example"
+
+
+# --- Data quality per stream, from the live batches -----------------------------------------
+
+def test_stream_quality_from_live_batches(client, seed, fixture_batch):
+    batches = _trip(fixture_batch, 20)
+    del batches[10]  # one batch lost: a 2 s hole in every stream
+    seed(meta=[session_meta(SID)], batches=batches)
+
+    streams = _ok(client, f"/api/sessions/{SID}")["quality"]["streams"]
+    assert set(streams) == {"device_motion", "accel_raw", "gyro_raw", "altimeter", "audio_level", "location"}
+    for s in streams.values():
+        assert set(s) == {"rows", "rateHz", "expectedHz", "maxGapS", "gapsOver1s"}
+    dm = streams["device_motion"]
+    # The fixture batch has 5 motion samples (0…0.04 s) and its newest sample is the fix at 0.5 s.
+    assert dm["rows"] == 19 * 5 and dm["expectedHz"] == 100.0
+    assert dm["rateHz"] == pytest.approx(95 / (38.5 + 0.01), abs=0.01)
+    assert dm["maxGapS"] == pytest.approx(3.5) and dm["gapsOver1s"] == 18
+    assert streams["location"]["rows"] == 19 and streams["location"]["expectedHz"] == 1.0
+
+    (row,) = _ok(client, "/api/quality")["sessions"]
+    assert row["quality"]["streams"] == streams
+
+
+def test_lists_keep_each_session_apart(client, seed, fixture_batch):
+    """The list routes compute every session in one pass; each still gets its own numbers."""
+    other = "99999999-2222-4333-8444-555555555555"
+    seed(meta=[session_meta(SID)], batches=_trip(fixture_batch, 20))
+    seed(meta=[session_meta(other, device_id="PHONE-2", vehicle="tram")],
+         batches=_trip(fixture_batch, 6, sid=other, device="PHONE-2"))
+
+    by_id = {s["sessionId"]: s for s in _ok(client, "/api/sessions")["sessions"]}
+    assert 1000 < by_id[SID]["distanceM"] < 1100 and 250 < by_id[other]["distanceM"] < 300
+    quality = {s["sessionId"]: s["quality"] for s in _ok(client, "/api/quality")["sessions"]}
+    assert quality[SID]["gps"]["fixes"] == 20 and quality[other]["gps"]["fixes"] == 6
+    assert quality[other]["streams"]["device_motion"]["rows"] == 30
+    assert quality[SID]["gps"]["medianHAccM"] == 4.7
+    assert {d["sessionId"] for d in _ok(client, "/api/live")["devices"]} == {SID, other}
+
+
+def test_cached_numbers_follow_new_batches(client, seed, fixture_batch):
+    """Whole-track numbers are cached per trip version (sessions.updated_at), never served stale."""
+    batches = _trip(fixture_batch, 20)
+    seed(meta=[session_meta(SID)], batches=batches[:10])
+    (first,) = _ok(client, "/api/sessions")["sessions"]
+    assert _ok(client, "/api/sessions")["sessions"] == [first]  # served from the cache
+    q1 = _ok(client, "/api/quality")["sessions"][0]["quality"]
+
+    seed(batches=batches[10:])
+    (second,) = _ok(client, "/api/sessions")["sessions"]
+    assert second["distanceM"] > first["distanceM"] + 500
+    q2 = _ok(client, "/api/quality")["sessions"][0]["quality"]
+    assert (q1["gps"]["fixes"], q2["gps"]["fixes"]) == (10, 20)
+    assert q2["streams"]["device_motion"]["rows"] == 2 * q1["streams"]["device_motion"]["rows"]
+
+
+def test_detection_scores_come_from_the_finalize_job(client, seed, dbname, fixture_batch):
+    import psycopg
+    from psycopg.types.json import Jsonb
+
+    seed(meta=[session_meta(SID)], batches=_trip(fixture_batch, 3))
+    assert _ok(client, f"/api/sessions/{SID}")["detection"] is None  # not finalized yet
+
+    score = {"truePositives": 3, "falsePositives": 1, "falseNegatives": 2, "precision": 0.75, "recall": 0.6}
+    none = {"truePositives": 0, "falsePositives": 0, "falseNegatives": 0, "precision": None, "recall": None}
+    with psycopg.connect(dbname=dbname) as conn:
+        conn.execute("UPDATE sessions SET quality = %s", (Jsonb({"detection": {"pothole": score, "speed_bump": none}}),))
+    assert _ok(client, f"/api/sessions/{SID}")["detection"] == {"pothole": score, "speed_bump": none}
+
+    with psycopg.connect(dbname=dbname) as conn:  # an older or broken shape is not passed on
+        conn.execute("UPDATE sessions SET quality = %s", (Jsonb({"detection": {"pothole": score}}),))
+    assert _ok(client, f"/api/sessions/{SID}")["detection"] is None

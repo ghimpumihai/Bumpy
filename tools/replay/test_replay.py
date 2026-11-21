@@ -174,8 +174,11 @@ def test_zip_export_is_accepted(session, tmp_path):
 # --- End to end over HTTP, through the real ingest handler ---------------------------------
 
 class _Keys:
-    def check(self, presented):
-        return presented == "test-key"
+    """Like the Key Vault secret {"replay": hash, "PHONE-1": hash, "PHONE-2": hash}."""
+    BOUND = {"test-key": {"replay"}, "phone-1-key": {"PHONE-1"}, "phone-2-key": {"PHONE-2"}}
+
+    def identify(self, presented):
+        return self.BOUND.get(presented)
 
 
 class _Sinks:
@@ -190,7 +193,7 @@ class _Sinks:
         self.events.append((properties, json.loads(body)))
 
     def archive(self, blob_name, gz_body):
-        pass
+        return True
 
 
 @pytest.fixture
@@ -306,6 +309,25 @@ def test_wrong_key_stops_at_once(session, ingest_server):
     plan = replay.make_plan(session)
     sender = replay.Sender(url, "nope", log=lambda _: None, sleep=lambda _: None)
     with pytest.raises(replay.ReplayError, match="401"):
+        replay.run(session, plan, sender=sender, dry_run=None, speed=0, send_stop=True,
+                   log=lambda _: None)
+    assert sinks.events == []
+
+
+def test_a_phone_key_replays_its_own_trip(session, ingest_server):
+    url, sinks = ingest_server
+    plan = replay.make_plan(session)  # deviceId replay-PHONE-1
+    sender = replay.Sender(url, "phone-1-key", log=lambda _: None, sleep=lambda _: None)
+    n = replay.run(session, plan, sender=sender, dry_run=None, speed=0, send_stop=True,
+                   log=lambda _: None)
+    assert len(sinks.events) == n + 2
+
+
+def test_another_phones_key_is_refused(session, ingest_server):
+    url, sinks = ingest_server
+    plan = replay.make_plan(session)
+    sender = replay.Sender(url, "phone-2-key", log=lambda _: None, sleep=lambda _: None)
+    with pytest.raises(replay.ReplayError, match="403"):
         replay.run(session, plan, sender=sender, dry_run=None, speed=0, send_stop=True,
                    log=lambda _: None)
     assert sinks.events == []

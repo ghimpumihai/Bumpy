@@ -28,3 +28,4 @@ test-results/
 playwright-report/
 blob-report/
 dist-api
+dist-real-api

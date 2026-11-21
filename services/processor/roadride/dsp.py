@@ -1,5 +1,5 @@
 """Signal processing for one trip (plan §9 steps 2, 4, 5, 6): vertical acceleration, road roughness,
-potholes and the ISO 2631-1 motion-sickness dose.
+potholes, speed bumps and the ISO 2631-1 motion-sickness dose.
 
 One pure pipeline, fed in pieces. The stream processor feeds it one 2-second batch at a time and saves
 `to_state()` in the database with the rows it wrote; the finalize job can feed a whole trip at once.
@@ -7,9 +7,10 @@ Both must give the same numbers, so every piece of memory (filter states, the re
 windows, the dose, the forward-axis estimate, an open pothole) lives in the JSON-serializable state,
 and tests feed the same signal whole and in random chunks.
 
-Inputs are the app's deviceMotion samples: user acceleration and gravity in g, in the phone's frame,
-at a nominal 100 Hz with jitter. They are resampled onto a uniform 100 Hz grid (IIR filters assume a
-fixed rate); a time gap or a missing batch resets the filters and starts a new grid.
+Inputs are the app's deviceMotion samples: user acceleration and gravity in g and the rotation rate
+in rad/s, in the phone's frame, at a nominal 100 Hz with jitter. They are resampled onto a uniform
+100 Hz grid (IIR filters assume a fixed rate); a time gap (between two batches or inside one) or a
+missing batch resets the filters and starts a new grid, so nothing is interpolated across a hole.
 
 ISO 2631-1 Wf (motion sickness): H = Hh·Hl·Ht·Hs with f1=0.08, f2=0.63, f3=∞, f4=0.25, Q4=0.86,
 f5=0.0625, Q5=0.80, f6=0.1, Q6=0.80 Hz (parameters and transfer functions as reproduced in the Chalmers
@@ -17,7 +18,15 @@ thesis odr.chalmers.se/bitstreams/7acd3e0a-09bd-4914-a01e-cfe3832b3ab3; MSDV = (
 arXiv:2501.17664 eq. 3). Its poles sit far below 100 Hz, so the signal is low-passed and decimated to
 20 Hz before Wf is applied.
 
-Thresholds for potholes and the forward-axis estimate are PROVISIONAL: they haven't seen a real drive.
+Speed bumps (plan §9 step 5): a double peak in the vehicle's pitch rate, nose up as the front axle
+climbs, then nose down as the rear axle climbs, one wheelbase apart (2–7 m, car to bus or tram) at the
+GPS speed. Pitch is the rotation about the lateral axis, so it needs the learned forward axis: until
+that is known, no speed bump is detected. A speed bump also shakes the vertical channel, so potholes
+are held back for POTHOLE_HOLD_S and dropped if a speed bump turns out to cover them; `flush()` releases
+the ones still held at the end of a trip.
+
+Thresholds for potholes, speed bumps and the forward-axis estimate are PROVISIONAL: they haven't seen
+a real drive.
 """
 
 from __future__ import annotations
@@ -45,6 +54,18 @@ POTHOLE_THRESHOLD_MS2 = 5.0  # PROVISIONAL: |band-passed vertical| above this st
 POTHOLE_MIN_SPEED_MS = 15 / 3.6  # plan §9 step 5: only above 15 km/h
 POTHOLE_PEAK_WINDOW_S = 0.3  # the event's peak is searched this long after the crossing
 POTHOLE_REFRACTORY_S = 1.0  # one pothole per second at most
+
+BUMP_BAND_HZ = (0.5, 5.0)  # body pitch from an axle hitting a bump; drops gyro noise and slow hill pitch
+BUMP_PITCH_RATE = 0.15  # PROVISIONAL: rad/s of nose-up / nose-down pitch rate that starts a peak
+BUMP_MIN_SPEED_MS = 1.5  # slower than this the wheelbase spacing is too long to tell apart
+BUMP_MAX_SPEED_MS = 40 / 3.6  # nobody takes a speed bump faster (the dashboard's mock uses the same)
+BUMP_WHEELBASE_M = (2.0, 7.0)  # front to rear axle: small car to bus / tram
+BUMP_PEAK_MAX_S = 0.5  # a longer stretch of pitch rate (a hill crest, a slow turn) isn't an axle
+BUMP_REFRACTORY_S = 2.0
+BUMP_SPAN_PAD_S = 0.5  # potholes this close around a speed bump's two peaks belong to it
+# A pothole is reported once no speed bump can cover it any more: at 15 km/h (the pothole minimum) the
+# rear axle follows ≤ 7 m / 4.2 m/s ≈ 1.7 s later, plus the pad and the end of that peak.
+POTHOLE_HOLD_S = 2.5
 
 FIX_MAX_HOLD_S = 3.0  # use the last GPS speed for at most this long
 FWD_MIN_DVDT = 0.5  # m/s², only clear speed changes say where "forward" is
@@ -93,6 +114,7 @@ def _wf_sos(fs: float) -> np.ndarray:
 SOS_BAND = signal.butter(4, ROUGH_BAND_HZ, btype="bandpass", fs=FS, output="sos")
 SOS_LOW = signal.butter(4, 2.0, btype="lowpass", fs=FS, output="sos")  # anti-alias before 10 Hz
 SOS_WF = _wf_sos(FS_WF)
+SOS_PITCH = signal.butter(2, BUMP_BAND_HZ, btype="bandpass", fs=FS, output="sos")
 
 
 def wf_digital_gain(freqs_hz: np.ndarray) -> np.ndarray:
@@ -154,6 +176,10 @@ class Pipeline:
         # Fixes newer than the last processed sample wait here, so they're taken at their own time
         # whatever the batch boundaries are.
         self.pending_fixes = [tuple(f) for f in s.get("pending_fixes", [])]
+        self.held = [list(h) for h in s.get("held", [])]  # potholes [t, peak, speed] waiting for POTHOLE_HOLD_S
+        self.last_bump_t = s.get("last_bump_t")
+        if self.grid is not None:
+            self._upgrade_grid(self.grid)
 
     def to_state(self) -> dict:
         return {
@@ -162,7 +188,29 @@ class Pipeline:
             "last_event_t": self.last_event_t, "open_event": self.open_event,
             "rough_ema": self.rough_ema, "grid": self.grid,
             "pending_fixes": [list(f) for f in self.pending_fixes],
+            "held": self.held, "last_bump_t": self.last_bump_t,
         }
+
+    @staticmethod
+    def _upgrade_grid(gr: dict) -> None:
+        """A trip that was in progress when the rotation rate was added: its saved grid has no
+        rotation-rate channel or pitch filter yet. Zero rotation for the interpolation's first point
+        only delays the first speed bump by a sample."""
+        if len(gr["prev"]) == 7:
+            gr["prev"] = gr["prev"] + [0.0, 0.0, 0.0]
+        gr.setdefault("zi_pitch", _zeros(SOS_PITCH)[0])
+        gr.setdefault("bump", {"peak": None, "p1": None})
+
+    def flush(self) -> list[Event]:
+        """End of the trip: the potholes still held back (and one whose peak is still being searched)
+        are final now. The finalize job calls this after the last batch; the live path never does,
+        so the last POTHOLE_HOLD_S of a trip only appear once it is finalized."""
+        if self.open_event is not None:
+            self.held.append(self.open_event)
+            self.open_event = None
+        out = [self._pothole_event(h) for h in self.held]
+        self.held = []
+        return out
 
     # -- helpers --
 
@@ -179,7 +227,11 @@ class Pipeline:
             "zi_low": (signal.sosfilt_zi(SOS_LOW) * x0).tolist(),
             "zi_h": _zeros(SOS_LOW, 3),
             "zi_wf": _zeros(SOS_WF)[0],
+            "zi_pitch": _zeros(SOS_PITCH)[0],
             "win": {"n": 0, "peak": 0.0, "lat": 0.0, "lon": 0.0, "b2": 0.0, "aw2": 0.0},
+            # Speed-bump search: the open pitch peak, and the nose-up peak waiting for its rear axle.
+            # Kept in the grid so a gap (new grid) drops a half-seen bump.
+            "bump": {"peak": None, "p1": None},
         }
 
     @staticmethod
@@ -216,15 +268,19 @@ class Pipeline:
     # -- main entry --
 
     def feed(self, t: np.ndarray, ua: np.ndarray, grav: np.ndarray,
-             fixes: list[tuple[float, float | None]], *, reset: bool = False) -> FeedResult:
-        """t: epoch seconds (n,), ua and grav: (n, 3) in g, phone frame. fixes: (epoch s, speed m/s)."""
+             fixes: list[tuple[float, float | None]], *, reset: bool = False,
+             rr: np.ndarray | None = None) -> FeedResult:
+        """t: epoch seconds (n,), ua and grav: (n, 3) in g, rr: (n, 3) rad/s (None = no rotation, so no
+        speed bumps), all in the phone frame. fixes: (epoch s, speed m/s)."""
         out = FeedResult()
         fixes = sorted(set(self.pending_fixes) | {(float(ft), fv) for ft, fv in fixes},
                        key=lambda f: f[0])
         self.pending_fixes = []
         order = np.argsort(t, kind="stable")
         t = np.asarray(t, dtype=float)[order]
-        samples = np.hstack([np.asarray(ua, float), np.asarray(grav, float)])[order]
+        rr = np.zeros((len(t), 3)) if rr is None else np.asarray(rr, float).reshape(-1, 3)
+        samples = np.hstack([np.asarray(ua, float).reshape(-1, 3), np.asarray(grav, float).reshape(-1, 3),
+                             rr])[order]
         if reset:
             self.grid = None
             out.reset = True
@@ -237,6 +293,25 @@ class Pipeline:
             out.msdv = math.sqrt(self.dose)
             out.roughness_now = self._rough()
             return out
+        # A stall inside the batch (CoreMotion pausing for a moment) is treated exactly like a hole
+        # between two batches: the batch is split there and each piece starts a new grid, so the
+        # filters restart and nothing is interpolated across the hole.
+        cuts = (np.flatnonzero(np.diff(t) > MAX_GAP_S) + 1).tolist()
+        for i, (a, b) in enumerate(zip([0] + cuts, cuts + [len(t)])):
+            if i > 0:
+                self.grid = None
+                out.reset = True
+            self._feed_segment(t[a:b], samples[a:b], fixes, out)
+            fixes, self.pending_fixes = self.pending_fixes, []
+        self.pending_fixes = fixes
+        out.msdv = math.sqrt(self.dose)
+        out.roughness_now = self._rough()
+        return out
+
+    def _feed_segment(self, t: np.ndarray, samples: np.ndarray,
+                      fixes: list[tuple[float, float | None]], out: FeedResult) -> None:
+        """Samples without a hole longer than MAX_GAP_S. Leaves the fixes not taken yet in
+        self.pending_fixes."""
         if self.grid is None:
             self.grid = self._new_grid(float(t[0]), samples[0].tolist())
 
@@ -254,15 +329,12 @@ class Pipeline:
         if k1 >= k0:
             ks = np.arange(k0, k1 + 1)
             gt = gr["origin"] + ks * DT
-            grid = np.column_stack([np.interp(gt, src_t, src[:, c]) for c in range(6)])
+            grid = np.column_stack([np.interp(gt, src_t, src[:, c]) for c in range(src.shape[1])])
             self._process(ks, gt, grid, fixes, out)
             gr["k"] = int(k1 + 1)
         else:
             self.pending_fixes = fixes
         gr["prev"] = [float(src_t[-1])] + src[-1].tolist()
-        out.msdv = math.sqrt(self.dose)
-        out.roughness_now = self._rough()
-        return out
 
     def _rough(self) -> float | None:
         return None if self.rough_ema is None else math.sqrt(self.rough_ema)
@@ -295,38 +367,51 @@ class Pipeline:
         alpha = DT / ROUGHNESS_TAU_S
         fix_i = 0
         win = gr["win"]
-        for i in range(len(ks)):
-            tt = float(gt[i])
-            while fix_i < len(fixes) and fixes[fix_i][0] <= tt:
+        zp = np.array(gr["zi_pitch"])
+        n = len(ks)
+        i = 0
+        while i < n:
+            while fix_i < len(fixes) and fixes[fix_i][0] <= gt[i]:
                 self._take_fix(*fixes[fix_i])
                 fix_i += 1
-            b = float(band[i])
-            self.rough_ema = b * b if self.rough_ema is None else self.rough_ema + alpha * (b * b - self.rough_ema)
-            win["b2"] = win.get("b2", 0.0) + b * b
-            if dec[i]:
-                a = float(next(aw_iter))
-                self.dose += a * a / FS_WF
-                win["aw2"] = win.get("aw2", 0.0) + a * a / FS_WF
-            self.h_acc = (np.array(self.h_acc) + h_low[i]).tolist() if self.h_n else h_low[i].tolist()
-            self.h_n += 1
+            # The forward axis only changes when a fix is taken, so the pitch rate is computed and
+            # filtered per stretch up to the next fix: the same whatever the batch boundaries are.
+            j = int(np.searchsorted(gt, fixes[fix_i][0], side="left")) if fix_i < len(fixes) else n
+            pitch, zp = signal.sosfilt(SOS_PITCH, self._pitch_up(down[i:j], grid[i:j, 6:9]), zi=zp)
+            for k in range(i, j):
+                tt = float(gt[k])
+                b = float(band[k])
+                self.rough_ema = b * b if self.rough_ema is None else self.rough_ema + alpha * (b * b - self.rough_ema)
+                win["b2"] = win.get("b2", 0.0) + b * b
+                if dec[k]:
+                    a = float(next(aw_iter))
+                    self.dose += a * a / FS_WF
+                    win["aw2"] = win.get("aw2", 0.0) + a * a / FS_WF
+                self.h_acc = (np.array(self.h_acc) + h_low[k]).tolist() if self.h_n else h_low[k].tolist()
+                self.h_n += 1
 
-            self._pothole(tt, b, out)
+                self._pothole(tt, b, out)
+                self._bump(tt, float(pitch[k - i]), b, out)
+                while self.held and tt - self.held[0][0] > POTHOLE_HOLD_S:
+                    out.events.append(self._pothole_event(self.held.pop(0)))
 
-            # 5 Hz series window
-            if abs(b) > abs(win["peak"]) or win["n"] == 0:
-                win["peak"] = b
-            if self.forward_known:
-                fwd, lat = self._axes(down[i])
-                win["lon"] += float(h_low[i] @ fwd)
-                win["lat"] += float(h_low[i] @ lat)
-            win["n"] += 1
-            if (int(ks[i]) + 1) % SERIES_EVERY == 0:
-                out.series.append(SeriesPoint(
-                    t=tt, a_vert=round(win["peak"], 4), a_lat=round(win["lat"] / win["n"], 4),
-                    a_lon=round(win["lon"] / win["n"], 4), speed=self._speed_at(tt),
-                    msdv=round(math.sqrt(self.dose), 5),
-                    rough_rms=math.sqrt(win.get("b2", 0.0) / win["n"]), dose_inc=win.get("aw2", 0.0)))
-                win.update(n=0, peak=0.0, lat=0.0, lon=0.0, b2=0.0, aw2=0.0)
+                # 5 Hz series window
+                if abs(b) > abs(win["peak"]) or win["n"] == 0:
+                    win["peak"] = b
+                if self.forward_known:
+                    fwd, lat = self._axes(down[k])
+                    win["lon"] += float(h_low[k] @ fwd)
+                    win["lat"] += float(h_low[k] @ lat)
+                win["n"] += 1
+                if (int(ks[k]) + 1) % SERIES_EVERY == 0:
+                    out.series.append(SeriesPoint(
+                        t=tt, a_vert=round(win["peak"], 4), a_lat=round(win["lat"] / win["n"], 4),
+                        a_lon=round(win["lon"] / win["n"], 4), speed=self._speed_at(tt),
+                        msdv=round(math.sqrt(self.dose), 5),
+                        rough_rms=math.sqrt(win.get("b2", 0.0) / win["n"]), dose_inc=win.get("aw2", 0.0)))
+                    win.update(n=0, peak=0.0, lat=0.0, lon=0.0, b2=0.0, aw2=0.0)
+            i = j
+        gr["zi_pitch"] = zp.tolist()
         self.pending_fixes = list(fixes[fix_i:])  # later than the last sample: taken next time
 
     def _axes(self, down: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
@@ -337,6 +422,74 @@ class Pipeline:
         left = np.cross(-down, f)  # up × forward = left; aLat is positive to the left
         return f, left
 
+    def _pitch_up(self, down: np.ndarray, rr: np.ndarray) -> np.ndarray:
+        """Nose-up pitch rate, rad/s: minus the rotation about the lateral (left) axis, since turning
+        about +left takes forward towards down. Zero until the forward axis is known."""
+        if not self.forward_known or len(down) == 0:
+            return np.zeros(len(down))
+        f = np.array(self.forward_sum)
+        fh = f[None, :] - (down @ f)[:, None] * down
+        norm = np.linalg.norm(fh, axis=1, keepdims=True)
+        norm[norm == 0] = 1.0
+        left = np.cross(-down, fh / norm)
+        return -np.einsum("ij,ij->i", rr, left)
+
+    def _bump(self, t: float, q: float, b: float, out: FeedResult) -> None:
+        """One sample of the speed-bump search; q = band-passed nose-up pitch rate, b = band-passed
+        vertical acceleration (for the event's magnitude, in m/s² like a pothole's)."""
+        st = self.grid["bump"]
+        p1 = st["p1"]
+        if p1 is not None:
+            p1[2] = max(p1[2], abs(b))
+            if t - p1[0] > BUMP_WHEELBASE_M[1] / p1[3] + BUMP_PEAK_MAX_S:
+                st["p1"] = p1 = None  # no rear axle in time
+        pk = st["peak"]  # [t start, t of the extreme, signed extreme, max |b|, too long]
+        if pk is not None:
+            if q * pk[2] > 0 and abs(q) >= BUMP_PITCH_RATE / 2:  # still the same peak (with hysteresis)
+                if abs(q) > abs(pk[2]):
+                    pk[1], pk[2] = t, q
+                pk[3] = max(pk[3], abs(b))
+                pk[4] = pk[4] or t - pk[0] > BUMP_PEAK_MAX_S
+                return
+            st["peak"] = None
+            if not pk[4]:  # a longer one isn't an axle
+                self._bump_peak(pk, out)
+        if abs(q) >= BUMP_PITCH_RATE:
+            st["peak"] = [t, t, q, abs(b), False]
+
+    def _bump_peak(self, pk: list, out: FeedResult) -> None:
+        st = self.grid["bump"]
+        t, q = pk[1], pk[2]
+        if q > 0:  # nose up: a front axle climbing, the possible start of a bump
+            v = self._speed_at(t)
+            st["p1"] = [t, q, pk[3], v] if v is not None and BUMP_MIN_SPEED_MS <= v <= BUMP_MAX_SPEED_MS else None
+            return
+        p1 = st["p1"]
+        if p1 is None:
+            return
+        dt_axles = t - p1[0]
+        if dt_axles < BUMP_WHEELBASE_M[0] / p1[3]:
+            return  # the front axle coming down the bump; the rear one is still to come
+        if not 1 / 3 <= -q / p1[1] <= 3:
+            return
+        st["p1"] = None
+        if self.last_bump_t is not None and p1[0] - self.last_bump_t < BUMP_REFRACTORY_S:
+            return
+        self.last_bump_t = p1[0]
+        lo, hi = p1[0] - BUMP_SPAN_PAD_S, t + BUMP_SPAN_PAD_S
+        self.held = [h for h in self.held if not lo <= h[0] <= hi]
+        if self.open_event is not None and lo <= self.open_event[0] <= hi:
+            self.open_event = None
+        rate = (p1[1] - q) / 2
+        out.events.append(Event(t=p1[0], type="speed_bump", magnitude=round(max(p1[2], pk[3]), 3),
+                                speed=p1[3], confidence=round(min(1.0, rate / (2 * BUMP_PITCH_RATE)), 3)))
+
+    @staticmethod
+    def _pothole_event(h: list) -> Event:
+        et, peak, spd = h
+        return Event(t=et, type="pothole", magnitude=round(peak, 3), speed=spd,
+                     confidence=round(min(1.0, peak / (2 * POTHOLE_THRESHOLD_MS2)), 3))
+
     def _pothole(self, t: float, b: float, out: FeedResult) -> None:
         if self.open_event is not None:
             et, peak, spd = self.open_event
@@ -344,8 +497,7 @@ class Pipeline:
                 if abs(b) > peak:
                     self.open_event = [et, abs(b), spd]
                 return
-            out.events.append(Event(t=et, type="pothole", magnitude=round(peak, 3), speed=spd,
-                                    confidence=round(min(1.0, peak / (2 * POTHOLE_THRESHOLD_MS2)), 3)))
+            self.held.append([et, peak, spd])  # reported after POTHOLE_HOLD_S unless a speed bump covers it
             self.open_event = None
         if abs(b) < POTHOLE_THRESHOLD_MS2:
             return

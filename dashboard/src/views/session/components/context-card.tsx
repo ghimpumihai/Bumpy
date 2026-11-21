@@ -1,16 +1,22 @@
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { PLACEHOLDER } from "@/constants";
-import type { SessionDetail } from "@/types/sessions";
+import { ExclusionReason, type SessionDetail } from "@/types/sessions";
 import { formatDateTime } from "@/utils/format-date-time";
+
+const UNKNOWN_CONTEXT_TEXT = "unknown (session.json not received)";
 
 /** Session context from session.json: needed to tell a bumpy bus from a bumpy road (plan 02 §3). */
 export function ContextCard({ session }: { session: SessionDetail }) {
+  // Until session.json arrives the read API fills the context with empty defaults; don't present those
+  // as what the operator entered.
+  const known = !session.exclusionReasons.includes(ExclusionReason.UNKNOWN_CONTEXT);
+  const orUnknown = (value: string) => (known && value.trim() ? value : UNKNOWN_CONTEXT_TEXT);
   const rows = [
-    { label: "Vehicle", value: [session.vehicle.makeModel, session.vehicle.line && `line ${session.vehicle.line}`].filter(Boolean).join(", ") },
-    { label: "Mount", value: `${session.mount.location}${session.mount.rigid ? " (rigid)" : " (not rigid)"}` },
-    { label: "Phone orientation", value: session.mount.phoneOrientation },
-    { label: "Rater", value: `${session.people.raterSeat}, ${session.people.raterPosture}` },
-    { label: "Passengers", value: String(session.people.passengerCount) },
+    { label: "Vehicle", value: orUnknown([session.vehicle.makeModel, session.vehicle.line && `line ${session.vehicle.line}`].filter(Boolean).join(", ")) },
+    { label: "Mount", value: known && session.mount.location ? `${session.mount.location}${session.mount.rigid ? " (rigid)" : " (not rigid)"}` : UNKNOWN_CONTEXT_TEXT },
+    { label: "Phone orientation", value: orUnknown(session.mount.phoneOrientation) },
+    { label: "Rater", value: known ? [session.people.raterSeat, session.people.raterPosture].filter(Boolean).join(", ") : UNKNOWN_CONTEXT_TEXT },
+    { label: "Passengers", value: known ? String(session.people.passengerCount) : UNKNOWN_CONTEXT_TEXT },
     {
       label: "Audio recording",
       value: session.audioEnabled ? "on" : session.vehicle.type === "bus" || session.vehicle.type === "tram" ? "off (public transport)" : "off",

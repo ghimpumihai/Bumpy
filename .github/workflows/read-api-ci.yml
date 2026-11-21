@@ -7,11 +7,16 @@ on:
       - "services/processor/roadride/**"
       - "db/**"
       - ".github/workflows/read-api-ci.yml"
+      - "!**/*.md"
   push:
-    branches: [main]
+    branches: [main, staging] # staging: the integration branch before main (no deploys)
     paths:
       - "services/read-api/**"
       - "db/**"
+      - "!**/*.md"
+
+  # deploy-services runs this first and deploys only if it passes.
+  workflow_call:
 
 permissions:
   contents: read
@@ -23,7 +28,8 @@ jobs:
       postgis:
         image: postgis/postgis:17-3.5
         env:
-          POSTGRES_PASSWORD: ${{ secrets.POSTGRES_PASSWORD }}
+          # Throwaway container: no password at all, so CI needs no secret (fork and Dependabot PRs too).
+          POSTGRES_HOST_AUTH_METHOD: trust
         ports: ["5432:5432"]
         options: >-
           --health-cmd "pg_isready -U postgres"
@@ -32,7 +38,8 @@ jobs:
       PGHOST: localhost
       PGPORT: "5432"
       PGUSER: postgres
-      PGPASSWORD: ${{ secrets.POSTGRES_PASSWORD }}
+      # Ignored under trust auth; the tests only check that it is set (tests/conftest.py _have_db).
+      PGPASSWORD: ${{ github.run_id }}
     steps:
       - uses: actions/checkout@v4
 
@@ -60,7 +67,7 @@ jobs:
         run: |
           docker build -t read-api:ci services/read-api
           docker run -d --name api -p 8000:8000 read-api:ci
-          for i in $(seq 1 20); do
+          for _ in $(seq 1 20); do
             code=$(curl -s -o /dev/null -w '%{http_code}' http://localhost:8000/api/nothing || true)
             [ "$code" = "404" ] && echo "listening on 8000 as non-root" && exit 0
             sleep 1

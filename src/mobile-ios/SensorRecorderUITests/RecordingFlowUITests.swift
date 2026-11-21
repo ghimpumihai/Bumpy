@@ -146,9 +146,13 @@ final class RecordingFlowUITests: XCTestCase {
         app.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.03)).tap()
         sleep(1)
         let done = app.buttons["summaryDone"]
-        // Done returns to the session list (retry once in case the first tap only closed the sheet).
+        // The share was dismissed, not completed: it does not count as an export, so Done asks first.
+        // (Retry once in case the first tap only closed the sheet.)
+        let closeAnyway = app.buttons["closeWithoutExport"].firstMatch
         done.tap()
-        if !app.buttons["newSessionButton"].waitForExistence(timeout: 3), done.exists { done.tap() }
+        if !closeAnyway.waitForExistence(timeout: 3), done.exists { done.tap() }
+        XCTAssertTrue(closeAnyway.waitForExistence(timeout: 5), "a cancelled share is not an export")
+        closeAnyway.tap()
         XCTAssertTrue(app.buttons["newSessionButton"].waitForExistence(timeout: 5))
         let firstSession = app.buttons.matching(NSPredicate(format: "identifier BEGINSWITH 'session.'")).firstMatch
         XCTAssertTrue(firstSession.waitForExistence(timeout: 5), "session appears in list")

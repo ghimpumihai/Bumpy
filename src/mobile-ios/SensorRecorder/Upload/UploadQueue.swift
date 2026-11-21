@@ -1,4 +1,5 @@
 import Foundation
+import UIKit
 
 protocol HTTPTransport: Sendable {
     /// Returns the HTTP status code. Throws on transport errors (no connectivity, timeout, TLS…).
@@ -49,10 +50,16 @@ struct UploadStatus: Equatable, Sendable {
 /// Disk-backed upload queue (spec §6).
 ///
 /// - Each batch is a `.json.gz` file in `Documents/upload_queue/`, named
-///   `<createdUtcMs>_<sessionId>_<batchSeq>.json.gz` so lexical order = oldest first.
-/// - One request at a time, oldest first. Exponential backoff 1 s → 30 s on failure.
-/// - 2xx and 409 (duplicate) → delete. 408/429 → retry. 401/403 → retry with backoff (a wrong key
-///   must not dump the whole queue into `upload_failed/`). Other 4xx → move to `upload_failed/`.
+///   `<createdUtcMs>_<sessionId>_<batchSeq>.json.gz` so lexical order = oldest first. The `createdMs`
+///   in a name is strictly increasing per queue (a wall clock that steps back can't reorder files).
+/// - One request at a time, oldest first, never re-ordered. Exponential backoff 1 s → 30 s on failure.
+/// - 2xx and 409 (duplicate) → delete. 408/429/5xx/network → retry the same file (the backend answers
+///   503 only for its own outages, never for a bad payload, so an outage must not park or re-order
+///   anything). 401/403 and batch 404 → retry (a config error must not dump the queue into
+///   `upload_failed/`). Session metadata 404/405 (no PUT route) → retried for a while, then set aside.
+///   Other 4xx → move to `upload_failed/`.
+/// - A file that can't be sent at all (a name we didn't write, e.g. a Files-app copy, or unreadable)
+///   is moved to `upload_failed/` so it never blocks the queue.
 /// - Idempotency key = `sessionId:batchSeq` (also inside the body).
 final class UploadQueue: @unchecked Sendable {
     enum Outcome: Equatable {
@@ -60,6 +67,9 @@ final class UploadQueue: @unchecked Sendable {
         case duplicate
         case permanentFailure(status: Int)
         case retry(reason: String)
+        /// No request was made for the head file: it vanished, or it could not be read and was moved
+        /// to `upload_failed/`. The next file goes next.
+        case skipped(reason: String)
         case disabled
         case empty
     }
@@ -73,11 +83,32 @@ final class UploadQueue: @unchecked Sendable {
     private let kickFlag = Locked(false)
     private var loopTask: Task<Void, Never>?
 
-    /// After this many consecutive server-side errors (5xx/408/429) for the SAME batch, move it to the
-    /// back of the queue so one bad batch can't block every newer one. Network errors don't count
-    /// (that's an outage, not the batch). Nothing is ever deleted on failure.
-    static let maxServerErrorsPerBatch = 5
-    private let headFailures = Locked<(name: String, count: Int)>(("", 0))
+    /// Session metadata answered 404/405 (backend without the PUT route, or a redeploy in progress)
+    /// this many times in a row is set aside in `upload_failed/`, so it never blocks the batches for
+    /// good. With the 1 → 30 s backoff that is about two minutes of retries.
+    static let maxMetadataNotFoundAttempts = 8
+    private let notFoundAttempts = Locked<(name: String, count: Int)>(("", 0))
+
+    /// Files that were sent (or rejected) but could not be deleted (or moved to `upload_failed/`).
+    /// They are skipped instead of re-sent in a tight loop, and the delete/move is retried on every
+    /// pass. In memory only: after a relaunch such a file is sent once more (harmless, idempotent).
+    private enum Leftover { case delete, moveToFailed }
+    private let leftovers = Locked<[String: Leftover]>([:])
+
+    /// Last `createdMs` used in a file name; names are strictly increasing so send order = enqueue
+    /// order even when the wall clock steps back between two enqueues (spec §6.1 ordering).
+    private let lastNamedMs: Locked<Int64>
+
+    /// Keeps the app running in the background after Stop until the queue is empty (the sensors no
+    /// longer keep it alive, so the Stop copy and the backlog would otherwise wait for the next launch).
+    private let backgroundTime: BackgroundTimeProvider?
+    private let backgroundHeld = Locked(false)
+
+    /// Writes one queue file. Atomic (temp + rename) so a half-written file is never uploaded;
+    /// injectable so tests can make an enqueue fail deterministically (full disk).
+    typealias FileWriter = @Sendable (Data, URL) throws -> Void
+    static let atomicWrite: FileWriter = { data, url in try data.write(to: url, options: .atomic) }
+    private let writeFile: FileWriter
 
     static let minBackoff: TimeInterval = 1
     static let maxBackoff: TimeInterval = 30
@@ -86,14 +117,20 @@ final class UploadQueue: @unchecked Sendable {
 
     init(directory: URL, transport: HTTPTransport = URLSessionTransport(),
          uptime: @escaping @Sendable () -> TimeInterval = { ProcessInfo.processInfo.systemUptime },
+         backgroundTime: BackgroundTimeProvider? = UIKitBackgroundTime(),
+         writeFile: @escaping FileWriter = UploadQueue.atomicWrite,
          config: @escaping @Sendable () -> UploadConfig) {
         self.directory = directory
         failedDirectory = directory.deletingLastPathComponent().appendingPathComponent("upload_failed", isDirectory: true)
         self.transport = transport
         self.configProvider = config
         self.uptime = uptime
+        self.backgroundTime = backgroundTime
+        self.writeFile = writeFile
         try? FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
         try? FileManager.default.createDirectory(at: failedDirectory, withIntermediateDirectories: true)
+        let existing = Self.queueFileNames(in: directory).compactMap { Self.parseItem(fileName: $0)?.createdMs }
+        lastNamedMs = Locked(existing.max() ?? 0)
         refreshCounts()
     }
 
@@ -129,8 +166,8 @@ final class UploadQueue: @unchecked Sendable {
     }
 
     /// `<createdMs:13>_<sessionId>_<seq:7>.json.gz` for batches, `<createdMs:13>_<sessionId>_meta-<phase>.json.gz`
-    /// for session metadata. Lexical order = send order: created time first; at an equal millisecond a
-    /// batch (digits) sorts before metadata ("m"), so the Stop copy follows the last batch.
+    /// for session metadata. Lexical order = send order: created time first (strictly increasing per
+    /// queue, see `nextCreatedMs`); at an equal millisecond a batch (digits) sorts before metadata ("m").
     static func fileName(createdUtcMs: Int64, sessionId: String, item: Item) -> String {
         let suffix: String
         switch item {
@@ -163,17 +200,32 @@ final class UploadQueue: @unchecked Sendable {
         return (f.createdMs, f.sessionId, seq)
     }
 
+    /// The millisecond for the next file name: the requested wall-clock time, but always after the
+    /// previous name, so a clock step back can't sort the Stop copy before the last batch (or batch 0
+    /// before the Start copy).
+    private func nextCreatedMs(_ requested: Int64) -> Int64 {
+        lastNamedMs.withLock { last in
+            last = max(requested, last + 1)
+            return last
+        }
+    }
+
     /// Queues the session metadata (§6.1): `PUT /api/ingest/sessions/{id}` with the gzipped JSON body.
+    /// The Stop copy also asks iOS for background time until the queue is empty, and wakes the loop.
     func enqueueSessionMetadata(json: Data, sessionId: String, phase: MetaPhase, createdUtcMs: Int64) throws {
-        let name = Self.fileName(createdUtcMs: createdUtcMs, sessionId: sessionId, item: .sessionMeta(phase: phase))
-        try Gzip.compress(json).write(to: directory.appendingPathComponent(name), options: .atomic)
+        let name = Self.fileName(createdUtcMs: nextCreatedMs(createdUtcMs), sessionId: sessionId, item: .sessionMeta(phase: phase))
+        try writeFile(Gzip.compress(json), directory.appendingPathComponent(name))
         statusBox.withLock { $0.queueCount += 1 }
+        if phase == .stop {
+            holdBackgroundTimeUntilDrained()
+            kick()
+        }
     }
 
     /// Writes the gzipped batch atomically (temp + rename): a half-written file is never uploaded.
     func enqueue(gzippedBody: Data, sessionId: String, seq: Int, createdUtcMs: Int64) throws {
-        let name = Self.fileName(createdUtcMs: createdUtcMs, sessionId: sessionId, seq: seq)
-        try gzippedBody.write(to: directory.appendingPathComponent(name), options: .atomic)
+        let name = Self.fileName(createdUtcMs: nextCreatedMs(createdUtcMs), sessionId: sessionId, seq: seq)
+        try writeFile(gzippedBody, directory.appendingPathComponent(name))
         statusBox.withLock { $0.queueCount += 1 }
     }
 
@@ -182,9 +234,17 @@ final class UploadQueue: @unchecked Sendable {
         try enqueue(gzippedBody: gz, sessionId: batch.sessionId, seq: batch.batchSeq, createdUtcMs: createdUtcMs)
     }
 
+    private static func queueFileNames(in dir: URL) -> [String] {
+        ((try? FileManager.default.contentsOfDirectory(atPath: dir.path)) ?? []).filter { $0.hasSuffix(".json.gz") }
+    }
+
+    /// Files waiting to be sent, in send order. Only names this queue wrote (a Files-app copy such as
+    /// `…_0000042 2.json.gz` is not ours and never becomes the head) and not already sent.
     func pendingFiles() -> [URL] {
-        let names = (try? FileManager.default.contentsOfDirectory(atPath: directory.path)) ?? []
-        return names.filter { $0.hasSuffix(".json.gz") }.sorted().map { directory.appendingPathComponent($0) }
+        let skip = leftovers.current
+        return Self.queueFileNames(in: directory)
+            .filter { Self.parseItem(fileName: $0) != nil && skip[$0] == nil }
+            .sorted().map { directory.appendingPathComponent($0) }
     }
 
     func pendingCount(sessionId: String) -> Int {
@@ -192,8 +252,7 @@ final class UploadQueue: @unchecked Sendable {
     }
 
     func failedFiles() -> [URL] {
-        let names = (try? FileManager.default.contentsOfDirectory(atPath: failedDirectory.path)) ?? []
-        return names.filter { $0.hasSuffix(".json.gz") }.sorted().map { failedDirectory.appendingPathComponent($0) }
+        Self.queueFileNames(in: failedDirectory).sorted().map { failedDirectory.appendingPathComponent($0) }
     }
 
     func refreshCounts() {
@@ -224,13 +283,12 @@ final class UploadQueue: @unchecked Sendable {
 
     // MARK: Processing
 
-    func makeRequest(for file: URL, config: UploadConfig) throws -> URLRequest {
-        guard let q = Self.parseItem(fileName: file.lastPathComponent) else { throw URLError(.cannotDecodeContentData) }
+    func makeRequest(for file: QueueFile, body: Data, config: UploadConfig) throws -> URLRequest {
         let url: URL?
         let method: String
-        switch q.item {
+        switch file.item {
         case .batch: url = config.ingestURL; method = "POST"
-        case .sessionMeta: url = config.sessionURL(q.sessionId); method = "PUT"
+        case .sessionMeta: url = config.sessionURL(file.sessionId); method = "PUT"
         }
         guard let url else { throw URLError(.badURL) }
         var r = URLRequest(url: url)
@@ -238,13 +296,13 @@ final class UploadQueue: @unchecked Sendable {
         r.setValue("application/json", forHTTPHeaderField: "Content-Type")
         r.setValue("gzip", forHTTPHeaderField: "Content-Encoding")
         r.setValue(config.deviceKey, forHTTPHeaderField: "x-device-key")
-        r.setValue(q.idempotencyKey, forHTTPHeaderField: "x-idempotency-key")
-        r.httpBody = try Data(contentsOf: file)
+        r.setValue(file.idempotencyKey, forHTTPHeaderField: "x-idempotency-key")
+        r.httpBody = body
         r.timeoutInterval = 15
         return r
     }
 
-    /// Uploads the oldest queued batch once. Deterministic and unit-tested; the loop calls it.
+    /// Uploads the oldest queued file once. Deterministic and unit-tested; the loop calls it.
     func processOnce() async -> Outcome {
         let config = configProvider()
         let now = uptime()
@@ -253,65 +311,73 @@ final class UploadQueue: @unchecked Sendable {
             if !config.isEnabled { $0.enabledSinceUp = nil }
             $0.enabled = config.isEnabled
         }
-        guard config.isEnabled else { return .disabled }
-        guard let file = pendingFiles().first else {
+        guard config.isEnabled else {
+            releaseBackgroundTime()
+            return .disabled
+        }
+        finishLeftovers()
+        setAsideForeignFiles()
+        guard let file = pendingFiles().first, let item = Self.parseItem(fileName: file.lastPathComponent) else {
             statusBox.withLock { $0.queueCount = 0 }
+            releaseBackgroundTime()
             return .empty
         }
+        let name = file.lastPathComponent
         statusBox.withLock { $0.lastAttemptUp = now }
-        let isMeta: Bool = {
-            if case .sessionMeta = Self.parseItem(fileName: file.lastPathComponent)?.item { return true }
-            return false
-        }()
-        let outcome: Outcome
-        var serverSide = false
+
+        let body: Data
         do {
-            let req = try makeRequest(for: file, config: config)
-            let code = try await transport.send(req)
-            switch code {
-            case 200..<300: outcome = .uploaded(status: code)
-            case 409: outcome = .duplicate
-            case 408, 429: outcome = .retry(reason: "HTTP \(code)"); serverSide = true
-            case 401, 403: outcome = .retry(reason: "HTTP \(code) (check device key)")
-            // Session metadata (§6.1) on a backend without the PUT route yet ("until this exists, the
-            // backend creates the trip from its first batch"): set it aside, never block the batches.
-            case 404 where isMeta, 405 where isMeta: outcome = .permanentFailure(status: code) // `where` binds per pattern
-            // A wrong base path must not dump the whole queue into upload_failed/ within seconds.
-            case 404: outcome = .retry(reason: "HTTP 404 (check the API URL)")
-            case 400..<500: outcome = .permanentFailure(status: code)
-            default: outcome = .retry(reason: "HTTP \(code)"); serverSide = true
+            body = try Data(contentsOf: file)
+        } catch {
+            // Gone (cleared while we looked) → nothing to do. Unreadable → never let it block the queue.
+            guard FileManager.default.fileExists(atPath: file.path) else {
+                refreshCounts()
+                return .skipped(reason: "\(name) is gone")
             }
+            let reason = "could not read \(name): \(error.localizedDescription)"
+            if moveToFailed(name) {
+                onEvent?(.warn, "upload: \(reason), moved to upload_failed/")
+            } else {
+                leftovers.withLock { $0[name] = .moveToFailed }
+                onEvent?(.warn, "upload: \(reason); could not move it to upload_failed/ either, skipping it")
+            }
+            refreshCounts()
+            return .skipped(reason: reason)
+        }
+
+        let isMeta: Bool = { if case .sessionMeta = item.item { return true }; return false }()
+        let outcome: Outcome
+        do {
+            let code = try await transport.send(try makeRequest(for: item, body: body, config: config))
+            outcome = classify(status: code, isMeta: isMeta, name: name)
         } catch {
             outcome = .retry(reason: (error as? URLError).map { "network: \($0.code.rawValue)" } ?? error.localizedDescription)
         }
+        if case .retry = outcome {} else { notFoundAttempts.withLock { $0 = ("", 0) } }
 
-        let fm = FileManager.default
         switch outcome {
         case .uploaded, .duplicate:
-            do { try fm.removeItem(at: file) } catch {
-                // Would be re-sent (harmless: idempotent), but the counters must not drift silently.
-                onEvent?(.warn, "upload: sent \(file.lastPathComponent) but could not delete it: \(error.localizedDescription)")
+            do { try FileManager.default.removeItem(at: file) } catch {
+                // Skip it from now on (no hot loop re-sending it) and keep trying to delete it.
+                leftovers.withLock { $0[name] = .delete }
+                onEvent?(.warn, "upload: sent \(name) but could not delete it: \(error.localizedDescription)")
             }
-            headFailures.withLock { $0 = ("", 0) }
             statusBox.withLock {
                 $0.uploadedCount += 1
                 $0.lastSuccessUp = self.uptime()
                 $0.lastError = nil
                 $0.currentBackoff = 0
-                $0.queueCount = max(0, $0.queueCount - 1)
             }
+            refreshCounts()
         case .permanentFailure(let code):
-            let dest = failedDirectory.appendingPathComponent(file.lastPathComponent)
-            try? fm.removeItem(at: dest) // an older copy with the same name, if any
-            do { try fm.moveItem(at: file, to: dest) } catch {
-                onEvent?(.warn, "upload: could not move \(file.lastPathComponent) to upload_failed/: \(error.localizedDescription)")
+            if moveToFailed(name) {
+                onEvent?(.warn, "upload: \(name) rejected with HTTP \(code), moved to upload_failed/")
+            } else {
+                leftovers.withLock { $0[name] = .moveToFailed }
+                onEvent?(.warn, "upload: \(name) rejected with HTTP \(code); could not move it to upload_failed/, skipping it")
             }
-            statusBox.withLock {
-                $0.lastError = "HTTP \(code)"
-                $0.failedCount += 1
-                $0.queueCount = max(0, $0.queueCount - 1)
-            }
-            onEvent?(.warn, "upload: \(file.lastPathComponent) rejected with HTTP \(code), moved to upload_failed/")
+            statusBox.withLock { $0.lastError = "HTTP \(code)" }
+            refreshCounts()
         case .retry(let reason):
             let previous = statusBox.withLock { s -> String? in
                 let p = s.lastError
@@ -320,43 +386,103 @@ final class UploadQueue: @unchecked Sendable {
                 return p
             }
             if previous != reason { onEvent?(.warn, "upload retry: \(reason)") }
-            if serverSide { rotateIfPoisoned(file) } else { headFailures.withLock { $0 = ("", 0) } }
-        case .disabled, .empty:
+        case .skipped, .disabled, .empty:
             break
         }
         return outcome
     }
 
-    private func rotateIfPoisoned(_ file: URL) {
-        let name = file.lastPathComponent
-        let count = headFailures.withLock { h -> Int in
-            h = h.name == name ? (name, h.count + 1) : (name, 1)
-            return h.count
-        }
-        guard count >= Self.maxServerErrorsPerBatch, let p = Self.parseItem(fileName: name) else { return }
-        if case .sessionMeta = p.item {
-            // Metadata order matters (02 D33: context first, end after the last batch), so it is never
-            // re-ordered behind batches: set it aside in upload_failed/ (Settings → retry) instead.
-            let dest = failedDirectory.appendingPathComponent(name)
-            try? FileManager.default.removeItem(at: dest)
-            if (try? FileManager.default.moveItem(at: file, to: dest)) != nil {
-                headFailures.withLock { $0 = ("", 0) }
-                statusBox.withLock { $0.failedCount += 1; $0.queueCount = max(0, $0.queueCount - 1) }
-                onEvent?(.warn, "upload: session metadata \(name) failed \(count)× on the server, moved to upload_failed/")
+    /// Spec §6 / §6.2 status mapping for one response to the head file.
+    private func classify(status code: Int, isMeta: Bool, name: String) -> Outcome {
+        switch code {
+        case 200..<300: return .uploaded(status: code)
+        case 409: return .duplicate
+        case 401, 403: return .retry(reason: "HTTP \(code) (check device key)")
+        // Session metadata on a backend without the PUT route ("until this exists, the backend creates
+        // the trip from its first batch"), or a function redeploy in progress: retry for a while, then
+        // set it aside so it never blocks the batches for good.
+        case 404 where isMeta, 405 where isMeta: // `where` binds per pattern
+            let attempts = notFoundAttempts.withLock { a -> Int in
+                a = a.name == name ? (name, a.count + 1) : (name, 1)
+                return a.count
             }
-            return
+            return attempts >= Self.maxMetadataNotFoundAttempts
+                ? .permanentFailure(status: code)
+                : .retry(reason: "HTTP \(code) on session metadata (check the API URL)")
+        // A wrong base path must not dump the whole queue into upload_failed/ within seconds.
+        case 404: return .retry(reason: "HTTP 404 (check the API URL)")
+        case 408, 429: return .retry(reason: "HTTP \(code)")
+        case 400..<500: return .permanentFailure(status: code)
+        // 5xx (the ingest function's 503 = storage/Event Hubs/Key Vault outage), 3xx (redirects are
+        // never followed): retry the same file, in place, with backoff. Never re-ordered.
+        default: return .retry(reason: "HTTP \(code)")
         }
-        let nowMs = Int64(Date().timeIntervalSince1970 * 1000)
-        let dest = directory.appendingPathComponent(Self.fileName(createdUtcMs: nowMs, sessionId: p.sessionId, item: p.item))
-        if (try? FileManager.default.moveItem(at: file, to: dest)) != nil {
-            headFailures.withLock { $0 = ("", 0) }
-            onEvent?(.warn, "upload: \(name) failed \(count)× on the server, moved to the back of the queue")
+    }
+
+    /// Moves `name` from the queue to `upload_failed/` (replacing an older copy with the same name).
+    private func moveToFailed(_ name: String) -> Bool {
+        let fm = FileManager.default
+        let dest = failedDirectory.appendingPathComponent(name)
+        try? fm.removeItem(at: dest)
+        return (try? fm.moveItem(at: directory.appendingPathComponent(name), to: dest)) != nil
+    }
+
+    /// Retries the delete/move of files that were already sent or rejected.
+    private func finishLeftovers() {
+        let pending = leftovers.current
+        guard !pending.isEmpty else { return }
+        let fm = FileManager.default
+        for (name, action) in pending {
+            let url = directory.appendingPathComponent(name)
+            let done: Bool
+            if !fm.fileExists(atPath: url.path) {
+                done = true
+            } else {
+                switch action {
+                case .delete: done = (try? fm.removeItem(at: url)) != nil
+                case .moveToFailed: done = moveToFailed(name)
+                }
+            }
+            if done { leftovers.withLock { _ = $0.removeValue(forKey: name) } }
+        }
+    }
+
+    /// `.json.gz` files in the queue folder whose name we didn't write (Documents is visible in the
+    /// Files app, so a user can copy or rename them): moved to `upload_failed/` instead of blocking.
+    private func setAsideForeignFiles() {
+        for name in Self.queueFileNames(in: directory) where Self.parseItem(fileName: name) == nil {
+            if moveToFailed(name) {
+                onEvent?(.warn, "upload: \(name) is not a queue file name, moved to upload_failed/")
+            }
         }
     }
 
     static func nextBackoff(_ current: TimeInterval) -> TimeInterval {
         current <= 0 ? minBackoff : min(maxBackoff, current * 2)
     }
+
+    // MARK: Background time
+
+    /// Asks iOS for background time until the queue is empty (released by `processOnce` on `.empty`
+    /// or `.disabled`, by `stop()`, or by iOS on expiration).
+    func holdBackgroundTimeUntilDrained() {
+        guard let provider = backgroundTime,
+              backgroundHeld.withLock({ held -> Bool in defer { held = true }; return !held }) else { return }
+        provider.begin { [weak self] in
+            guard let self else { return }
+            self.backgroundHeld.withLock { $0 = false }
+            self.onEvent?(.warn, "upload: iOS ended the background time with \(self.status.queueCount) file(s) queued; "
+                          + "they are sent when the app runs again")
+        }
+    }
+
+    private func releaseBackgroundTime() {
+        guard let provider = backgroundTime,
+              backgroundHeld.withLock({ held -> Bool in defer { held = false }; return held }) else { return }
+        provider.end()
+    }
+
+    var isHoldingBackgroundTime: Bool { backgroundHeld.current }
 
     // MARK: Loop
 
@@ -368,7 +494,8 @@ final class UploadQueue: @unchecked Sendable {
                 let outcome = await self.processOnce()
                 let wait: TimeInterval
                 switch outcome {
-                case .uploaded, .duplicate, .permanentFailure: wait = 0
+                // The file just handled is gone or skipped (see `leftovers`), so this never re-sends it.
+                case .uploaded, .duplicate, .permanentFailure, .skipped: wait = 0
                 case .retry: wait = self.status.currentBackoff
                 case .disabled: wait = 2
                 case .empty: wait = 1
@@ -381,6 +508,7 @@ final class UploadQueue: @unchecked Sendable {
     func stop() {
         loopTask?.cancel()
         loopTask = nil
+        releaseBackgroundTime()
     }
 
     /// Retry now: resets backoff and wakes the loop ("Upload full session").
@@ -431,5 +559,42 @@ final class UploadQueue: @unchecked Sendable {
         case 404: return (false, "endpoint not found (HTTP 404): check the API URL")
         default: return (false, "HTTP \(status) from /api/ingest")
         }
+    }
+}
+
+/// Background execution time for the upload loop (`UIApplication.beginBackgroundTask`), behind a
+/// protocol so tests can observe it. At most one request is outstanding per provider.
+protocol BackgroundTimeProvider: AnyObject, Sendable {
+    /// Requests background time. `onExpire` runs if iOS takes it back first (the provider has already
+    /// ended the task then).
+    func begin(onExpire: @escaping @Sendable () -> Void)
+    func end()
+}
+
+/// The real provider. Both calls hop to the main thread in FIFO order, so an `end()` issued right after
+/// a `begin()` can never run first; the task id is touched on the main thread only.
+final class UIKitBackgroundTime: BackgroundTimeProvider, @unchecked Sendable {
+    private var task: UIBackgroundTaskIdentifier = .invalid // main thread only
+
+    func begin(onExpire: @escaping @Sendable () -> Void) {
+        DispatchQueue.main.async {
+            MainActor.assumeIsolated {
+                guard self.task == .invalid else { return }
+                self.task = UIApplication.shared.beginBackgroundTask(withName: "upload-queue-drain") {
+                    MainActor.assumeIsolated { self.endOnMain() }
+                    onExpire()
+                }
+            }
+        }
+    }
+
+    func end() {
+        DispatchQueue.main.async { MainActor.assumeIsolated { self.endOnMain() } }
+    }
+
+    @MainActor private func endOnMain() {
+        guard task != .invalid else { return }
+        UIApplication.shared.endBackgroundTask(task)
+        task = .invalid
     }
 }

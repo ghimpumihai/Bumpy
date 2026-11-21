@@ -4,8 +4,9 @@ name: deploy-ingest
 # Logs in with GitHub OIDC; no Azure secrets are stored. Needs, once:
 #   - a GitHub environment named `prod` (its federated credential is created by infra/bootstrap)
 #   - repo variables AZURE_CLIENT_ID_DEPLOY, AZURE_TENANT_ID, AZURE_SUBSCRIPTION_ID
-#     (from `terraform -chdir=infra/bootstrap output github_variables`) and INGEST_FUNCTION_APP
-#     (from `.\infra\tf.ps1 output -raw ingest_function_name`)
+#     (from `terraform -chdir=infra/bootstrap output github_variables`), INGEST_FUNCTION_APP
+#     (from `./infra/tf.ps1 output -raw ingest_function_name`) and RESOURCE_GROUP (rg-roadride)
+# After the deploy it checks that the function host really runs (see "Smoke check" below).
 
 on:
   push:
@@ -13,6 +14,7 @@ on:
     paths:
       - "services/ingest/**"
       - ".github/workflows/deploy-ingest.yml"
+      - "!**/*.md"
   workflow_dispatch:
 
 permissions:
@@ -24,7 +26,17 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
+  # The same tests as on the PR, on the code being deployed: failing tests never ship.
+  test:
+    uses: ./.github/workflows/ingest-ci.yml
+    permissions:
+      contents: read
+
   deploy:
+    # Production deploys only from main: a manual run started from staging or any other branch
+    # is skipped instead of shipping unmerged code to prod.
+    if: github.ref == 'refs/heads/main'
+    needs: test
     runs-on: ubuntu-latest
     environment: prod
     steps:
@@ -35,6 +47,30 @@ jobs:
           client-id: ${{ vars.AZURE_CLIENT_ID_DEPLOY }}
           tenant-id: ${{ vars.AZURE_TENANT_ID }}
           subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+
+      # azurerm 4.x writes a key-based AzureWebJobsStorage (with an empty AccountKey) on every apply that
+      # touches the function app (terraform-provider-azurerm#29149). Keys are off on the storage account,
+      # so the host can't take its lock lease and never starts. Remove it; the identity settings stay.
+      - name: Host storage uses the managed identity only
+        env:
+          APP: ${{ vars.INGEST_FUNCTION_APP }}
+          RG: ${{ vars.RESOURCE_GROUP }}
+        run: |
+          names=$(az functionapp config appsettings list -n "$APP" -g "$RG" --query '[].name' -o tsv)
+          if printf '%s\n' "$names" | grep -qx 'AzureWebJobsStorage'; then
+            echo "Removing the key-based AzureWebJobsStorage setting (provider bug, infra/README.md)"
+            az functionapp config appsettings delete -n "$APP" -g "$RG" --setting-names AzureWebJobsStorage --output none
+            names=$(az functionapp config appsettings list -n "$APP" -g "$RG" --query '[].name' -o tsv)
+          fi
+          if printf '%s\n' "$names" | grep -qx 'AzureWebJobsStorage'; then
+            echo "::error::AzureWebJobsStorage is still set on $APP"; exit 1
+          fi
+          for s in AzureWebJobsStorage__accountName AzureWebJobsStorage__credential AzureWebJobsStorage__clientId; do
+            if ! printf '%s\n' "$names" | grep -qx "$s"; then
+              echo "::error::$APP has no $s setting. Run ./infra/tf.ps1 apply (it sets them)."; exit 1
+            fi
+          done
+          echo "host storage: identity-based settings only"
 
       - name: Package (app files only)
         working-directory: services/ingest
@@ -50,3 +86,37 @@ jobs:
           package: ${{ runner.temp }}/pkg
           sku: flexconsumption
           remote-build: true
+
+      # No device key in CI on purpose: a request without one must get the function's own 401
+      # ("bad x-device-key"). That answer needs the host running, both routes registered and Key Vault
+      # readable (the keys are loaded before the check). A host that can't start answers 503 or times out.
+      - name: Smoke check (host runs, routes answer)
+        env:
+          APP: ${{ vars.INGEST_FUNCTION_APP }}
+          RG: ${{ vars.RESOURCE_GROUP }}
+        run: |
+          host=$(az functionapp show -n "$APP" -g "$RG" --query defaultHostName -o tsv)
+          probe="$RUNNER_TEMP/probe.json.gz"
+          printf '{"probe":true}' | gzip -c > "$probe"
+          check() { # method, path
+            curl -s -o "$RUNNER_TEMP/body" -w '%{http_code}' --max-time 60 -X "$1" "https://$host$2" \
+              -H 'Content-Type: application/json' -H 'Content-Encoding: gzip' -H 'x-probe: 1' \
+              --data-binary @"$probe" || true
+          }
+          ok=0
+          for _ in $(seq 1 30); do # cold start after a deploy can take a few minutes
+            code=$(check POST /api/ingest)
+            echo "POST /api/ingest without a key -> $code $(head -c 200 "$RUNNER_TEMP/body")"
+            if [ "$code" = "401" ] && grep -q 'x-device-key' "$RUNNER_TEMP/body"; then ok=1; break; fi
+            sleep 10
+          done
+          if [ "$ok" != 1 ]; then
+            echo "::error::The ingest function did not answer 401 on POST /api/ingest (last: $code). Check that AzureWebJobsStorage is gone and look at the function's logs in Application Insights."
+            exit 1
+          fi
+          code=$(check PUT /api/ingest/sessions/ci-smoke-check)
+          echo "PUT /api/ingest/sessions/ci-smoke-check without a key -> $code $(head -c 200 "$RUNNER_TEMP/body")"
+          if [ "$code" != "401" ]; then
+            echo "::error::PUT /api/ingest/sessions/{id} answered $code, expected 401"; exit 1
+          fi
+          echo "ingest function is up at https://$host"

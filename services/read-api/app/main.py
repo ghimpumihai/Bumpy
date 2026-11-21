@@ -18,7 +18,7 @@ import fastapi
 from fastapi import FastAPI, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, Response
 from psycopg import errors as pg_errors
 from psycopg_pool import ConnectionPool, PoolTimeout
 from starlette.exceptions import HTTPException as StarletteHTTPException
@@ -82,6 +82,7 @@ def configure_telemetry() -> bool:
 def create_app(pool: ConnectionPool | None = None) -> FastAPI:
     pool = pool or make_pool()
     stats_cache = q.TripStatsCache()  # per app, so per database
+    heat_cache = q.TripStatsCache()  # its own, so heat lines never evict the stats
 
     @asynccontextmanager
     async def lifespan(_: FastAPI):
@@ -186,7 +187,7 @@ def create_app(pool: ConnectionPool | None = None) -> FastAPI:
     @app.get("/api/heat")
     def heat():
         with pool.connection() as conn:
-            return q.heat(conn)
+            return Response(q.heat(conn, heat_cache), media_type="application/json")
 
     @app.get("/api/segments/{h3}")
     def segment(h3: str):

@@ -25,7 +25,7 @@ The dashboard reads only the read API. Its contract is [API.md](API.md), with ty
 ## Domain rules (plan 02 §5, §8, §10; API.md)
 - `source` = how a trip reached the cloud (Streamed / Uploaded / Replay); `status` = Recording → Processing → finalized; `incomplete` is a separate flag. Never call a finalized streamed trip "live".
 - Only finalized trips count in the map; always show *why* a trip doesn't (`EXCLUSION_LABELS`).
-- Live freshness uses the server clock and distinguishes "behind the phone", "no data" (dead zone), "catching up" and "read API unreachable" (a device leaves the view as soon as its trip ends; "trip ended" is only a safeguard). Never claim "live" for old data, never blame the phone for the dashboard's own outage.
+- Live freshness uses the server clock and distinguishes "behind the phone", "no data" (dead zone), "catching up" and "read API unreachable" (an ended trip stays listed for up to 60 s and shows "trip ended", never a dead zone). Never claim "live" for old data, never blame the phone for the dashboard's own outage.
 - Everything on the map must also be reachable by keyboard (the worst-segments list).
 
 ## Maps and charts

@@ -63,13 +63,46 @@ function solve(matrix: number[][], rhs: number[]): number[] | null {
   return a.map((row, i) => row[size] / row[i]);
 }
 
+const roughUsable = (r: Row) => r.input.roughnessEligible && !!r.obs.roughnessRms && r.obs.meanSpeedMs >= MIN_ROUGHNESS_SPEED_MS;
+
+/**
+ * Vehicles whose effect relative to the car can be estimated (D45): those linked to it through
+ * multi-pass segments both drove, directly or through a chain. Empty if the car is in none.
+ */
+function identifiedVehicles(usable: Row[]): Set<VehicleType> {
+  const inCell = new Map<string, Set<VehicleType>>();
+  const counts = new Map<string, number>();
+  for (const r of usable) {
+    inCell.set(r.obs.cell, (inCell.get(r.obs.cell) ?? new Set<VehicleType>()).add(r.vehicle));
+    counts.set(r.obs.cell, (counts.get(r.obs.cell) ?? 0) + 1);
+  }
+  const multi = [...inCell].filter(([cell]) => (counts.get(cell) ?? 0) >= 2).map(([, vehicles]) => vehicles);
+  if (!multi.some((vehicles) => vehicles.has(REFERENCE_VEHICLE))) return new Set();
+  const linked = new Set<VehicleType>([REFERENCE_VEHICLE]);
+  let grew = true;
+  while (grew) {
+    grew = false;
+    for (const vehicles of multi) {
+      const touches = [...vehicles].some((v) => linked.has(v));
+      const adds = [...vehicles].filter((v) => !linked.has(v));
+      if (touches && adds.length > 0) {
+        adds.forEach((v) => linked.add(v));
+        grew = true;
+      }
+    }
+  }
+  return linked;
+}
+
 /**
  * Fixed-effects fit of log(roughness) = segment + vehicle + β·log(speed): demeaning within each
  * segment removes the segment effects (Frisch–Waugh), leaving a small system for β and the vehicle effects.
+ * A vehicle that can't be identified is left out (D45) instead of switching the model off for everyone.
  */
 function fitRoughnessModel(rows: Row[]): { beta: number; effects: Record<string, number> } | null {
-  const usable = rows.filter((r) => r.input.roughnessEligible && r.obs.roughnessRms && r.obs.meanSpeedMs >= MIN_ROUGHNESS_SPEED_MS);
-  const vehicles = [...new Set(usable.map((r) => r.vehicle))].filter((v) => v !== REFERENCE_VEHICLE).sort();
+  const linked = identifiedVehicles(rows.filter(roughUsable));
+  const usable = rows.filter((r) => roughUsable(r) && linked.has(r.vehicle));
+  const vehicles = [...linked].filter((v) => v !== REFERENCE_VEHICLE).sort();
   const byCell = new Map<string, Row[]>();
   for (const row of usable) byCell.set(row.obs.cell, [...(byCell.get(row.obs.cell) ?? []), row]);
 
@@ -128,6 +161,14 @@ function percentRanks(rows: Row[]) {
 
 const mean = (values: number[]) => (values.length > 0 ? values.reduce((a, b) => a + b, 0) / values.length : null);
 
+/** Sickness counts moving, valid time only (D45): a bus standing at a stop doesn't dilute the segment. */
+function sicknessAw(rows: Row[]): number | null {
+  const duration = rows.reduce((sum, r) => sum + r.obs.sicknessS, 0);
+  return duration > 0 ? Math.sqrt(rows.reduce((sum, r) => sum + (r.obs.sicknessAwRms ?? 0) ** 2 * r.obs.sicknessS, 0) / duration) : null;
+}
+
+const sicknessRows = (rows: Row[]) => rows.filter((r) => r.input.sicknessEligible && r.obs.sicknessS > 0);
+
 function aggregateGroup(
   cell: string,
   filter: VehicleFilter,
@@ -136,16 +177,14 @@ function aggregateGroup(
   model: { beta: number; effects: Record<string, number> } | null,
 ): SegmentAggregate {
   const sessions = new Set(rows.map((r) => r.input.sim.spec.sessionId));
-  const rough = rows.filter((r) => r.input.roughnessEligible && r.obs.roughnessRms && r.obs.meanSpeedMs >= MIN_ROUGHNESS_SPEED_MS);
+  const rough = rows.filter(roughUsable);
+  const fitted = model ? rough.filter((r) => r.vehicle in model.effects) : [];
   const normalized =
-    model && rough.length > 0
+    model && fitted.length > 0
       ? Math.exp(
           mean(
-            rough.map(
-              (r) =>
-                Math.log(r.obs.roughnessRms ?? 1) -
-                (model.effects[r.vehicle] ?? 0) -
-                model.beta * Math.log(r.obs.meanSpeedMs / REFERENCE_SPEED_MS),
+            fitted.map(
+              (r) => Math.log(r.obs.roughnessRms ?? 1) - model.effects[r.vehicle] - model.beta * Math.log(r.obs.meanSpeedMs / REFERENCE_SPEED_MS),
             ),
           ) ?? 0,
         )
@@ -157,9 +196,8 @@ function aggregateGroup(
   const ratio = potholePasses.length > 0 ? potholeHits / potholePasses.length : null;
   const threshold = POTHOLE_THRESHOLDS[filter];
 
-  const sick = rows.filter((r) => r.input.sicknessEligible);
-  const sickDuration = sick.reduce((sum, r) => sum + r.obs.durationS, 0);
-  const awRms = sickDuration > 0 ? Math.sqrt(sick.reduce((sum, r) => sum + r.obs.awRms ** 2 * r.obs.durationS, 0) / sickDuration) : null;
+  const sick = sicknessRows(rows);
+  const awRms = sicknessAw(sick);
 
   return {
     h3: cell,
@@ -169,7 +207,8 @@ function aggregateGroup(
     meanSpeedKmh: mean(rows.map((r) => r.obs.meanSpeedMs * MS_TO_KMH)),
     roughness: method === "model" ? normalized : null,
     roughnessPctl: pctl,
-    roughnessMethod: rough.length > 0 ? method : "none",
+    // Only vehicles outside the fit here: no car-equivalent, so the cell shows its percentile.
+    roughnessMethod: rough.length === 0 ? "none" : method === "model" && fitted.length === 0 ? "percentile" : method,
     potholeHits,
     potholePasses: potholePasses.length,
     potholeRatio: ratio,
@@ -182,15 +221,13 @@ function aggregateGroup(
 
 function sicknessSplits(rows: Row[]): SegmentSicknessSplit[] {
   const groups = new Map<string, Row[]>();
-  for (const row of rows) {
-    if (!row.input.sicknessEligible) continue;
+  for (const row of sicknessRows(rows)) {
     const { people } = row.input.sim.spec;
     const key = [row.vehicle, people.raterSeat, people.raterPosture].join("|");
     groups.set(key, [...(groups.get(key) ?? []), row]);
   }
   return [...groups.values()].map((group) => {
-    const duration = group.reduce((sum, r) => sum + r.obs.durationS, 0);
-    const awRms = Math.sqrt(group.reduce((sum, r) => sum + r.obs.awRms ** 2 * r.obs.durationS, 0) / duration);
+    const awRms = sicknessAw(group) ?? 0; // every row has moving time
     const { people } = group[0].input.sim.spec;
     return {
       vehicleType: group[0].vehicle,

@@ -33,17 +33,77 @@ final class LiveSignalsTests: XCTestCase {
     }
 
     func testProjectionFlatPhone() {
-        // Phone flat, screen up: gravity = -z. Upward bump = +z user accel.
-        let p = LiveSignals.project(sample(t: 0, ua: Vec3(x: 0.1, y: 0.05, z: 0.3), g: Vec3(x: 0, y: 0, z: -1)))
+        // Phone flat, screen up: gravity = -z. CoreMotion reports minus the phone's acceleration, so
+        // ua.z = -0.3 is the phone accelerating up at 0.3 g, and ua.x = +0.1 is it accelerating
+        // towards -x, the vehicle's left.
+        let p = LiveSignals.project(sample(t: 0, ua: Vec3(x: 0.1, y: 0.05, z: -0.3), g: Vec3(x: 0, y: 0, z: -1)))
         XCTAssertEqual(p.vertical, 0.3, accuracy: 1e-12)
         XCTAssertEqual(p.lateral, 0.1, accuracy: 1e-12)
     }
 
     func testProjectionTiltedPhone() {
-        // Phone upright in portrait (gravity = -y). Up = +y; lateral = device x.
-        let p = LiveSignals.project(sample(t: 0, ua: Vec3(x: -0.2, y: 0.4, z: 0.1), g: Vec3(x: 0, y: -1, z: 0)))
+        // Phone upright in portrait facing the driver (gravity = -y): up = +y, device +x = the vehicle's right.
+        let p = LiveSignals.project(sample(t: 0, ua: Vec3(x: -0.2, y: -0.4, z: 0.1), g: Vec3(x: 0, y: -1, z: 0)))
         XCTAssertEqual(p.vertical, 0.4, accuracy: 1e-12)
-        XCTAssertEqual(p.lateral, -0.2, accuracy: 1e-12)
+        XCTAssertEqual(p.lateral, -0.2, accuracy: 1e-12) // accelerating to the right
+    }
+
+    func testFreeFallReadsMinusOneG() {
+        // Screen up in free fall: the accelerometer reads 0, so userAcceleration = 0 - gravity = +1 g on z.
+        let p = LiveSignals.project(sample(t: 0, ua: Vec3(x: 0, y: 0, z: 1), g: Vec3(x: 0, y: 0, z: -1)))
+        XCTAssertEqual(p.vertical, -1, accuracy: 1e-12)
+    }
+
+    func testLeftTurnIsPositiveLateral() {
+        // A left turn pushes the phone towards the vehicle's left (-x when flat, top to the front);
+        // CoreMotion reports the opposite, +x. The backend (dsp.py) also has lateral positive to the left.
+        let p = LiveSignals.project(sample(t: 0, ua: Vec3(x: 0.2, y: 0, z: 0), g: Vec3(x: 0, y: 0, z: -1)))
+        XCTAssertEqual(p.lateral, 0.2, accuracy: 1e-12)
+    }
+
+    /// A deterministic ±2 ms jitter, as CoreMotion's timestamps have around the nominal 100 Hz.
+    private func jitteredTimes(seconds: Double) -> [Double] {
+        var seed: UInt64 = 42
+        return (0..<Int(seconds * 100)).map { n in
+            seed = seed &* 6364136223846793005 &+ 1442695040888963407
+            let u = Double(seed >> 11) / Double(1 << 53) // [0, 1)
+            return Double(n) * 0.01 + (u - 0.5) * 0.004
+        }
+    }
+
+    func testLiveMSDVWithJitteredTimestampsMatchesTheWeighting() {
+        // 300 s of 0.1 g vertical sway at 0.2 Hz: MSDV = a·|Wf(0.2 Hz)|/√2·√T. Blocks that restarted at
+        // their last sample took 11 samples whenever the clock jittered and read ~6 % low.
+        let live = LiveSignals()
+        let amp = 0.1, f = 0.2, seconds = 300.0
+        for t in jitteredTimes(seconds: seconds) {
+            live.add(sample(t: t, ua: Vec3(x: 0, y: 0, z: -amp * sin(2 * .pi * f * t)), g: Vec3(x: 0, y: 0, z: -1)))
+        }
+        let expected = amp * LiveSignals.g * WfFilter(fs: 10).magnitude(at: f) / 2.0.squareRoot() * seconds.squareRoot()
+        XCTAssertEqual(live.snapshot().msdv / expected, 1, accuracy: 0.02)
+        XCTAssertEqual(live.snapshot().lateral.count, 600) // 10 Hz blocks (ring holds 60 s)
+    }
+
+    func testRoughnessBandIsTheBackends() {
+        // scipy.signal.sosfreqz of the backend's SOS_BAND
+        let band = RoughnessBand()
+        XCTAssertEqual(band.magnitude(at: 10), 0.999999914489249, accuracy: 1e-9)
+        XCTAssertEqual(band.magnitude(at: 25), 0.9687437975974774, accuracy: 1e-9)
+        XCTAssertEqual(band.magnitude(at: 0.5), 0.058147542080446604, accuracy: 1e-9)
+    }
+
+    func testRoughnessNowMatchesTheBackend() {
+        // 60 s of a vertical sine with RMS 1 m/s²; the backend's band-pass + 5 s EMA (computed with
+        // scipy) gives 1.0008 at 10 Hz and 0.0586 at 0.5 Hz, which is sway, not roughness.
+        for (f, expected) in [(10.0, 1.0008316430477706), (0.5, 0.05856751893422164)] {
+            let live = LiveSignals()
+            let amp = 2.0.squareRoot() / LiveSignals.g
+            for n in 0..<6000 {
+                let t = Double(n) * 0.01
+                live.add(sample(t: t, ua: Vec3(x: 0, y: 0, z: -amp * sin(2 * .pi * f * t)), g: Vec3(x: 0, y: 0, z: -1)))
+            }
+            XCTAssertEqual(live.snapshot().roughnessRms, expected, accuracy: 0.002, "\(f) Hz")
+        }
     }
 
     func testBuffersRoughnessAndMSDV() {

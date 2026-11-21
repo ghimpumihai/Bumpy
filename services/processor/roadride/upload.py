@@ -38,6 +38,9 @@ log = logging.getLogger(__name__)
 MANIFEST = "_complete.json"
 REQUIRED = ("session.json", "device_motion.csv", "location.csv")
 BATCH_S = 2.0  # the app's batch window (spec §6)
+# The app keeps GPS fixes up to this long before the start (RecordingSession.staleFixMargin): iOS's
+# cached first fix, real but slightly early. It sends them in batch 0, so an upload does too.
+STALE_FIX_MARGIN_S = 5.0
 SESSION_ID_RE = re.compile(r"^[A-Za-z0-9_-]{1,128}$")  # as the ingest function: it is a blob prefix
 
 MOTION_COLS = ("ua_x", "ua_y", "ua_z", "g_x", "g_y", "g_z", "rr_x", "rr_y", "rr_z")
@@ -48,7 +51,7 @@ EXTRA_STREAMS = {
     "accelRaw": ("accel_raw.csv", 100.0),
     "gyroRaw": ("gyro_raw.csv", 100.0),
     "mag_raw": ("mag_raw.csv", 50.0),
-    "altimeter": ("altimeter.csv", None),
+    "altimeter": ("altimeter.csv", 1.0),  # CMAltimeter: about once a second, as in the read API and the mock
     "abs_altitude": ("abs_altitude.csv", None),
     "audioLevel": ("audio_level.csv", 10.0),
 }
@@ -312,6 +315,8 @@ def build_batches(session_id: str, meta: dict, dm: dict, loc: dict, lab: dict,
         t0 = start_up + k * BATCH_S
         t1 = t0 + BATCH_S
         sd, sl, sb = cut(dm, t0, t1), cut(loc, t0, t1), cut(lab, t0, t1)
+        # The clock offset comes from the window's own rows; the early fixes only ride along.
+        fix_rows = cut(loc, t0 - STALE_FIX_MARGIN_S, t1) if k == 0 else sl
         firsts = []
         for a, sl_ in [(dm, sd), (loc, sl), (lab, sb)] + [(c, cut(c, t0, t1)) for c in clocks]:
             ok = np.flatnonzero(np.isfinite(a["t_utc_ms"][sl_]))
@@ -332,7 +337,7 @@ def build_batches(session_id: str, meta: dict, dm: dict, loc: dict, lab: dict,
         clock_offset = t0_utc_ms / 1000.0 - t0
 
         fixes = []
-        for i in range(sl.start, sl.stop):
+        for i in range(fix_rows.start, fix_rows.stop):
             lat, lon = loc["lat"][i], loc["lon"][i]
             if not (math.isfinite(lat) and math.isfinite(lon)):
                 continue

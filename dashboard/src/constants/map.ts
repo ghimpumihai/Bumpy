@@ -30,8 +30,9 @@ export const EVENT_DOT = {
 export const BASEMAP_STYLE_TIMEOUT_MS = 8000;
 
 /**
- * Roughness bands use the ISO 2631-1 comfort scale for vertical RMS acceleration (m/s²), which
- * applies to the model-normalized roughness.
+ * Roughness bands (m/s², model-normalized 1–30 Hz vertical RMS). The edges are the numbers of the
+ * ISO 2631-1 comfort scale, but they are not its comfort categories: that scale is for Wk-weighted
+ * acceleration, which weighs most of 1–30 Hz below 1, so these labels describe the road, not comfort.
  */
 export const ROUGHNESS_BANDS: ScaleBand[] = [
   { min: 0, max: 0.315, label: "Smooth (< 0.32 m/s²)", colorVar: "--scale-1" },

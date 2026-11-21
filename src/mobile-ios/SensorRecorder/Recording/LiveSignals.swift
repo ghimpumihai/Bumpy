@@ -74,6 +74,31 @@ struct WfFilter {
     }
 }
 
+/// The backend's road-roughness band (services/processor/roadride/dsp.py `SOS_BAND`): 4th-order
+/// Butterworth band-pass 1–30 Hz at 100 Hz, coefficients from
+/// `scipy.signal.butter(4, (1, 30), "bandpass", fs=100, output="sos")`, so the phone's "roughness
+/// now" is the same number the web dashboard shows.
+struct RoughnessBand {
+    static let fs = 100.0
+    private var sections = [
+        Biquad(b0: 0.15008712507227703, b1: 0.30017425014455407, b2: 0.15008712507227703,
+               a1: 0.28947536353801495, a2: 0.06256363300540586),
+        Biquad(b0: 1, b1: 2, b2: 1, a1: 0.4493070470669376, a2: 0.4809961054440336),
+        Biquad(b0: 1, b1: -2, b2: 1, a1: -1.8829072394807296, a2: 0.8869402293234886),
+        Biquad(b0: 1, b1: -2, b2: 1, a1: -1.9506769966911766, a2: 0.9545821370290172),
+    ]
+
+    mutating func process(_ x: Double) -> Double {
+        var y = x
+        for i in sections.indices { y = sections[i].process(y) }
+        return y
+    }
+
+    func magnitude(at f: Double) -> Double {
+        sections.reduce(1) { $0 * $1.magnitude(at: f, fs: Self.fs) }
+    }
+}
+
 /// Live-plot ring buffers and simple on-device estimates (spec §7 dashboard). Fed from the motion
 /// queue at 100 Hz; read by the UI at ~8 Hz.
 final class LiveSignals: @unchecked Sendable {
@@ -81,6 +106,7 @@ final class LiveSignals: @unchecked Sendable {
     static let lateralSeconds = 60.0
     static let decimatedHz = 10.0
     static let g = 9.80665
+    static let roughnessTauS = 5.0  // backend dsp.ROUGHNESS_TAU_S
 
     private struct State {
         var vertical = RingBuffer<Double>(capacity: 1000)    // 10 s @ 100 Hz, g
@@ -89,56 +115,66 @@ final class LiveSignals: @unchecked Sendable {
         var lastT: Double?
         var decimAccum = 0.0
         var decimCount = 0
-        var decimStartT: Double?
+        var decimNextT: Double?  // end of the current 0.1 s block, on a grid from the first sample
         var wf = WfFilter(fs: LiveSignals.decimatedHz)
         var msdvIntegral = 0.0 // ∫ a_w² dt  (m²/s³)
-        var roughWindow = RingBuffer<Double>(capacity: 200)  // last 2 s of vertical accel
+        var band = RoughnessBand()
+        var roughEMA: Double?  // exponential mean of the band-passed vertical², (m/s²)²
     }
     private let state = Locked(State())
 
-    /// Vertical (up-positive) and lateral components of user acceleration, assuming the phone's
-    /// +y axis points roughly to the vehicle front (spec mount protocol). Lateral = acceleration
-    /// along the device x-axis projected onto the horizontal plane.
+    /// The phone's acceleration in g: vertical positive up, lateral positive to the vehicle's left
+    /// (the backend's convention, dsp.py `_axes`). CoreMotion's userAcceleration is minus the phone's
+    /// acceleration: screen up it reads 0 at rest and +1 g on z in free fall (total 0 − gravity −1 g).
+    /// Lateral assumes the device +x axis points to the vehicle's right, as in both mounts of the
+    /// protocol (flat with the top to the front, or upright facing the driver).
     static func project(_ s: DeviceMotionSample) -> (vertical: Double, lateral: Double) {
         let down = s.gravity.normalized
-        let vertical = -s.userAccel.dot(down)
-        let horiz = s.userAccel - down * s.userAccel.dot(down)
+        let a = s.userAccel * -1
+        let vertical = -a.dot(down)
         let xAxis = Vec3(x: 1, y: 0, z: 0)
-        let xh = (xAxis - down * xAxis.dot(down)).normalized
-        return (vertical, horiz.dot(xh))
+        let rightH = (xAxis - down * xAxis.dot(down)).normalized
+        return (vertical, -a.dot(rightH))
     }
 
     func add(_ s: DeviceMotionSample) {
         let (v, lat) = Self.project(s)
         state.withLock { st in
             st.vertical.append(v)
-            st.roughWindow.append(v)
             // 1 Hz single-pole low-pass for the sway plot
             let dt = st.lastT.map { max(0.001, min(0.1, s.t - $0)) } ?? 0.01
             st.lastT = s.t
             let rc = 1 / (2 * Double.pi * 1.0)
             let alpha = dt / (rc + dt)
             st.lateralLP += alpha * (lat - st.lateralLP)
-            // decimate to 10 Hz (block mean) for the lateral plot and the Wf filter
-            if st.decimStartT == nil { st.decimStartT = s.t }
-            st.decimAccum += v
-            st.decimCount += 1
-            if let t0 = st.decimStartT, s.t - t0 >= 1 / Self.decimatedHz - 1e-6 {
+            let b = st.band.process(v * Self.g)
+            st.roughEMA = st.roughEMA.map { $0 + dt / Self.roughnessTauS * (b * b - $0) } ?? b * b
+            // Decimate to 10 Hz (block mean) for the lateral plot and the Wf filter. Blocks sit on a
+            // fixed 0.1 s grid: Wf is designed for exactly 10 Hz and each block adds 0.1 s of dose,
+            // so a block that starts at the previous block's last sample (11 samples whenever the
+            // timestamps jitter) would stretch time and read the dose ~6 % low.
+            let period = 1 / Self.decimatedHz
+            if st.decimNextT == nil { st.decimNextT = s.t + period }
+            if let next = st.decimNextT, s.t >= next, st.decimCount > 0 {
                 let mean = st.decimAccum / Double(st.decimCount)
                 let aw = st.wf.process(mean * Self.g)
-                st.msdvIntegral += aw * aw / Self.decimatedHz
+                st.msdvIntegral += aw * aw * period
                 st.lateral.append(st.lateralLP)
                 st.decimAccum = 0
                 st.decimCount = 0
-                st.decimStartT = s.t
+                // After a stall longer than a block, restart the grid here instead of emitting empty blocks.
+                st.decimNextT = s.t < next + period ? next + period : s.t + period
             }
+            st.decimAccum += v
+            st.decimCount += 1
         }
     }
 
     struct Snapshot {
         var vertical: [Double]
         var lateral: [Double]
-        /// RMS of vertical acceleration over the last 2 s, m/s² (road-roughness indicator).
+        /// Road roughness now, m/s²: RMS of the 1–30 Hz band-passed vertical acceleration, averaged
+        /// exponentially over ~5 s. The backend's `roughnessNow`, which the web dashboard shows.
         var roughnessRms: Double
         /// Motion sickness dose value so far (vertical, Wf), m/s^1.5.
         var msdv: Double
@@ -146,14 +182,8 @@ final class LiveSignals: @unchecked Sendable {
 
     func snapshot() -> Snapshot {
         state.withLock { st in
-            let w = st.roughWindow.elements
-            var rms = 0.0
-            if !w.isEmpty {
-                let mean = w.reduce(0, +) / Double(w.count)
-                rms = (w.reduce(0) { $0 + ($1 - mean) * ($1 - mean) } / Double(w.count)).squareRoot() * Self.g
-            }
-            return Snapshot(vertical: st.vertical.elements, lateral: st.lateral.elements,
-                            roughnessRms: rms, msdv: st.msdvIntegral.squareRoot())
+            Snapshot(vertical: st.vertical.elements, lateral: st.lateral.elements,
+                     roughnessRms: (st.roughEMA ?? 0).squareRoot(), msdv: st.msdvIntegral.squareRoot())
         }
     }
 }

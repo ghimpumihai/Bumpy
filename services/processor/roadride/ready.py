@@ -2,7 +2,9 @@
 
 A trip becomes ready in two ways:
 - the stream processor sees its Stop copy and every batch (store.Store marks it `processing`), or
-- it goes silent: no batch for 15 minutes closes it as `processing` + `incomplete`.
+- it goes silent: no batch for 15 minutes closes it as `processing` + `incomplete`. The 15 minutes
+  are counted up to how far the stream processor has read, not up to now: after an outage, a trip
+  whose batches are still in the backlog is not silent.
 
 A background thread in the stream processor sends the message for every `processing` trip that
 hasn't had one, and records it in `sessions.ready_sent_at`. Sending only after the database commit
@@ -14,9 +16,11 @@ idempotent, so a repeated message only costs a rerun.
 
 from __future__ import annotations
 
+import datetime as dt
 import json
 import logging
 import threading
+from typing import Callable
 
 from psycopg import Connection
 
@@ -28,16 +32,19 @@ SWEEP_EVERY_S = 60.0
 BATCH_LIMIT = 100
 
 
-def close_idle(conn: Connection) -> list[str]:
+def close_idle(conn: Connection, read_up_to: dt.datetime) -> list[str]:
+    """`read_up_to`: everything ingest received before it has been applied (stream.PartitionWriter).
+    last_received_at is ingest's receive time, so comparing it with now() would close a live trip
+    whose newer batches are only waiting in the processor's backlog."""
     rows = conn.execute(
         """
         UPDATE sessions SET status = 'processing', updated_at = now(),
           incomplete = (expected_batch_count IS NULL OR received_batches < expected_batch_count)
         WHERE status = 'live' AND received_batches > 0
-          AND COALESCE(last_received_at, updated_at) < now() - make_interval(mins => %s)
+          AND COALESCE(last_received_at, updated_at) < %s - make_interval(mins => %s)
         RETURNING session_id
         """,
-        (IDLE_CLOSE_MIN,),
+        (read_up_to, IDLE_CLOSE_MIN),
     ).fetchall()
     return [r[0] for r in rows]
 
@@ -63,10 +70,11 @@ def message_body(session_id: str) -> str:
     return json.dumps({"sessionId": session_id, "reason": "trip_end"})
 
 
-def sweep(conn: Connection, send) -> list[str]:
+def sweep(conn: Connection, send, read_up_to: dt.datetime | None) -> list[str]:
     """One pass: close silent trips, then send for every trip that is due. `conn` is autocommit;
-    `send(body)` raises on failure. Returns the IDs sent."""
-    closed = close_idle(conn)
+    `send(body)` raises on failure; `read_up_to` None (the processor hasn't heard from every
+    partition yet) closes nothing. Returns the IDs sent."""
+    closed = close_idle(conn, read_up_to) if read_up_to is not None else []
     if closed:
         log.info("closed %d silent trip(s) as incomplete: %s", len(closed), ", ".join(closed))
     sent = []
@@ -96,10 +104,11 @@ class ServiceBusSender:
 class ReadyNotifier(threading.Thread):
     """Sweeps every minute, and right away when the stream processor ends a trip (`kick`)."""
 
-    def __init__(self, send, connect):
+    def __init__(self, send, connect, read_up_to: Callable[[], dt.datetime | None]):
         super().__init__(name="ready-notifier", daemon=True)
         self._send = send
         self._connect = connect
+        self._read_up_to = read_up_to
         self._wake = threading.Event()
 
     def kick(self) -> None:
@@ -111,6 +120,6 @@ class ReadyNotifier(threading.Thread):
             self._wake.clear()
             try:
                 with self._connect(autocommit=True, application_name="roadride-ready") as conn:
-                    sweep(conn, self._send)
+                    sweep(conn, self._send, self._read_up_to())
             except Exception:  # noqa: BLE001 - the next sweep tries again
                 log.exception("session-ready sweep failed")

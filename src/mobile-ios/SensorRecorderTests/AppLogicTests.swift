@@ -254,3 +254,33 @@ final class AudioRecoveryPolicyTests: XCTestCase {
         XCTAssertEqual(decide(now: 310, rec: true, lastRotate: 300), .rotate)
     }
 }
+
+final class CaptureClockTests: XCTestCase {
+    func testBufferIsStampedWithItsCaptureTime() {
+        // Host clock and uptime have different epochs; only the buffer's age matters.
+        let t = CaptureClock.bufferStartUp(bufferHostSec: 5_000.000, nowHostSec: 5_000.045, nowUp: 1_000, bufferDuration: 0.021)
+        XCTAssertEqual(t, 999.955, accuracy: 1e-9, "processed 45 ms after capture")
+    }
+
+    func testInvalidHostTimeFallsBackToBufferEndingNow() {
+        XCTAssertEqual(CaptureClock.bufferStartUp(bufferHostSec: nil, nowHostSec: 1, nowUp: 1_000, bufferDuration: 0.02), 999.98,
+                       accuracy: 1e-9)
+        XCTAssertEqual(CaptureClock.bufferStartUp(bufferHostSec: 10, nowHostSec: 5, nowUp: 1_000, bufferDuration: 0.02), 999.98,
+                       accuracy: 1e-9, "future host time")
+        XCTAssertEqual(CaptureClock.bufferStartUp(bufferHostSec: 0, nowHostSec: 500, nowUp: 1_000, bufferDuration: 0.02), 999.98,
+                       accuracy: 1e-9, "implausibly old")
+    }
+
+    func testWindowsInsideOneBufferGetTheirOwnTimes() {
+        var acc = LevelAccumulator(windowSeconds: 0.1)
+        let fs = 1_000.0
+        let w = acc.add(samples: [Float](repeating: 0.5, count: 250), sampleRate: fs, startUp: 10)
+        XCTAssertEqual(w.count, 2)
+        XCTAssertEqual(w[0].t, 10.1, accuracy: 1e-9, "not both stamped with the processing time")
+        XCTAssertEqual(w[1].t, 10.2, accuracy: 1e-9)
+        // The partial third window continues in the next buffer.
+        let next = acc.add(samples: [Float](repeating: 0.5, count: 50), sampleRate: fs, startUp: 10.25)
+        XCTAssertEqual(next.count, 1)
+        XCTAssertEqual(next[0].t, 10.3, accuracy: 1e-9)
+    }
+}

@@ -180,13 +180,13 @@ final class AudioPolicyTests: XCTestCase {
         var acc = LevelAccumulator(windowSeconds: 0.1)
         let fs = 48_000.0
         let sine = (0..<4800).map { Float(sin(2 * Double.pi * 1000 * Double($0) / fs)) }
-        let w = acc.add(samples: sine, sampleRate: fs, now: 5)
+        let w = acc.add(samples: sine, sampleRate: fs, startUp: 4.9)
         XCTAssertEqual(w.count, 1)
         XCTAssertEqual(w[0].avgDbfs, -3.01, accuracy: 0.05, "full-scale sine RMS = -3 dBFS")
         XCTAssertEqual(w[0].peakDbfs, 0, accuracy: 0.01)
-        XCTAssertEqual(w[0].t, 5)
+        XCTAssertEqual(w[0].t, 5, accuracy: 1e-9, "window ends at the capture time of its last sample")
         // silence and corrupt samples never produce NaN/inf (would crash the dashboard)
-        let bad = acc.add(samples: [Float](repeating: .nan, count: 4800), sampleRate: fs, now: 6)
+        let bad = acc.add(samples: [Float](repeating: .nan, count: 4800), sampleRate: fs, startUp: 6)
         XCTAssertTrue(bad[0].avgDbfs.isFinite && bad[0].peakDbfs.isFinite)
         XCTAssertEqual(LevelAccumulator.dbfs(.nan), -140)
         XCTAssertEqual(LevelAccumulator.dbfs(0), -140)

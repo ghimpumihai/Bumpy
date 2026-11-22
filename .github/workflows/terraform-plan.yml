@@ -1,4 +1,4 @@
-name: terraform-plan
+name: CI - Terraform plan
 
 # Plan 02 §13: on every PR that touches infra/**, check formatting and validate both stacks, then show
 # what `terraform apply` would change in Azure and post it on the PR. Nothing is applied here.
@@ -39,37 +39,35 @@ env:
 
 jobs:
   check:
+    name: Format and validate
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - name: Check out the code
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
 
-      - uses: hashicorp/setup-terraform@b9cd54a3c349d3f38e8881555d616ced269862dd # v3.1.2
+      - name: Set up Terraform
+        uses: hashicorp/setup-terraform@b9cd54a3c349d3f38e8881555d616ced269862dd # v3.1.2
         with:
           terraform_version: ${{ env.TF_VERSION }}
           terraform_wrapper: false
 
-      - name: fmt
+      - name: Check formatting
         run: terraform -chdir=infra fmt -check -recursive -diff
 
-      - name: validate (main and bootstrap, no backend)
+      - name: Validate main and bootstrap (no backend)
         run: |
           for stack in main bootstrap; do
             terraform -chdir="infra/$stack" init -backend=false -input=false -no-color >/dev/null
             terraform -chdir="infra/$stack" validate -no-color
           done
 
-      - name: Is the plan job set up?
-        if: vars.AZURE_CLIENT_ID_PLAN == ''
-        run: |
-          echo "::warning::No plan against Azure: the repo variable AZURE_CLIENT_ID_PLAN is not set (infra/README.md, CI for Terraform)."
-
   plan:
+    name: Plan against Azure (read only)
     needs: check
     # Fork and Dependabot PRs get no OIDC token or secrets; their check job above still runs.
-    # Skipped until the repo variables exist (warning in the check job).
     if: >-
       github.event.pull_request.head.repo.full_name == github.repository &&
-      github.actor != 'dependabot[bot]' && vars.AZURE_CLIENT_ID_PLAN != ''
+      github.actor != 'dependabot[bot]'
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -81,22 +79,14 @@ jobs:
       ARM_TENANT_ID: ${{ vars.AZURE_TENANT_ID }}
       ARM_SUBSCRIPTION_ID: ${{ vars.AZURE_SUBSCRIPTION_ID }}
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - name: Check out the code
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
 
-      - uses: hashicorp/setup-terraform@b9cd54a3c349d3f38e8881555d616ced269862dd # v3.1.2
+      - name: Set up Terraform
+        uses: hashicorp/setup-terraform@b9cd54a3c349d3f38e8881555d616ced269862dd # v3.1.2
         with:
           terraform_version: ${{ env.TF_VERSION }}
           terraform_wrapper: false
-
-      # If Azure refuses the login (AADSTS700213 "no matching federated identity record"), compare this
-      # with the plan identity's federated credential subject in infra/bootstrap/main.tf.
-      - name: Show the OIDC subject GitHub sends
-        run: |
-          token=$(curl -sS -H "Authorization: bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" \
-            "$ACTIONS_ID_TOKEN_REQUEST_URL&audience=api://AzureADTokenExchange" | jq -r .value)
-          payload=$(printf '%s' "$token" | cut -d. -f2 | tr '_-' '/+')
-          while [ $(( ${#payload} % 4 )) -ne 0 ]; do payload="$payload="; done
-          printf '%s' "$payload" | base64 -d | jq -r '"sub: \(.sub)"'
 
       - name: Settings from repo variables
         env:
@@ -123,7 +113,7 @@ jobs:
             echo "::warning::TF_VAR_ADMIN_OBJECT_IDS is not set: the plan will remove the team's role assignments if infra/.env lists any."
           fi
 
-      - name: init (remote state, read only)
+      - name: Initialise with the remote state (read only)
         env:
           STATE_RG: ${{ vars.TFSTATE_RESOURCE_GROUP }}
           STATE_ACCOUNT: ${{ vars.TFSTATE_STORAGE_ACCOUNT }}
@@ -136,7 +126,7 @@ jobs:
             -backend-config="container_name=$STATE_CONTAINER" \
             -backend-config="key=$STATE_KEY"
 
-      - name: plan
+      - name: Plan (no refresh, no lock)
         id: plan
         run: |
           set +e
@@ -212,3 +202,14 @@ jobs:
       - name: Fail on data-holding deletes
         if: steps.guard.outputs.found == 'true'
         run: exit 1
+
+      # If Azure refuses the login (AADSTS700213 "no matching federated identity record"), compare this
+      # with the plan identity's federated credential subject in infra/bootstrap/main.tf.
+      - name: Show the OIDC subject GitHub sends
+        if: failure()
+        run: |
+          token=$(curl -sS -H "Authorization: bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" \
+            "$ACTIONS_ID_TOKEN_REQUEST_URL&audience=api://AzureADTokenExchange" | jq -r .value)
+          payload=$(printf '%s' "$token" | cut -d. -f2 | tr '_-' '/+')
+          while [ $(( ${#payload} % 4 )) -ne 0 ]; do payload="$payload="; done
+          printf '%s' "$payload" | base64 -d | jq -r '"sub: \(.sub)"'

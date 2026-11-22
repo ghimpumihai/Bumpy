@@ -7,7 +7,7 @@ export function SessionsPage() {
   return (
     <>
       <Helmet>
-        <title>Sessions · Road &amp; Ride</title>
+        <title>Sessions · Bumpy</title>
       </Helmet>
       <PageWrapper title="Sessions">
         <SessionsView />

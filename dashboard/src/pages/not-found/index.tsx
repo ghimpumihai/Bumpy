@@ -8,7 +8,7 @@ export function NotFoundPage() {
   return (
     <>
       <Helmet>
-        <title>Not found · Road &amp; Ride</title>
+        <title>Not found · Bumpy</title>
       </Helmet>
       <PageWrapper title="Page not found" description="This page does not exist.">
         <div>

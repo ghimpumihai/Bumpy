@@ -1,13 +1,12 @@
-# Dashboard — Road & Ride
+# Dashboard — Bumpy
 
 Web dashboard of the Codelap 2026 project (plan: [02-infrastructure-plan.md](../decisions/02-infrastructure-plan.md)
 §5 "Dashboard", §15). React + Vite + MapLibre (CARTO Dark Matter base map) + uPlot, hosted as static files on
 Azure Static Web Apps (`public/staticwebapp.config.json`: SPA fallback, caching, security headers), reading the **read API** ([API.md](API.md)).
 
 **Real backend:** the read API ([`services/read-api/`](../services/read-api/README.md)) is deployed on Azure and
-serves every route below. The site itself goes live with the manual **deploy-dashboard** workflow (Actions tab, runs
-only from `main`), which writes `config.json` with the read API's address and uploads the build to Static Web Apps; it
-last succeeded on 2026-11-21. Live, sessions, tracks, chart series, detected events and the motion-sickness dose come
+serves every route below. The site itself goes live with the release on merge to `main`
+(`deploy-dashboard.yml`, after the read API), which writes `config.json` with the read API's address and uploads the build to Static Web Apps. Live, sessions, tracks, chart series, detected events and the motion-sickness dose come
 from the live path; the Map page (heat lines, H3 segments, aggregation, events of finalized trips) and detection scores
 fill in once the finalize and aggregate jobs have processed a trip.
 
@@ -37,7 +36,7 @@ from the **Data source** dialog → `VITE_API_BASE` (build time) → `config.jso
 | Route | What it shows |
 |---|---|
 | `/live` (start page) | The main screen (plan 02 §5): phones and replays sending data right now, polled every 2 s — moving markers, recent track, speed, roughness now, MSDV so far, and how far behind the phone the data is (or "catching up" after a dead zone). A card's locate button keeps the map centred on that phone until you drag, rotate or tilt the map, or click it again |
-| `/map` | Strava-style heat map of the finalized trips: how many trips drove each road (from per-trip GPS lines), detected events, a list of the busiest roads, and a per-road panel (trips, roughness, potholes, sickness, the passes of finalized trips) |
+| `/map` | Strava-style heat map of the finalized trips: how many trips drove each road (from per-trip GPS lines), detected events, a list of the busiest roads, and a per-road panel (trips, roughness, potholes, sickness, the passes of finalized trips). **Replay** plays every counted trip oldest first, at 30× to 1200× the recorded pace, so the heat and the event dots build up (in the browser only; nothing is sent, unlike `tools/replay`) |
 | `/sessions` | Every trip and what it found: distance, duration, potholes, sickness and one status; a trip opens to its track, events, charts and data quality |
 | `/sessions/{id}` | One trip: track coloured by speed, events, synchronized charts (road band, sway, speed, MSDV), detection precision/recall vs. taps, why it isn't counted in the map, data-quality panel |
 

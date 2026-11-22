@@ -29,13 +29,13 @@ Terraform creates every resource; the GitHub Actions deploys ship the code. Terr
 
 | Resource | Running | Deployed by |
 |---|---|---|
-| Function app `func-roadride-ingest-*` | the ingest function | `deploy-ingest` on merge to `main` (or manual) |
-| Container app `ca-roadride-processor` | the stream processor + signal processing | `deploy-services` on merge to `main` (or manual) |
+| Function app `func-roadride-ingest-*` | the ingest function | the release (`deploy-ingest`) on merge to `main` |
+| Container app `ca-roadride-processor` | the stream processor + signal processing | the release (`deploy-services`) on merge to `main` |
 | Container app `ca-roadride-read-api` | the read API (port 8000; a fresh app starts on 80 for the placeholder, deploy-services switches it) | `deploy-services` |
 | Job `caj-roadride-migrate` | database migrations + Entra roles | `deploy-services`, before the apps are updated |
 | Job `caj-roadride-finalize` | the finalize job (started by the `session-ready` queue) | `deploy-services` |
 | Job `caj-roadride-aggregate` | the aggregation step, started by hand | `deploy-services` |
-| Static Web App `stapp-roadride-dashboard` | the dashboard, as of the last manual run (2026-11-21, `1da8579`) | `deploy-dashboard` (manual only) |
+| Static Web App `stapp-roadride-dashboard` | the dashboard | the release (`deploy-dashboard`) on merge to `main`, after `deploy-services` |
 
 The deploys use the `prod` GitHub environment and these repo variables: `AZURE_CLIENT_ID_DEPLOY`, `AZURE_TENANT_ID`, `AZURE_SUBSCRIPTION_ID`, `INGEST_FUNCTION_APP`, `ACR_NAME`, `RESOURCE_GROUP`. CI's test database is a throwaway container with trust authentication (no password), so no secret is needed and fork PRs work (an old `POSTGRES_PASSWORD` repo secret is no longer read and can be deleted).
 
@@ -57,7 +57,7 @@ Database tokens: request `https://ossrdbms-aad.database.windows.net/.default` wi
 | Workflow | Runs | Identity | What it does |
 |---|---|---|---|
 | `terraform-plan` | every PR touching `infra/**` | `plan` (Reader + state blob access) | `fmt -check`, `validate` (main and bootstrap), then `plan -refresh=false -lock=false` against the remote state, posted as a PR comment; fails if the plan deletes or replaces the database, a storage account or container, Event Hubs, Service Bus, Key Vault or the registry |
-| `terraform-apply` | manual (Actions → Run workflow) | `deploy` (`prod` environment) | plan with refresh, the same delete guard (override: `allow_data_loss`), apply, then the host-storage clean-up |
+| `terraform-apply` | called by `release` on a merge to `main` that changes `infra/main/` or `infra/modules/`, or a manual `release` run with `terraform` ticked; before any code deploy and never at the same time as one | `deploy` (`prod` environment) | plan with refresh, the same delete guard (override: `allow_data_loss`, manual run only), apply if anything changes, the host-storage clean-up (also after a failed apply), and the ingest smoke check if the function app changed |
 | `security` | every PR, and every push to `main` and `staging` | none | gitleaks over the whole history |
 
 The plan runs with `-refresh=false` because Reader can't call the "list" actions the provider uses while
@@ -79,8 +79,8 @@ Set once in the repo (Settings → Secrets and variables → Actions):
 The workflows don't read `psql_nat_gateway_enabled` (~$1/day) or `eventhub_local_auth_enabled` (key login)
 from repo variables, so editing a variable can't switch either on for the next apply. Turning one on takes a
 PR that changes its default in `main/variables.tf`, with the user's OK (root `CLAUDE.md`); then laptop and CI
-applies agree. Setting it only in `infra/.env` works for a laptop apply, but the next terraform-apply run
-turns it off again.
+applies agree. Setting it only in `infra/.env` works for a laptop apply, but the next release that applies
+Terraform turns it off again.
 
 `AZURE_CLIENT_ID_DEPLOY`, `AZURE_TENANT_ID` and `AZURE_SUBSCRIPTION_ID` are already set for the deploys.
 
@@ -96,7 +96,7 @@ gh api repos/ghimpumihai/DataInfrastructure_Chuds/actions/oidc/customization/sub
 ```
 
 If a login fails with `AADSTS700213` (no matching federated identity record), compare the `sub` that
-terraform-plan prints in its "Show the OIDC subject GitHub sends" step with the credential's subject.
+terraform-plan prints after a failure in its "Show the OIDC subject GitHub sends" step with the credential's subject.
 A job with `environment:` gets `…:environment:<name>`; a `pull_request` job without one gets `…:pull_request`.
 
 ## Function host storage (provider bug, read before applying)
@@ -113,7 +113,7 @@ string, has no key to use with it, can't take its lock lease and never starts: e
 It is removed automatically:
 
 - by `tf.ps1 apply`, right after Terraform (`tf.ps1 fix-ingest-storage` runs only this step);
-- by the **terraform-apply** workflow, after the apply;
+- by the **terraform-apply** workflow, after the apply, even one that failed halfway;
 - by **deploy-ingest**, before every deploy, which then checks that the function answers.
 
 If you apply some other way, run this afterwards (bash or PowerShell, same line):
@@ -132,16 +132,16 @@ Terraform doesn't see the setting (the provider hides it), so deleting it never 
 - The read API's CORS origins are passed as an environment variable and enforced by FastAPI, not by the ingress setting.
 - The function app's host storage and deployment package live in their own small storage account, so the ingest identity is Owner only there and has plain write access on `lake`.
 - The Static Web App is in **East US 2**: Static Web Apps isn't offered in North Europe, and West Europe refused new customers on 2026-11-20. It serves files from a global network anyway.
-- Plan §13 first had Terraform applied on merge to `main` after approval in `prod`; `prod` has no required reviewers (the code deploys use it unattended), so **terraform-apply is manual** instead, and there is no teardown workflow (`tf.ps1 destroy`). Plan §13 now lists the workflows as built. The PR plan runs with `-refresh=false` because the plan identity is Reader only (see "CI for Terraform").
+- Plan §13 first had Terraform applied on merge to `main` after approval in `prod`; `prod` has no required reviewers (the code deploys use it unattended), so the approval is the merge of the release PR with the plan on it (D57), and there is no teardown workflow (`tf.ps1 destroy`). Plan §13 now lists the workflows as built. The PR plan runs with `-refresh=false` because the plan identity is Reader only (see "CI for Terraform").
 - The read API's ingress port is set by deploy-services together with the image, and the `AzureWebJobsStorage` setting the provider writes is deleted by `tf.ps1 apply` / the workflows: both are outside Terraform on purpose (`ignore_changes`, provider bug).
 - `psql_nat_gateway_enabled = true` adds a NAT gateway to the database subnet (~$1/day), for when default outbound access can't reach Entra ID. It needs the user's OK and goes in as a default change in `main/variables.tf` (see "CI for Terraform").
-- The read API allows only the Static Web App's origin. To develop the dashboard locally against the Azure read API, add `TF_VAR_extra_cors_origins=["http://localhost:5173"]` to `infra/.env` and apply from the laptop (with the user's OK, like any apply); the next terraform-apply run removes it again. The dashboard's own local setup (`dashboard/README.md`) uses mock data or a local read API and needs neither.
+- The read API allows only the Static Web App's origin. To develop the dashboard locally against the Azure read API, add `TF_VAR_extra_cors_origins=["http://localhost:5173"]` to `infra/.env` and apply from the laptop (with the user's OK, like any apply); the next release that applies Terraform removes it again. The dashboard's own local setup (`dashboard/README.md`) uses mock data or a local read API and needs neither.
 - Bootstrap may not register `microsoft.insights` (Azure lists it in lowercase); if Application Insights fails with `MissingSubscriptionRegistration`, run `az provider register --namespace Microsoft.Insights --wait`.
 - No alert rules yet: the plan wants an email on errors and on processor lag. The email action group and the budget exist: the budget emails at 40 % and 100 % of `budget_amount` spent ($20 and $50 by default), and the action group when the forecast reaches 100 %.
 
 ## Monitoring workbook
 
-`modules/observability/workbook.tf` defines one Azure Monitor workbook, **Road & Ride: live path**. In the portal: Application Insights `appi-roadride-*` → Workbooks. It is free (queries and platform metrics only) and follows the time range picked at the top (4 h by default).
+`modules/observability/workbook.tf` defines one Azure Monitor workbook, **Bumpy: live path**. In the portal: Application Insights `appi-roadride-*` → Workbooks. It is free (queries and platform metrics only) and follows the time range picked at the top (4 h by default).
 
 | Section | Shows | From |
 |---|---|---|
@@ -158,4 +158,4 @@ The log tiles parse the services' log lines (`<date> <time> LEVEL logger message
 ## Known risks
 
 - The `plan` identity for pull requests only has Reader, so terraform-plan runs with `-refresh=false` (see "CI for Terraform"). If a full refresh is ever wanted in CI, it needs a custom role with the provider's "list" actions, which would also expose keys to PR workflows.
-- Event Hubs Basic accepts managed-identity login (plan §16 day-0 question): key login is off and phones have streamed through it since 2026-11-21. If that ever breaks, the fallback is `eventhub_local_auth_enabled = true`: key login, so ask the user first (root `CLAUDE.md`). With their OK, change its default in `main/variables.tf` in a PR and apply it (with their OK too); a value in `.env` alone is undone by the next terraform-apply run.
+- Event Hubs Basic accepts managed-identity login (plan §16 day-0 question): key login is off and phones have streamed through it since 2026-11-21. If that ever breaks, the fallback is `eventhub_local_auth_enabled = true`: key login, so ask the user first (root `CLAUDE.md`). With their OK, change its default in `main/variables.tf` in a PR and apply it (with their OK too); a value in `.env` alone is undone by the next release that applies Terraform.

@@ -16,19 +16,23 @@ import { boundsOf } from "@/utils/geo";
 
 import { HeatLegend } from "./components/heat-legend";
 import { OverviewStrip } from "./components/overview-strip";
+import { ReplayLayer } from "./components/replay-layer";
 import { SegmentHighlights } from "./components/segment-highlights";
 import { StreetFinder } from "./components/street-finder";
 import { SegmentPanel } from "./components/segment-panel";
 import { SegmentsLayer } from "./components/segments-layer";
+import { TripReplayControls } from "./components/trip-replay-controls";
 import type { MapSearch } from "./schema";
-import { EVENTS_SOURCE_ID, SEGMENT_HIT_LAYER_ID, SELECTED_SEGMENT_LAYER_ID } from "./utils/constants";
+import { EVENTS_SOURCE_ID, REPLAY_GLOW_LAYER_ID, REPLAY_LINE_LAYER_ID, SEGMENT_HIT_LAYER_ID, SELECTED_SEGMENT_LAYER_ID } from "./utils/constants";
+import { useReplayedEvents } from "./utils/use-replayed-events";
+import { useTripReplay } from "./utils/use-trip-replay";
 
 /** Width of the road panel on a desktop screen (Tailwind `max-w-xl`) and its share of the height on a phone. */
 const PANEL_WIDTH_PX = 576;
 const PANEL_SHARE_NARROW = 0.55;
 
-/** Drawn above the heat image: the click targets, the selection ring and the event dots. */
-const HEAT_ABOVE_LAYERS = [SEGMENT_HIT_LAYER_ID, SELECTED_SEGMENT_LAYER_ID, eventsCircleLayerId(EVENTS_SOURCE_ID)];
+/** Drawn above the heat image: the trip being replayed, the click targets, the selection ring and the event dots. */
+const HEAT_ABOVE_LAYERS = [REPLAY_GLOW_LAYER_ID, REPLAY_LINE_LAYER_ID, SEGMENT_HIT_LAYER_ID, SELECTED_SEGMENT_LAYER_ID, eventsCircleLayerId(EVENTS_SOURCE_ID)];
 
 export function MapView() {
   const [street, setStreet] = useState<string>();
@@ -37,6 +41,8 @@ export function MapView() {
     const segments = segmentsApi.useSegments(VehicleFilter.ALL);
   const heat = segmentsApi.useHeat();
   const events = eventsApi.useEvents(VehicleFilter.ALL);
+  const replay = useTripReplay(search.speed);
+  const shownEvents = useReplayedEvents(events.data, replay);
 
   const update = (patch: Partial<MapSearch>) => void navigate({ search: (prev) => ({ ...prev, ...patch }), replace: true });
 
@@ -67,7 +73,15 @@ export function MapView() {
         fitPadding={fitPadding}
         styleUrl={MAP_STYLE_DARK_URL}
       >
-        {heat.data && <HeatCanvasLayer id="heat" data={heat.data} keepAbove={HEAT_ABOVE_LAYERS} />}
+        {heat.data && (
+          <HeatCanvasLayer
+            id="heat"
+            data={replay.active ? replay.done : heat.data}
+            scaleData={replay.active ? heat.data : undefined}
+            keepAbove={HEAT_ABOVE_LAYERS}
+          />
+        )}
+        {replay.active && <ReplayLayer frame={replay.frame} beforeId={SEGMENT_HIT_LAYER_ID} />}
         {segments.data && (
           <SegmentsLayer
             data={segments.data}
@@ -75,7 +89,7 @@ export function MapView() {
             selectedH3={search.segment} onSelect={(h3) => update({ segment: h3 })} />
         )}
         <StreetFinder center={selectedCenter} onFound={setStreet} />
-        {search.events && events.data && <EventsLayer id={EVENTS_SOURCE_ID} data={events.data} />}
+        {search.events && shownEvents && <EventsLayer id={EVENTS_SOURCE_ID} data={shownEvents} />}
       </MapCanvas>
       <div className="pointer-events-none absolute top-[4.5rem] right-3 left-3 vertical items-end gap-2 sm:top-3 sm:right-14 sm:left-auto">
         <div className="pointer-events-auto hidden sm:block">
@@ -93,7 +107,12 @@ export function MapView() {
         )}
       </div>
       <div className="pointer-events-none absolute bottom-8 left-3">
-        <HeatLegend className="pointer-events-auto" showEvents={search.events} onShowEventsChange={(show) => update({ events: show })} />
+        <HeatLegend
+          className="pointer-events-auto"
+          replay={<TripReplayControls replay={replay} disabled={!heat.data} />}
+          showEvents={search.events}
+          onShowEventsChange={(show) => update({ events: show })}
+        />
       </div>
       {segments.data && (
         <div className="pointer-events-none absolute right-3 bottom-20">

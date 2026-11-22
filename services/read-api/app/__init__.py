@@ -1,1 +1,1 @@
-"""Road & Ride read API (dashboard/API.md)."""
+"""Bumpy read API (dashboard/API.md)."""

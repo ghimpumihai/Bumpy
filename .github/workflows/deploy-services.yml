@@ -1,28 +1,17 @@
-name: deploy-services
+name: CD - Processor and read API
 
 # Builds the processor and read API images, runs the migrate job and waits for it, then updates the
 # finalize and aggregate jobs, the stream processor and the read API (plan §13). Migrations always run before new code sees the database.
+# Called by release.yml, which decides when and in what order (D57); no trigger of its own.
 # Needs the `prod` environment and the repo variables AZURE_CLIENT_ID_DEPLOY, AZURE_TENANT_ID,
 # AZURE_SUBSCRIPTION_ID, ACR_NAME and RESOURCE_GROUP.
 
 on:
-  push:
-    branches: [main]
-    paths:
-      - "services/processor/**"
-      - "services/read-api/**"
-      - "db/**"
-      - ".github/workflows/deploy-services.yml"
-      - "!**/*.md"
-  workflow_dispatch:
+  workflow_call:
 
 permissions:
   id-token: write
   contents: read
-
-concurrency:
-  group: deploy-services
-  cancel-in-progress: false
 
 env:
   MIGRATE_JOB: caj-roadride-migrate
@@ -35,16 +24,19 @@ env:
 jobs:
   # The same tests as on the PR, on the code being deployed: failing tests never ship.
   processor-tests:
+    name: Processor tests
     uses: ./.github/workflows/processor-ci.yml
     permissions:
       contents: read
 
   read-api-tests:
+    name: Read API tests
     uses: ./.github/workflows/read-api-ci.yml
     permissions:
       contents: read
 
   deploy:
+    name: Migrate, then deploy to Container Apps
     # Production deploys only from main: a manual run started from staging or any other branch
     # is skipped instead of shipping unmerged code to prod.
     if: github.ref == 'refs/heads/main'
@@ -52,9 +44,11 @@ jobs:
     runs-on: ubuntu-latest
     environment: prod
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - name: Check out the code
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
 
-      - uses: azure/login@7184910d9eb2b1c5e48f7073824a90609bb9b6d6 # v2.3.1
+      - name: Log in to Azure (OIDC, deploy identity)
+        uses: azure/login@7184910d9eb2b1c5e48f7073824a90609bb9b6d6 # v2.3.1
         with:
           client-id: ${{ vars.AZURE_CLIENT_ID_DEPLOY }}
           tenant-id: ${{ vars.AZURE_TENANT_ID }}

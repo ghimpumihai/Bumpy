@@ -1,6 +1,6 @@
 <#
 .SYNOPSIS
-  Runs Terraform for the Road & Ride stack with settings from infra/.env.
+  Runs Terraform for the Bumpy stack with settings from infra/.env.
 
 .EXAMPLE
   .\tf.ps1 bootstrap   # once: state storage, stack resource group, GitHub OIDC identities

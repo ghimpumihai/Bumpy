@@ -1,5 +1,5 @@
 import { Link, useRouteContext } from "@tanstack/react-router";
-import { Activity, Gauge, Map as MapIcon, Menu, Radio, type LucideIcon } from "lucide-react";
+import { Activity, Map as MapIcon, Menu, Radio, type LucideIcon } from "lucide-react";
 import { useState, type ReactNode } from "react";
 
 import { Sheet, SheetContent, SheetDescription, SheetHeader, SheetTitle, SheetTrigger } from "@/components/ui/sheet";
@@ -39,8 +39,8 @@ export function AppLayout({ children }: { children: ReactNode }) {
 
       {/* Desktop: a small floating dock instead of a bar, so the map owns the whole screen. */}
       <nav aria-label="Main" className={cn("fixed top-3 left-3 z-40 hidden items-center gap-1 rounded-full p-1 sm:flex", GLASS)}>
-        <Link to="/live" aria-label="Road &amp; Ride" className="grid size-8 place-items-center rounded-full bg-accent text-accent-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring">
-          <Gauge className="size-4" aria-hidden="true" />
+        <Link to="/live" aria-label="Bumpy" className="rounded-full focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring">
+          <img src="/favicon.svg" alt="" className="size-8 rounded-full" />
         </Link>
         <ul className="horizontal gap-0.5">
           {NAV_ITEMS.map(({ to, label }) => (
@@ -73,10 +73,8 @@ export function AppLayout({ children }: { children: ReactNode }) {
         <SheetContent side="left" className="w-72 sm:hidden sm:max-w-72">
           <SheetHeader>
             <SheetTitle className="horizontal gap-2">
-              <span className="grid size-8 place-items-center rounded-lg bg-accent text-accent-foreground">
-                <Gauge className="size-5" aria-hidden="true" />
-              </span>
-              Road &amp; Ride
+              <img src="/favicon.svg" alt="" className="size-8" />
+              Bumpy
             </SheetTitle>
             <SheetDescription>Road quality · motion sickness</SheetDescription>
           </SheetHeader>

@@ -32,7 +32,7 @@ struct MenuDrawer: View {
     private var panel: some View {
         VStack(alignment: .leading, spacing: 36) {
             HStack {
-                Text("Road & Ride")
+                Text("Bumpy")
                     .font(Theme.font(24, .semibold))
                     .tracking(-0.6)
                     .foregroundStyle(Theme.text)

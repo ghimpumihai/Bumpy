@@ -7,7 +7,7 @@ export function LivePage() {
   return (
     <>
       <Helmet>
-        <title>Live · Road &amp; Ride</title>
+        <title>Live · Bumpy</title>
       </Helmet>
       <LiveView />
     </>

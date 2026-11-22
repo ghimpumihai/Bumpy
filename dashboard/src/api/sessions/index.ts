@@ -1,4 +1,4 @@
-import { type Query, useQuery } from "@tanstack/react-query";
+import { type Query, useQueries, useQuery } from "@tanstack/react-query";
 
 import { api } from "@/config/api-client";
 import { STATIC_STALE_TIME_MS } from "@/constants";
@@ -73,6 +73,8 @@ const useSession = (sessionId: string) =>
 
 const useSessionSeries = (trip: TripRef) => useQuery(tripDataQuery("series", trip, getSeries));
 const useSessionTrack = (trip: TripRef) => useQuery(tripDataQuery("track", trip, getTrack));
+/** The tracks of several trips at once (the map's replay), sharing the trip page's cache. */
+const useSessionTracks = (trips: TripRef[]) => useQueries({ queries: trips.map((trip) => tripDataQuery("track", trip, getTrack)) });
 const useSessionEvents = (trip: TripRef) => useQuery(tripDataQuery("events", trip, getEvents));
 const useSessionLabels = (trip: TripRef) => useQuery(tripDataQuery("labels", trip, getLabels));
 
@@ -83,6 +85,7 @@ export const sessionsApi = {
   useSession,
   useSessionSeries,
   useSessionTrack,
+  useSessionTracks,
   useSessionEvents,
   useSessionLabels,
 };

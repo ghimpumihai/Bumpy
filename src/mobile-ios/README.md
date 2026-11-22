@@ -1,4 +1,4 @@
-# Sensor Recorder: iOS data-collection app
+# Bumpy: iOS data-collection app (Xcode project `SensorRecorder`)
 
 Native Swift/SwiftUI app (iOS 17+, built for an iPhone 14 Pro) that records every useful
 sensor at the highest practical rate. It writes everything to local CSV files first, uploads
@@ -222,7 +222,7 @@ SensorRecorder/
   Upload/     IngestBatch + accumulator, gzip (Compression + CRC32), disk UploadQueue,
               TripCloudCopy (the recap's cloud share and the delete guard), settings
   UI/         SwiftUI screens (Start, Recording, Recap, menu, Settings) and Theme
-  Resources/  Fonts/Geist-Variable.ttf (+ its OFL licence)
+  Resources/  Assets.xcassets (app icon), Fonts/Geist-Variable.ttf (+ its OFL licence)
 ```
 
 ## Tests

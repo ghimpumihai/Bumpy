@@ -394,7 +394,7 @@ locals {
         {
           type    = 1
           name    = "title"
-          content = { json = "# Road & Ride: live path\nPhone → ingest function → Event Hubs → stream processor → PostgreSQL → read API, and the finalize job. Plan §5 \"Running and watching it\"." }
+          content = { json = "# Bumpy: live path\nPhone → ingest function → Event Hubs → stream processor → PostgreSQL → read API, and the finalize job. Plan §5 \"Running and watching it\"." }
         },
         {
           type = 9
@@ -435,7 +435,7 @@ resource "azurerm_application_insights_workbook" "live_path" {
   name                = uuidv5("url", "${var.resource_group_id}/workbooks/live-path")
   resource_group_name = var.resource_group_name
   location            = var.location
-  display_name        = "Road & Ride: live path"
+  display_name        = "Bumpy: live path"
   source_id           = lower(azurerm_application_insights.this.id)
   data_json           = jsonencode(local.workbook)
   tags                = var.tags

@@ -94,7 +94,7 @@ def create_app(pool: ConnectionPool | None = None) -> FastAPI:
             pool.close()
 
     # fastapi.FastAPI looked up now, not at import: telemetry swaps in an instrumented class.
-    app = fastapi.FastAPI(title="Road & Ride read API", docs_url=None, redoc_url=None, openapi_url=None,
+    app = fastapi.FastAPI(title="Bumpy read API", docs_url=None, redoc_url=None, openapi_url=None,
                   lifespan=lifespan)
 
     # Added first, so it sits inside CORS (the last middleware added is the outermost).

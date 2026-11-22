@@ -5,7 +5,7 @@ alwaysApply: false
 scope: This rule applies ONLY to `src/mobile-ios/` in the DataInfrastructure_Chuds repository. Do not apply it anywhere else.
 ---
 
-# iOS Sensor Recorder rules
+# iOS app rules (Bumpy, Xcode project `SensorRecorder`)
 
 Requirements: `decisions/01-initial-plan.md`. Losing data is the worst possible bug; a red banner beats a silent failure.
 

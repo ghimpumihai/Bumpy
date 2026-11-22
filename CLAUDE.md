@@ -1,4 +1,4 @@
-# Road & Ride: project rules
+# Bumpy: project rules
 
 ## Decisions
 - Design rationale: `decisions/02-infrastructure-plan.md`. The Status column of the decision log (`decisions/README.md`) says which decisions are current.

@@ -7,7 +7,7 @@ export function MapPage() {
   return (
     <>
       <Helmet>
-        <title>Map · Road &amp; Ride</title>
+        <title>Map · Bumpy</title>
       </Helmet>
       <MapView />
     </>

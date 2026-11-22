@@ -9,12 +9,16 @@ import type { Position } from "@/types/common";
 const COLOR_VARS = ["--heat-low", "--heat-mid", "--heat"] as const;
 /** Draw this far beyond the screen on every side, so small pans don't show an uncovered edge. */
 const MARGIN = 0.5;
+/** Less during a replay, which redraws after every trip: about a third of the pixels. */
+const REPLAY_MARGIN = 0.1;
 const MAX_DPR = 2;
 const REDRAW_DELAY_MS = 60;
 
 interface HeatCanvasLayerProps {
   id: string;
   data: FeatureCollection<MultiLineString>;
+  /** During a replay: fit the colour scale to these trips instead of `data`. */
+  scaleData?: FeatureCollection<MultiLineString>;
   /** Layers that must stay above the heat (the clickable segments, the event dots). */
   keepAbove?: string[];
 }
@@ -23,7 +27,7 @@ interface HeatCanvasLayerProps {
  * The heat map as an image laid over the map: redrawn from the trip lines whenever the view settles, so the colour
  * scale always fits what is on screen (see `renderHeat`). The image is a MapLibre canvas source, not a data layer.
  */
-export function HeatCanvasLayer({ id, data, keepAbove = [] }: HeatCanvasLayerProps) {
+export function HeatCanvasLayer({ id, data, scaleData, keepAbove = [] }: HeatCanvasLayerProps) {
   const state = useMapState();
   const map = state?.map ?? null;
   const styleGeneration = state?.styleGeneration ?? 0;
@@ -42,8 +46,9 @@ export function HeatCanvasLayer({ id, data, keepAbove = [] }: HeatCanvasLayerPro
       const dpr = Math.min(window.devicePixelRatio || 1, MAX_DPR);
       const cssWidth = map.getContainer().clientWidth;
       const cssHeight = map.getContainer().clientHeight;
-      const padX = cssWidth * MARGIN;
-      const padY = cssHeight * MARGIN;
+      const margin = scaleData ? REPLAY_MARGIN : MARGIN;
+      const padX = cssWidth * margin;
+      const padY = cssHeight * margin;
       const width = Math.round((cssWidth + 2 * padX) * dpr);
       const height = Math.round((cssHeight + 2 * padY) * dpr);
       const toPixel = ([lon, lat]: Position): Position => {
@@ -53,8 +58,9 @@ export function HeatCanvasLayer({ id, data, keepAbove = [] }: HeatCanvasLayerPro
       const zoom = map.getZoom();
       // Thin when zoomed out, thickening as you zoom in so the line fills the road it follows.
       const lineWidth = Math.min(9, Math.max(1.3, 1.3 + (zoom - 11) * 0.85)) * dpr;
-      const trips = data.features.map((feature) => feature.geometry.coordinates.map((line) => line.map((p) => toPixel(p as Position))));
-      const canvas = renderHeat({ width, height, trips, lineWidth, glow: lineWidth * 1.8, ramp: rampKey.split("|") });
+      const toPixels = (trips: FeatureCollection<MultiLineString>) =>
+        trips.features.map((feature) => feature.geometry.coordinates.map((line) => line.map((p) => toPixel(p as Position))));
+      const canvas = renderHeat({ width, height, trips: toPixels(data), scaleTrips: scaleData && toPixels(scaleData), lineWidth, glow: lineWidth * 1.8, ramp: rampKey.split("|") });
       const corners = [
         map.unproject([-padX, -padY]),
         map.unproject([cssWidth + padX, -padY]),
@@ -86,7 +92,7 @@ export function HeatCanvasLayer({ id, data, keepAbove = [] }: HeatCanvasLayerPro
       if (map.getLayer(id)) map.removeLayer(id);
       if (map.getSource(id)) map.removeSource(id);
     };
-  }, [map, styleGeneration, id, data, rampKey, aboveKey]);
+  }, [map, styleGeneration, id, data, scaleData, rampKey, aboveKey]);
 
   return null;
 }

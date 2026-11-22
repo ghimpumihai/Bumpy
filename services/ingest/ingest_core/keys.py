@@ -3,8 +3,8 @@
 Only hashes are ever loaded. A presented key is hashed and compared against every stored hash in
 constant time, so neither the result nor the timing says which device (if any) came close.
 
-Each key is bound to the name it was stored under, which must be the deviceId the app sends (the
-app shows it in Settings → Device ID). A key may only send as its own device (`may_send_as`), so
+Each key is bound to the name it was stored under, which must be the deviceId the app sends (also in
+a trip's session.json). A key may only send as its own device (`may_send_as`), so
 one leaked key can't post batches or session metadata for another phone.
 """
 

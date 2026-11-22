@@ -9,9 +9,9 @@ resource "azurerm_static_web_app" "dashboard" {
   sku_size            = "Free"
   tags                = var.tags
 
+  # Not set here, but Azure has values for them and keeps them after an apply that clears them, so every
+  # plan would show the same change.
   lifecycle {
-    # Every site upload (deploy-dashboard) records the repository and branch here; Terraform must not
-    # clear them again on the next apply.
-    ignore_changes = [repository_url, repository_branch]
+    ignore_changes = [repository_branch, repository_url]
   }
 }

@@ -155,7 +155,7 @@ Terraform doesn't see the setting (the provider hides it), so deleting it never 
 
 The log tiles parse the services' log lines (`<date> <time> LEVEL logger message`, `services/processor/roadride/stream.py` and `finalize.py`); a change to those lines needs the matching change in `workbook.tf`. The read API also sends its requests, logs and traces to Application Insights (`azure-monitor-opentelemetry`, `services/read-api/app/main.py`), but its section uses the Container Apps `Requests` metric, which counts every request at the ingress, including those that never reach the app. A tile shows an error instead of an empty chart until its table has its first row (for example `ContainerAppConsoleLogs_CL` before any app has logged).
 
-## Known risks to check on the first apply
+## Known risks
 
 - The `plan` identity for pull requests only has Reader, so terraform-plan runs with `-refresh=false` (see "CI for Terraform"). If a full refresh is ever wanted in CI, it needs a custom role with the provider's "list" actions, which would also expose keys to PR workflows.
-- If Event Hubs Basic refuses managed-identity login (plan §16 day-0 test), the fallback is `eventhub_local_auth_enabled = true`: key login, so ask the user first (root `CLAUDE.md`). With their OK, change its default in `main/variables.tf` in a PR and apply it (with their OK too); a value in `.env` alone is undone by the next terraform-apply run.
+- Event Hubs Basic accepts managed-identity login (plan §16 day-0 question): key login is off and phones have streamed through it since 2026-11-21. If that ever breaks, the fallback is `eventhub_local_auth_enabled = true`: key login, so ask the user first (root `CLAUDE.md`). With their OK, change its default in `main/variables.tf` in a PR and apply it (with their OK too); a value in `.env` alone is undone by the next terraform-apply run.

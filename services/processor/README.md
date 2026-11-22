@@ -58,7 +58,7 @@ It runs on the phone's **uptime clock** (`t0Up + t`), which only moves forward d
 
 Each series window also carries the RMS of the band-passed vertical and its share of the dose (`rough_rms`, `dose_inc`); they aren't stored in `session_series`, but the finalize job builds segment passes from them. A window cut short by a reset is dropped with its dose, so every window's `dose_inc` covers its own 0.2 s (the trip's MSDV keeps that dose). `a_lat`/`a_lon` average the window's samples that had a forward axis.
 
-**Provisional:** the pothole and speed-bump thresholds, the forward-axis estimate (including `FWD_MAX_TURN_RATIO`) and the lateral weighting (`WY`, `LATERAL_K`) haven't seen a real drive yet. The pipeline's state of a trip in progress during the deploy that added the rotation rate is upgraded in place (no rotation channel yet: zero for the first interpolated sample).
+**Provisional:** the pothole and speed-bump thresholds, the forward-axis estimate (including `FWD_MAX_TURN_RATIO`) and the lateral weighting (`WY`, `LATERAL_K`) have run on real drives since 2026-11-21 but haven't been tuned on them or checked against ground truth (the app records no taps since D51). The pipeline's state of a trip in progress during the deploy that added the rotation rate is upgraded in place (no rotation channel yet: zero for the first interpolated sample).
 
 ## Finalize job (`roadride/finalize.py`)
 

@@ -123,7 +123,7 @@ Read this section if a tool name is unfamiliar. Each entry says what the tool is
 
 **iPhone recorder app** (built by our teammate, see [01-initial-plan.md](01-initial-plan.md)). Writes every sensor to CSV files on the phone first, so nothing is lost if the network fails. Every 2 seconds it builds a batch with all sensors at full rate (the app records no audio, D48), saves it in a **queue on disk**, and sends the queue oldest first, retrying with backoff until the backend accepts each batch. A dead zone therefore delays data, it doesn't lose it. It also sends the session's metadata (`session.json`: vehicle, mount, seat, posture) at Start and again at Stop, through the same queue, so the backend knows the context and when the trip ended (spec §6.1). Since D51 the app has no setup form: every trip is recorded as a car, with the remembered mount and people settings.
 
-**Laptop upload (fallback)** (`tools/upload/upload.py`, a Python script using only the standard library: it calls the Blob Storage REST API with a token from your `az login`). Only for a trip that never reached the cloud (no network at all, upload switched off, or the app's queue was cleared). The session folder (or its exported `.zip`) is AirDropped to a laptop and uploaded with one command; raw audio files from older app builds stay on the laptop. The script uploads all files first and writes a small `_complete.json` marker **last**, with each file's size and SHA-256, so processing never starts on a half-uploaded folder. Team members log in with their own Azure account; they need the "Storage Blob Data Contributor" role on the `sessions` container (Terraform gives it to everyone in `admin_object_ids`).
+**Laptop upload (fallback)** (`tools/upload/upload.py`, a Python script using only the standard library: it calls the Blob Storage REST API with a token from your `az login`). Only for a trip that never reached the cloud (no network at all, upload switched off, or the app's queue was cleared). The session folder (or a `.zip` of it) is copied to a laptop (Files app or Finder over USB; no in-app export since D51) and uploaded with one command; raw audio files from older app builds stay on the laptop. The script uploads all files first and writes a small `_complete.json` marker **last**, with each file's size and SHA-256, so processing never starts on a half-uploaded folder. Team members log in with their own Azure account; they need the "Storage Blob Data Contributor" role on the `sessions` container (Terraform gives it to everyone in `admin_object_ids`).
 
 **Replay tool** (`tools/replay`, a small Python script). Reads a recorded session folder, builds the same 2-second batches the phone would send, and posts them to the real API at real speed (or faster). It is our end-to-end test before every drive, and our backup demo: in the room we can show the map updating live from a real trip. Replays are tagged `source=replay` with a new session ID, and are never counted in the aggregated map, so nothing is counted twice.
 
@@ -136,7 +136,7 @@ Read this section if a tool name is unfamiliar. Each entry says what the tool is
 | `POST /api/ingest` | one 2-second batch (spec §6) |
 | `PUT /api/ingest/sessions/{sessionId}` | the session's metadata, sent at Start and at Stop (spec §6.1) |
 
-There is no health route. The app tests its connection with a **probe**: a gzipped `{"probe":true}` with the device key and the header `x-probe: 1`, sent to `/api/ingest`. Because the function checks the key before the body, the answer tells the app everything it needs: `401`/`403` = wrong key, `400` = reachable and key accepted (the probe is rejected and never stored), `404` = wrong address. `src/mobile-ios/tools/mock_ingest_server.py` implements the same order and is the reference for the function's responses; only the two `403` checks below (device binding and session owner) are not in the mock.
+There is no health route. The app tests its connection with a **probe**: a gzipped `{"probe":true,"deviceId":"<Device ID>"}` with the device key and the header `x-probe: 1`, sent to `/api/ingest`. Because the function checks the key before the body, the answer tells the app everything it needs: `401` = unknown key, `403` = the key is stored under another device ID, `400` = reachable and key accepted (the probe is rejected and never stored), `404` = wrong address. `src/mobile-ios/tools/mock_ingest_server.py` implements the same order and is the reference for the function's responses; only the two `403` checks below (device binding and session owner) are not in the mock.
 
 For each batch or metadata message the function:
 - checks the `x-device-key` header against hashed device keys (stored in Key Vault, compared in constant time so timing can't leak them). The function caches them and reloads the secret every 5 minutes, and within a minute when an unknown key arrives, so a new key works without a restart. If Key Vault can't be read when a reload is needed (the first load, an unknown key, a key sending as another device) it answers `503`; known keys keep working from the cache, but not with keys older than 6 hours;
@@ -163,7 +163,7 @@ Setup details: Python 3.12 (GA on Flex Consumption), instance memory 512 MB (bil
 - **buffers** a day of data, so a processor crash or redeploy during a drive loses nothing;
 - costs about **$0.36 per day**.
 
-Basic tier limits that matter: one reader group (fine, only the processor reads; the archive is written by the ingest function), 256 KB per message (a batch is about 30 KB, billed as one event because events are counted in 64 KB units), 1 day of retention, up to 32 partitions, 100 connections per namespace. Price in North Europe: $0.015 per throughput-unit hour plus $0.028 per million events.
+Basic tier limits that matter: one reader group (fine, only the processor reads; the archive is written by the ingest function), 256 KB per message (a batch is about 45 KB, billed as one event because events are counted in 64 KB units), 1 day of retention, up to 32 partitions, 100 connections per namespace. Price in North Europe: $0.015 per throughput-unit hour plus $0.028 per million events.
 
 Login: the ingest function and processor use their managed identities ("Azure Event Hubs Data Sender" / "Data Receiver" roles) and key-based access is switched off. Microsoft's tier tables don't list authentication per tier, so on day 0 we send one test event with a managed identity; if Basic refused it, the fallback is key login (`eventhub_local_auth_enabled` in Terraform, only with the user's OK; the services have no code for keys yet). *Rejected:* Event Hubs Standard with **Capture**, which writes the stream to storage by itself, like Firehose. Capture costs extra per hour on Standard and writes Avro files instead of plain JSON; a few lines in the ingest function do the same job for free. See §6 for Kafka and others.
 
@@ -247,7 +247,7 @@ The dashboard is built (`dashboard/`, React + MapLibre + uPlot) and deployed to 
 
 End-to-end delay target: under 10 seconds from the phone to the screen (2 s batch, upload, stream, processing, 2 s polling). The processor stores when each batch arrived, so the dashboard can show the real delay instead of claiming "live".
 
-**Read API (Container App).** A small Python web service (FastAPI) in the Container Apps environment. It only reads from the database and returns JSON and GeoJSON (map data) to the dashboard. Its routes, response types and rules (privacy trimming, aggregation rules, units) are fixed by [`dashboard/API.md`](../dashboard/API.md), and the dashboard's mock backend implements the same contract. It logs in as `reader` with its managed identity and keeps 1 copy running so the live view never waits for a cold start.
+**Read API (Container App).** A small Python web service (FastAPI) in the Container Apps environment. It only reads from the database and returns JSON and GeoJSON (map data) to the dashboard. Its routes, response types and rules (no privacy trim, aggregation rules, units) are fixed by [`dashboard/API.md`](../dashboard/API.md), and the dashboard's mock backend implements the same contract. It logs in as `reader` with its managed identity and keeps 1 copy running so the live view never waits for a cold start.
 
 *Why a container, not a second function?* A Flex Consumption function joined to the VNet sends **all** its outgoing traffic through the VNet, including logs and its own storage. Subnets in new VNets no longer get internet access by default, so that would need a NAT gateway (about $1 per day) or a fragile workaround. The Container Apps environment already has its own outgoing IP and is already in the VNet, so the read API fits there at almost no cost.
 
@@ -415,7 +415,7 @@ Raw values are always stored as measured; normalization happens only in the aggr
 - **Trams.** Rail joints cause regular, repeating impacts. When a tram trip is finalized, every pothole detection is labelled `rail_joint` (D42), so rail joints never count as potholes in the aggregated map.
 - **No audio** (D48): the app records no sound, and the backend ignores the sound level older app builds still send.
 - **Only finalized trips count in aggregates.** A trip still recording, or one whose context (vehicle, mount) never arrived, shows on the live view but not in the aggregated map. Replays never count.
-- A **data-quality panel** on each trip's dashboard page shows: sample rates, gaps, GPS accuracy, valid fraction and rejected batches.
+- A **data-quality panel** on each trip's dashboard page shows: sample rates, gaps, GPS accuracy, valid fraction and rejected batches (always 0: a rejected batch never reaches the database).
 
 ---
 
@@ -578,7 +578,7 @@ docker-compose.yml    # local PostGIS
 - Which loop will we drive repeatedly, and which bus or tram line overlaps it?
 - Who owns which part (processing, infra, dashboard, app)?
 - When is the dry run?
-- How much GPS trimming do we want on the public dashboard and in the public repo?
+- ~~How much GPS trimming do we want on the public dashboard?~~ *Answered: none (D40).* Recorded trips are not in the public repo.
 
 ---
 

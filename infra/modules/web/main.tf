@@ -8,4 +8,10 @@ resource "azurerm_static_web_app" "dashboard" {
   sku_tier            = "Free"
   sku_size            = "Free"
   tags                = var.tags
+
+  # Not set here, but Azure has values for them and keeps them after an apply that clears them, so every
+  # plan would show the same change.
+  lifecycle {
+    ignore_changes = [repository_branch, repository_url]
+  }
 }

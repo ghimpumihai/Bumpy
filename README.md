@@ -47,12 +47,12 @@ Everything in the diagram is built and deployed. The laptop upload is the fallba
 | **Dashboard** | [`dashboard/`](dashboard/README.md) | Live, Map (trip-overlap heat map), Sessions and trip pages, on Static Web Apps against the real read API. Deployed by hand with **deploy-dashboard** (last run on 2026-11-21). Without an `apiBase` in `config.json` (local runs) it uses its built-in mock data. |
 | **Monitoring workbook** | [`infra/`](infra/README.md#monitoring-workbook) | Defined in Terraform and applied with the stack. One page for the live path: ingest requests by status, Event Hubs traffic, processor lag and events per minute, finalize runs and dead letters, the queue, PostgreSQL load and the read API. |
 
-### Done, waiting on one step
+### Done, with a step left
 
-| Part | What's missing |
+| Part | Where it stands |
 |---|---|
-| **iPhone app** ([`src/mobile-ios/`](src/mobile-ios/README.md)) | Built and tested by the team. The phone needs the ingest URL and a device key in its upload settings. The URL is `ingest_base_url` from `./infra/tf.ps1 output` (`https://<function host>`, no path; the app adds `/api/ingest`); `pwsh infra/scripts/add-device-key.ps1 -DeviceId <the app's Device ID>` creates the key. The app has no screen for the Device ID since D51: it is `deviceId` in any trip's `session.json` ([how to find it](src/mobile-ios/README.md#finding-the-device-id)). |
-| **End-to-end test** | Every piece is tested on its own, and the deploys check the Azure logins. **No test in CI covers the whole path from a phone to the dashboard.** The test is either a real drive or a [replay](tools/replay/README.md) of a recorded session folder. If the Live page stays empty, check the ingest function's logs first. |
+| **iPhone app** ([`src/mobile-ios/`](src/mobile-ios/README.md)) | Built, and streaming to Azure since 2026-11-21. Each new phone needs the ingest URL and a device key in its upload settings. The URL is `ingest_base_url` from `./infra/tf.ps1 output` (`https://<function host>`, no path; the app adds `/api/ingest`); `pwsh infra/scripts/add-device-key.ps1 -DeviceId <the app's Device ID>` creates the key. The app has no screen for the Device ID since D51: it is `deviceId` in any trip's `session.json` ([how to find it](src/mobile-ios/README.md#finding-the-device-id)). |
+| **End-to-end test** | Done by hand: on 2026-11-21 ten trips streamed from an iPhone (the longest 9 km, all as `car`) were finalized and now count in the map. Every piece is also tested on its own, and the deploys check the Azure logins. **No test in CI covers the whole path from a phone to the dashboard**, so after a deploy repeat it with a real drive or a [replay](tools/replay/README.md) of a recorded session folder. If the Live page stays empty, check the ingest function's logs first. |
 
 ### Not built yet
 

@@ -165,7 +165,7 @@ Setup details: Python 3.12 (GA on Flex Consumption), instance memory 512 MB (bil
 
 Basic tier limits that matter: one reader group (fine, only the processor reads; the archive is written by the ingest function), 256 KB per message (a batch is about 45 KB, billed as one event because events are counted in 64 KB units), 1 day of retention, up to 32 partitions, 100 connections per namespace. Price in North Europe: $0.015 per throughput-unit hour plus $0.028 per million events.
 
-Login: the ingest function and processor use their managed identities ("Azure Event Hubs Data Sender" / "Data Receiver" roles) and key-based access is switched off. Microsoft's tier tables don't list authentication per tier, so on day 0 we send one test event with a managed identity; if Basic refused it, the fallback is key login (`eventhub_local_auth_enabled` in Terraform, only with the user's OK; the services have no code for keys yet). *Rejected:* Event Hubs Standard with **Capture**, which writes the stream to storage by itself, like Firehose. Capture costs extra per hour on Standard and writes Avro files instead of plain JSON; a few lines in the ingest function do the same job for free. See §6 for Kafka and others.
+Login: the ingest function and processor use their managed identities ("Azure Event Hubs Data Sender" / "Data Receiver" roles) and key-based access is switched off. Microsoft's tier tables don't list authentication per tier, so it was a day-0 question; it works (phones have streamed with key login off since 2026-11-21). Had Basic refused it, the fallback was key login (`eventhub_local_auth_enabled` in Terraform, only with the user's OK; the services have no code for keys yet). *Rejected:* Event Hubs Standard with **Capture**, which writes the stream to storage by itself, like Firehose. Capture costs extra per hour on Standard and writes Avro files instead of plain JSON; a few lines in the ingest function do the same job for free. See §6 for Kafka and others.
 
 ### Processing: live, then once more per trip
 
@@ -603,7 +603,7 @@ Every point the plan had marked as unsure, what we found, and what it changed. S
 | Question | Answer | Effect on the plan |
 |---|---|---|
 | What does Event Hubs Basic cost? | $0.015 per throughput-unit hour + $0.028 per million events (events counted in 64 KB units) | $0.36/day; batches are one event each (§14) |
-| Does Event Hubs Basic accept Entra (managed identity) login? | Not stated per tier in Microsoft's tables; Entra login is documented for Event Hubs in general | Day-0 test; fallback is key login (`eventhub_local_auth_enabled`, §5, §16) |
+| Does Event Hubs Basic accept Entra (managed identity) login? | Not stated per tier in Microsoft's tables; Entra login is documented for Event Hubs in general | Day-0 test, and it works; the fallback, key login (`eventhub_local_auth_enabled`, §5, §16), wasn't needed |
 | What are Container Apps' free grant and rates? | 180,000 vCPU-s, 360,000 GiB-s and 2 M requests per subscription per month; active $0.000024/vCPU-s, idle $0.000003/vCPU-s, memory $0.000003/GiB-s; jobs billed only while running | Costs in §14 |
 | Is Container Registry free? | One Standard registry is free for 12 months on the free account | Use Standard, not Basic (§5) |
 | Is PostgreSQL `B1ms` free? | Yes: 750 hours, 32 GB storage, 32 GB backup per month for 12 months, new customers only; $0.018/hour after | Unchanged |

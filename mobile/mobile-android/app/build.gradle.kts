@@ -39,9 +39,14 @@ android {
 
     testOptions {
         unitTests.all {
-            it.systemProperty("ios.fixtures", rootProject.file("../mobile-ios/tools/fixtures").path)
+            val fixtures = rootProject.file("../mobile-ios/tools/fixtures")
             // Where the tests write the samples that tools/check_contract.py runs through the ingest validator.
-            it.systemProperty("contract.out", layout.buildDirectory.dir("contract").get().asFile.path)
+            val contract = layout.buildDirectory.dir("contract")
+            it.systemProperty("ios.fixtures", fixtures.path)
+            it.systemProperty("contract.out", contract.get().asFile.path)
+            // Declared, or a changed fixture leaves the tests "up to date" and they are skipped.
+            it.inputs.dir(fixtures)
+            it.outputs.dir(contract)
             it.maxHeapSize = "1g"
         }
     }

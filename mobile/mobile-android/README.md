@@ -81,7 +81,8 @@ roughness, MSDV and events.
 python -I tools/check_contract.py   # runs what the tests wrote through the real ingest validator
 ```
 
-JVM tests of the data path, ported from the iOS app's. They compare against `../mobile-ios/tools/fixtures`
+`.github/workflows/android-app.yml` runs both, lint and the release build, also when the iPhone fixtures or the
+ingest validator change. JVM tests of the data path, ported from the iOS app's. They compare against `../mobile-ios/tools/fixtures`
 and never write there.
 
 ## Code map

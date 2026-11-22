@@ -3,7 +3,7 @@
 Implements [decisions/02-infrastructure-plan.md](../decisions/02-infrastructure-plan.md) §12. Everything runs through [`tf.ps1`](tf.ps1), a PowerShell script that reads settings from `infra/.env`. It works in Windows PowerShell 5.1 and in PowerShell 7 (`pwsh`) on macOS and Linux; the commands below are the same in both, with `./` or `.\` in front.
 
 ```
-bootstrap/   run once by hand: stack resource group, Terraform state storage, GitHub OIDC identities, provider registration
+bootstrap/   run once by hand: stack resource group, Terraform state storage, team group, GitHub OIDC identities, provider registration
 main/        the whole stack (state in the bootstrap storage account)
 modules/     network, storage, messaging, database, compute, web, observability
 scripts/     add-device-key.ps1 (device key hashes into Key Vault)
@@ -15,10 +15,10 @@ scripts/     add-device-key.ps1 (device key hashes into Key Vault)
    - macOS: `brew tap hashicorp/tap && brew install hashicorp/tap/terraform azure-cli && brew install --cask powershell`, then start PowerShell with `pwsh`.
    - Windows: `winget install Hashicorp.Terraform` and `winget install Microsoft.AzureCLI`.
 2. `az login`, then `az account set --subscription <id>` if you have more than one.
-3. `cp infra/.env.example infra/.env` (Windows: `Copy-Item infra/.env.example infra/.env`) and fill in the first block (the comments say which `az` command prints each value).
+3. `cp infra/.env.example infra/.env` (Windows: `Copy-Item infra/.env.example infra/.env`) and fill in the Azure account IDs, `TF_VAR_alert_email` and `TF_VAR_admin_object_ids` (the comments say which `az` command prints each value; add the team group's ID from the bootstrap output `team_group_object_id` after step 4).
 4. In `pwsh` (or Windows PowerShell): `cd infra; ./tf.ps1 bootstrap`. It writes the state settings into `.env` and prints the GitHub repo variables for CI.
 5. `./tf.ps1 plan`, then `./tf.ps1 apply` (about 15 minutes; PostgreSQL is the slow part). The apply ends by removing a storage setting the provider writes by mistake ([Function host storage](#function-host-storage-provider-bug-read-before-applying)).
-6. `./scripts/add-device-key.ps1 -DeviceId <Device ID>` for each phone, where the Device ID is the UUID the app shows in Settings (a key only works for the device it is stored under), and `-DeviceId replay` once for the replay tool. An existing entry under another name: add `-RenameFrom <old name>`. The function picks up new and renamed keys by itself within a minute; no restart is needed.
+6. `./scripts/add-device-key.ps1 -DeviceId <Device ID>` for each phone, where the Device ID is the UUID in `deviceId` of any trip's `session.json` ([how to find it](../src/mobile-ios/README.md#finding-the-device-id); a key only works for the device it is stored under), and `-DeviceId replay` once for the replay tool. An existing entry under another name: add `-RenameFrom <old name>`. The function picks up new and renamed keys by itself within a minute; no restart is needed.
 7. `./tf.ps1 output` prints `ingest_base_url` (`https://<function host>`, no path: paste it into the iPhone app's upload settings and into `REPLAY_API_URL`; both add `/api/ingest` themselves) and `read_api_url`. `ingest_batch_url` is the full `POST` endpoint, for manual checks.
 
 After the hackathon: `./tf.ps1 destroy` (the bootstrap resource groups are deleted by hand).
@@ -29,15 +29,15 @@ Terraform creates every resource; the GitHub Actions deploys ship the code. Terr
 
 | Resource | Running | Deployed by |
 |---|---|---|
-| Function app `func-roadride-ingest-*` | the ingest function | `deploy-ingest` on merge to `main` |
-| Container app `ca-roadride-processor` | the stream processor + signal processing | `deploy-services` on merge to `main` |
+| Function app `func-roadride-ingest-*` | the ingest function | `deploy-ingest` on merge to `main` (or manual) |
+| Container app `ca-roadride-processor` | the stream processor + signal processing | `deploy-services` on merge to `main` (or manual) |
 | Container app `ca-roadride-read-api` | the read API (port 8000; a fresh app starts on 80 for the placeholder, deploy-services switches it) | `deploy-services` |
 | Job `caj-roadride-migrate` | database migrations + Entra roles | `deploy-services`, before the apps are updated |
 | Job `caj-roadride-finalize` | the finalize job (started by the `session-ready` queue) | `deploy-services` |
 | Job `caj-roadride-aggregate` | the aggregation step, started by hand | `deploy-services` |
-| Static Web App `stapp-roadride-dashboard` | nothing yet: run **deploy-dashboard** (manual) | `deploy-dashboard` |
+| Static Web App `stapp-roadride-dashboard` | the dashboard, as of the last manual run (2026-11-21, `1da8579`) | `deploy-dashboard` (manual only) |
 
-The deploys use the `prod` GitHub environment and these repo variables: `AZURE_CLIENT_ID_DEPLOY`, `AZURE_TENANT_ID`, `AZURE_SUBSCRIPTION_ID`, `INGEST_FUNCTION_APP`, `ACR_NAME`, `RESOURCE_GROUP`. CI's test database is a throwaway container with trust authentication (no password), so no secret is needed and fork PRs work (the old `POSTGRES_PASSWORD` repo secret can be deleted once this is on `main`).
+The deploys use the `prod` GitHub environment and these repo variables: `AZURE_CLIENT_ID_DEPLOY`, `AZURE_TENANT_ID`, `AZURE_SUBSCRIPTION_ID`, `INGEST_FUNCTION_APP`, `ACR_NAME`, `RESOURCE_GROUP`. CI's test database is a throwaway container with trust authentication (no password), so no secret is needed and fork PRs work (an old `POSTGRES_PASSWORD` repo secret is no longer read and can be deleted).
 
 Contracts the service code must follow (set as environment variables by Terraform):
 
@@ -50,7 +50,7 @@ Contracts the service code must follow (set as environment variables by Terrafor
 | aggregate job | manual, `RUN_MODE=aggregate` | PG user `writer` | |
 | migrate job | manual, `RUN_MODE=migrate` | PG user `migrator` (Entra admin) | creates `writer`/`reader` from `WRITER_OBJECT_ID`/`READER_OBJECT_ID` |
 
-Database tokens: request `https://ossrdbms-aad.database.windows.net/.default` with `ManagedIdentityCredential(client_id=AZURE_CLIENT_ID)` and use it as the password with `sslmode=require`.
+Database tokens: request `https://ossrdbms-aad.database.windows.net/.default` with `DefaultAzureCredential` (it picks the managed identity named by `AZURE_CLIENT_ID`) and use it as the password with `sslmode=require`.
 
 ## CI for Terraform
 
@@ -58,7 +58,7 @@ Database tokens: request `https://ossrdbms-aad.database.windows.net/.default` wi
 |---|---|---|---|
 | `terraform-plan` | every PR touching `infra/**` | `plan` (Reader + state blob access) | `fmt -check`, `validate` (main and bootstrap), then `plan -refresh=false -lock=false` against the remote state, posted as a PR comment; fails if the plan deletes or replaces the database, a storage account or container, Event Hubs, Service Bus, Key Vault or the registry |
 | `terraform-apply` | manual (Actions → Run workflow) | `deploy` (`prod` environment) | plan with refresh, the same delete guard (override: `allow_data_loss`), apply, then the host-storage clean-up |
-| `security` | every PR and push to `main` | none | gitleaks over the whole history |
+| `security` | every PR, and every push to `main` and `staging` | none | gitleaks over the whole history |
 
 The plan runs with `-refresh=false` because Reader can't call the "list" actions the provider uses while
 refreshing (function app settings, keys). It shows what the PR changes relative to the last apply, not
@@ -128,16 +128,16 @@ Terraform doesn't see the setting (the provider hides it), so deleting it never 
 
 - Identities and the data-plane role assignments live in `main/` (`identities.tf`, `rbac.tf`), not in the compute module, so every module can use them without circular references.
 - The worker identity gets **Azure Service Bus Data Owner** on the one queue instead of Sender + Receiver: the KEDA Service Bus scaler reads the queue length through the management API, which needs the Manage right.
-- The ingest function reads the device-key secret with the Key Vault SDK at start-up instead of a Key Vault reference in its settings (the plan already says "loaded once at start-up"; this avoids reference-identity wiring on Flex Consumption).
+- The ingest function reads the device-key secret with the Key Vault SDK instead of a Key Vault reference in its settings (this avoids reference-identity wiring on Flex Consumption). It caches the keys and reloads them every 5 minutes, and within a minute for an unknown key. When Key Vault can't be read for a reload it needs (the first load, an unknown key, a key sending as another device) it answers 503; known keys keep working from the cache, but not with keys older than 6 hours (`services/ingest/ingest_core/keys.py`).
 - The read API's CORS origins are passed as an environment variable and enforced by FastAPI, not by the ingress setting.
 - The function app's host storage and deployment package live in their own small storage account, so the ingest identity is Owner only there and has plain write access on `lake`.
 - The Static Web App is in **East US 2**: Static Web Apps isn't offered in North Europe, and West Europe refused new customers on 2026-11-20. It serves files from a global network anyway.
-- Plan §13 applies on merge to `main` after approval in `prod`; `prod` has no required reviewers (the code deploys use it unattended), so **terraform-apply is manual** instead, and there is no teardown workflow (`tf.ps1 destroy`). The PR plan runs with `-refresh=false` because the plan identity is Reader only (see "CI for Terraform").
+- Plan §13 first had Terraform applied on merge to `main` after approval in `prod`; `prod` has no required reviewers (the code deploys use it unattended), so **terraform-apply is manual** instead, and there is no teardown workflow (`tf.ps1 destroy`). Plan §13 now lists the workflows as built. The PR plan runs with `-refresh=false` because the plan identity is Reader only (see "CI for Terraform").
 - The read API's ingress port is set by deploy-services together with the image, and the `AzureWebJobsStorage` setting the provider writes is deleted by `tf.ps1 apply` / the workflows: both are outside Terraform on purpose (`ignore_changes`, provider bug).
 - `psql_nat_gateway_enabled = true` adds a NAT gateway to the database subnet (~$1/day), for when default outbound access can't reach Entra ID. It needs the user's OK and goes in as a default change in `main/variables.tf` (see "CI for Terraform").
 - The read API allows only the Static Web App's origin. To develop the dashboard locally against the Azure read API, add `TF_VAR_extra_cors_origins=["http://localhost:5173"]` to `infra/.env` and apply from the laptop (with the user's OK, like any apply); the next terraform-apply run removes it again. The dashboard's own local setup (`dashboard/README.md`) uses mock data or a local read API and needs neither.
 - Bootstrap may not register `microsoft.insights` (Azure lists it in lowercase); if Application Insights fails with `MissingSubscriptionRegistration`, run `az provider register --namespace Microsoft.Insights --wait`.
-- No alert rules yet: the plan wants an email on errors and on processor lag. The email action group and the budget exist.
+- No alert rules yet: the plan wants an email on errors and on processor lag. The email action group and the budget exist: the budget emails at 40 % and 100 % of `budget_amount` spent ($20 and $50 by default), and the action group when the forecast reaches 100 %.
 
 ## Monitoring workbook
 
@@ -148,14 +148,14 @@ Terraform doesn't see the setting (the provider hides it), so deleting it never 
 | Ingest function | requests by status code, per route with p95 duration, the latest rejections (4xx/5xx log lines), warnings and exceptions | Application Insights (`AppRequests`, `AppTraces`, `AppExceptions`) |
 | Event Hubs | messages in and out of the `ingest` hub, throttled requests, server and user errors | platform metrics |
 | Stream processor | commit lag (`lag_s`) per partition, events per minute by outcome, the last committed batch per partition, warnings, errors and process starts, replica restarts | the processor's per-batch log lines (`ContainerAppConsoleLogs_CL`), the `RestartCount` metric |
-| | the `roadride.processor.lag` gauge, which keeps rising while the processor is stuck | `AppMetrics`: empty until the processor exports it |
+| | the `roadride.processor.lag` gauge, which keeps rising while the processor is stuck | `AppMetrics` (exported by `services/processor/roadride/telemetry.py`) |
 | Finalize job and queue | trips queued, finalized, failed (retried) and dead-lettered; job executions by state; `session-ready` messages waiting and dead-lettered, sent, completed and abandoned; finalized trips by data quality; the latest finalize lines | job log lines, `Executions` metric, Service Bus metrics |
 | PostgreSQL | CPU and memory %, CPU credits left (B1ms is burstable), storage %, active and failed connections | platform metrics |
 | Read API | requests by status class, average response time, restarts, error lines; platform warnings (crash loops, failed image pulls) for the processor, read API and finalize job | Container Apps metrics, `ContainerAppConsoleLogs_CL`, `ContainerAppSystemLogs_CL` |
 
 The log tiles parse the services' log lines (`<date> <time> LEVEL logger message`, `services/processor/roadride/stream.py` and `finalize.py`); a change to those lines needs the matching change in `workbook.tf`. The read API also sends its requests, logs and traces to Application Insights (`azure-monitor-opentelemetry`, `services/read-api/app/main.py`), but its section uses the Container Apps `Requests` metric, which counts every request at the ingress, including those that never reach the app. A tile shows an error instead of an empty chart until its table has its first row (for example `ContainerAppConsoleLogs_CL` before any app has logged).
 
-## Known risks to check on the first apply
+## Known risks
 
 - The `plan` identity for pull requests only has Reader, so terraform-plan runs with `-refresh=false` (see "CI for Terraform"). If a full refresh is ever wanted in CI, it needs a custom role with the provider's "list" actions, which would also expose keys to PR workflows.
-- If Event Hubs Basic refuses managed-identity login (plan §16 day-0 test), the fallback is `eventhub_local_auth_enabled = true`: key login, so ask the user first (root `CLAUDE.md`). With their OK, change its default in `main/variables.tf` in a PR and apply it (with their OK too); a value in `.env` alone is undone by the next terraform-apply run.
+- Event Hubs Basic accepts managed-identity login (plan §16 day-0 question): key login is off and phones have streamed through it since 2026-11-21. If that ever breaks, the fallback is `eventhub_local_auth_enabled = true`: key login, so ask the user first (root `CLAUDE.md`). With their OK, change its default in `main/variables.tf` in a PR and apply it (with their OK too); a value in `.env` alone is undone by the next terraform-apply run.

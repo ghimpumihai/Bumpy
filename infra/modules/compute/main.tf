@@ -1,6 +1,6 @@
 # Everything that runs our code (plan §5, D23, D24, D34):
 #   - Container Registry (images pulled by managed identity, admin user off),
-#   - Key Vault (hashed device keys, read by the ingest function at start-up),
+#   - Key Vault (hashed device keys; the ingest function caches them and reloads them every few minutes),
 #   - Container Apps environment in snet-aca with the processor, the read API and three jobs,
 #   - the ingest Function app (Flex Consumption, outside the VNet) and its host storage.
 #

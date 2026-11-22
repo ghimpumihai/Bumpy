@@ -36,13 +36,16 @@ Requirements: `decisions/01-initial-plan.md`. Losing data is the worst possible 
 - Native iOS units, no conversions. Every sensor CSV starts with `t_up` (seconds since boot, 6 decimals) and `t_utc_ms` (from `TimeBase` anchors); lat/lon 8 decimals.
 - Format CSV data columns only through the `CSV` helpers (locale-independent), dates through `ISO8601`; no ad-hoc `String(format:)` for them.
 - Never rename or reorder columns; only append. A schema change updates spec/README, `quick_check.py` and the tests in the same change.
-- `tools/fixtures/` (ingest batch + `csv_headers.json`) is the cross-language contract: tests compare, never rewrite. Regenerate only on purpose: `TEST_RUNNER_REGENERATE_FIXTURES=1 xcodebuild … test`.
+- `tools/fixtures/` (ingest batch, Stop copy + `csv_headers.json`) is the cross-language contract: tests compare, never rewrite. Regenerate only on purpose: `TEST_RUNNER_REGENERATE_FIXTURES=1 xcodebuild … test`.
 - `session.json` must stay decodable across app versions: new keys use `decodeIfPresent` with defaults, and a test decodes an old-format file.
 - Contract types that leave the app (`session.json`, ingest JSON) use explicit `CodingKeys`/`encode(to:)` where null vs omitted matters, with a test that pins their keys.
 - No audio (D48): never record sound or ask for the microphone. `StreamFile.audioLevel/audioSegments` exist only so older folders and the header fixture parse; new recordings write `StreamFile.recorded`.
 
 ## Upload
 - Batches are built every 2 s and queued on disk before sending; one request at a time, oldest first, backoff 1 → 30 s. Any 2xx means done; 409 is also handled as done, though the Azure backend answers 200 for duplicates and never sends 409. Idempotency key `sessionId:batchSeq`; never drop or duplicate samples between batches.
+- 401/403/404 (batches), 408/429, 3xx, 5xx and network errors retry the same file in place; other 4xx move it to `upload_failed/` until Settings' "Retry failed uploads" requeues it. Never re-order or skip the head file for a retryable status.
+- Every 2xx/409 is appended to `upload_acked/<sessionId>.txt` before the queue file is deleted (D55). A trip may be deleted on the phone only when `TripCloudCopy.deleteRefusal` returns nil.
+- The ingest contract takes only finite numbers: a non-finite value becomes `-1` where iOS uses `-1` for invalid, otherwise the sample is left out of the batch (`BatchAccumulator.drain`); never send null. Known 0 stand-ins: a fix's non-finite `alt`/`ellAlt` (sent as 0 with `vAcc` −1), and a non-finite `t0UtcMs` or activity `startUtcMs` (sent as 0).
 - Device key only in the Keychain, API URL in UserDefaults, nothing in the repo.
 - Upload problems are WARN at most: the data is safe on disk.
 
@@ -66,7 +69,7 @@ The app ships real sensors only: no mock or demo mode. Fakes live in the test ta
 xcodebuild -project SensorRecorder.xcodeproj -scheme SensorRecorder \
   -destination 'platform=iOS Simulator,name=iPhone 17 Pro' test
 python3 tools/mock_ingest_server.py --port 8765 --out /tmp/ingest
-python3 tools/quick_check.py <exported session folder>
+python3 tools/quick_check.py <session folder>
 ```
 
 Done means it builds for device (`-sdk iphoneos CODE_SIGNING_ALLOWED=NO`) with no new warnings and all tests pass. Never silence a concurrency warning with `@unchecked Sendable` or `nonisolated(unsafe)` to get there.

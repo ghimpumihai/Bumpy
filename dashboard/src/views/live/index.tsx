@@ -18,7 +18,11 @@ export function LiveView() {
   const live = liveApi.useLive();
   const now = useNow();
   const devices = live.data?.devices ?? [];
+  // The phone the map follows; `nonce` changes on every pick, so picking the same one again flies back to it.
   const [focus, setFocus] = useState<{ sessionId: string | undefined; nonce: number }>({ sessionId: undefined, nonce: 0 });
+  const unfollow = () => setFocus((previous) => ({ ...previous, sessionId: undefined }));
+  const toggleFollow = (sessionId: string) =>
+    setFocus((previous) => (previous.sessionId === sessionId ? { ...previous, sessionId: undefined } : { sessionId, nonce: previous.nonce + 1 }));
   // Ages are measured on the server's clock: offset = server time − local time at the last response.
   const clockOffsetMs = live.data ? Date.parse(live.data.serverTime) - live.dataUpdatedAt : 0;
   // If the dashboard can't reach the read API, the cards must not blame the phones for the silence.
@@ -28,7 +32,7 @@ export function LiveView() {
   return (
     <div className="grid flex-1 grid-rows-[minmax(22rem,1fr)_auto] lg:grid-cols-[1fr_24rem] lg:grid-rows-1">
       <div className="relative min-h-[22rem]">
-        <LiveMap devices={devices} stale={stale} focus={focus} />
+        <LiveMap devices={devices} stale={stale} focus={focus} onUnfollow={unfollow} />
       </div>
       <aside aria-label="Streaming devices" className="vertical gap-3 overflow-y-auto border-t p-4 lg:border-t-0 lg:border-l">
         <div className="vertical gap-1">
@@ -60,7 +64,13 @@ export function LiveView() {
                 exit={{ opacity: 0, y: -CARD_ANIMATION_OFFSET_PX }}
                 transition={{ duration: CARD_ANIMATION_S }}
               >
-                <LiveDeviceCard device={device} now={serverNow} apiUnreachable={apiUnreachable} onLocate={() => setFocus((previous) => ({ sessionId: device.sessionId, nonce: previous.nonce + 1 }))} />
+                <LiveDeviceCard
+                  device={device}
+                  now={serverNow}
+                  apiUnreachable={apiUnreachable}
+                  following={focus.sessionId === device.sessionId}
+                  onToggleFollow={() => toggleFollow(device.sessionId)}
+                />
               </motion.div>
             ))}
             {devices.length === 0 && (

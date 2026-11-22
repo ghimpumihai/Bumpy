@@ -45,6 +45,15 @@ The look follows the redesign mock-up: the dashboard's neutral palette, an ink-b
 dashboard's typeface, Geist (`SensorRecorder/Resources/Fonts/Geist-Variable.ttf`, SIL Open Font
 License in `Geist-OFL.txt`, registered through `UIAppFonts`; `Theme.font` sets its weight axis).
 
+### Finding the Device ID
+
+A device key works only under this phone's Device ID, a UUID kept in the Keychain. No screen shows it
+since D51 (the app's and the ingest function's 403 messages still say "Settings"). Either:
+- record a short trip (upload may be off) and read `deviceId` in its `session.json`, in the Files app
+  or over USB; or
+- with any valid key entered, run **Test connection**: the 403's reason, in the ingest function's logs
+  (Application Insights), names the Device ID the phone sent.
+
 ## What gets written
 
 `Documents/sessions/<UTC start>_<shortId>/` is visible in the **Files app** and in Finder over USB
@@ -59,7 +68,7 @@ License in `Geist-OFL.txt`, registered through `UIAppFonts`; `Theme.font` sets i
 | `altimeter.csv`, `abs_altitude.csv` | CMAltimeter relative (kPa, m) and absolute altitude |
 | `activity.csv` | CMMotionActivity (+ `start_utc_ms`) |
 | `device.csv` | battery, thermal, Low Power Mode, free disk, network, every 5 s |
-| `labels.csv` | `t_up,t_utc_ms,type,value,note` (all human labels) |
+| `labels.csv` | `t_up,t_utc_ms,type,value,note`: header only since D51 (no label buttons) |
 | `app_log.txt` | warnings, problems, permission state, interruptions, upload rejections (also those after Stop: the file can grow past the size in `session.json` stats) |
 | `mount.jpg` | mount photo (older builds only: there is no setup form since D51) |
 
@@ -68,13 +77,13 @@ Every sensor CSV starts with `t_up` (seconds since boot, the CoreMotion clock, 6
 decimals, everything else 6. The `.` decimal separator is used regardless of phone locale.
 NaN is written as an empty field. Location keeps iOS's native `-1` for invalid speed/course.
 
-Label `type` values: `pothole`, `speed_bump`, `phone_moved`, `surface_start/surface_end`
-(`cobblestones|rough_asphalt|smooth_asphalt|gravel|tram_rails`, mutually exclusive),
-`segment_start/segment_end` (`winding|roundabout|stop_and_go|highway|idle`, independent),
-`sync_tap`, `note` (text in `note`). Open toggles are closed automatically at Stop
-(note `auto at stop`). The MISC rating types `sickness`, `sickness_prompt` and `sickness_missed`
-are no longer written (D47: motion sickness is only the backend's MSDV); folders from older
-builds may still contain them, and `session.json` `stats.sicknessRatings/sicknessMissed` stay as 0.
+New trips write no labels (D51): `labels.csv` has only its header, `stats.labelsCount` is 0 and
+batches carry an empty `labels` array. Folders from older builds may hold the old label `type`
+values: `pothole`, `speed_bump`, `phone_moved`, `surface_start/surface_end`
+(`cobblestones|rough_asphalt|smooth_asphalt|gravel|tram_rails`), `segment_start/segment_end`
+(`winding|roundabout|stop_and_go|highway|idle`), `sync_tap`, `note`, and the MISC rating types
+`sickness`, `sickness_prompt` and `sickness_missed` (D47: motion sickness is only the backend's
+MSDV). `session.json` `stats.sicknessRatings/sicknessMissed` stay as 0.
 
 **No audio (D48).** The app records no sound: no `audio_*.m4a`, `audio_segments.csv`,
 `audio_level.csv` or `audio_start` clock rows, no `audioLevel` in upload batches, and no
@@ -120,7 +129,11 @@ builds may still contain them, and `session.json` `stats.sicknessRatings/sicknes
 `x-device-key`, `x-idempotency-key: <sessionId>:<batchSeq>`.
 
 The body is the spec §6 JSON: schemaVersion 1, columnar arrays, `t` relative to `t0Up`, values
-rounded to 6 decimals. For the hackathon rule ("JSON payload with device ID, event type, value,
+rounded to 6 decimals (lat/lon 8). The backend accepts only finite numbers, so a NaN/∞ never
+reaches a batch: fields where iOS uses `-1` for invalid (speed, course, accuracies, battery) get
+`-1` (a fix with a non-finite altitude keeps `alt` 0 and `vAcc` `-1`), any other sample with a
+non-finite value is left out of the batch (the CSV keeps the row with an empty field); a non-finite
+`t0UtcMs` or activity `startUtcMs` is sent as 0. For the hackathon rule ("JSON payload with device ID, event type, value,
 unit, and UTC timestamp") it adds these optional, additive fields:
 - `eventType: "sensor_batch"` and `source: "live"`;
 - `t0UtcMs`, so a sample's UTC time is `t0UtcMs + t[i]·1000`;
@@ -147,10 +160,14 @@ Backend: please don't use pydantic `extra="forbid"` or a fixed `units` literal.
 - Batches are about 30–50 KB of JSON; a warning is logged above 180 KB (the function's limit is 200 KB).
 
 One request at a time, oldest first, with backoff 1 → 30 s; 2xx/409 means done.
-- **404 / 401 / 403** are retried; they mean a config error. Session metadata 404/405 (no PUT route
-  yet) is retried about 2 minutes, then set aside in `upload_failed/` so the batches can go.
+- **404 / 401 / 403** are retried; they mean a config error. Session metadata 404/405 (no PUT route,
+  or a redeploy in progress) is tried 8 times (about 1.5 minutes), then set aside in
+  `upload_failed/` so the batches can go.
 - **Redirects** are refused.
-- **5xx / 408 / 429** are retried in place, never re-ordered or set aside.
+- **5xx / 408 / 429** are retried in place, never re-ordered or set aside. The ingest function
+  answers 503 only for its own outages (Event Hubs, storage, Key Vault, or device keys it could
+  not reload for more than 6 h).
+- **Other 4xx** (400 schema or range, 413 too large) go to `upload_failed/`.
 - **Accepted parts are recorded (D55):** before a sent file is deleted, its batch number (or
   `meta-start|stop`) is appended to `Documents/upload_acked/<sessionId>.txt`. The recap and the
   delete guard read it, together with `stats.uploadWindowsNotQueued` in the local `session.json`
@@ -198,10 +215,12 @@ SensorRecorder/
   Core/       TimeBase (clock anchors), CSV formatting, SessionFiles (schemas + buffered writers),
               SessionMetadata, SessionStore (folders, recovery), StreamMonitor (rates/gaps),
               HealthEvaluator (warning rules)
-  Sensors/    CoreMotion / synthetic motion, CoreLocation, device health
+  Sensors/    CoreMotion, CoreLocation, device health (the synthetic source is in the test target)
   Recording/  RecordingSession (wires everything to disk), RecordingController (8 Hz dashboard),
-              PreflightModel, LiveSignals (plots, roughness, ISO 2631-1 Wf MSDV estimate)
-  Upload/     IngestBatch + accumulator, gzip (Compression + CRC32), disk UploadQueue, settings
+              PreflightModel, TripSummary + SessionVerdict (recap data quality),
+              LiveSignals (plots, roughness, ISO 2631-1 Wf MSDV estimate)
+  Upload/     IngestBatch + accumulator, gzip (Compression + CRC32), disk UploadQueue,
+              TripCloudCopy (the recap's cloud share and the delete guard), settings
   UI/         SwiftUI screens (Start, Recording, Recap, menu, Settings) and Theme
   Resources/  Fonts/Geist-Variable.ttf (+ its OFL licence)
 ```
@@ -212,7 +231,7 @@ SensorRecorder/
 cd src/mobile-ios
 SIM="iPhone 17 Pro"   # any iOS 17+ simulator
 # optional, for the UI tests: grant permissions and give the simulator a GPS position
-xcrun simctl boot "$SIM"; for p in location-always motion; do
+xcrun simctl boot "$SIM"; for p in location motion; do
   xcrun simctl privacy "$SIM" grant $p com.chuds.sensorrecorder; done
 xcrun simctl location "$SIM" set 46.77121,23.62363
 xcodebuild -project SensorRecorder.xcodeproj -scheme SensorRecorder \
@@ -221,8 +240,9 @@ xcodebuild -project SensorRecorder.xcodeproj -scheme SensorRecorder \
 
 - **Unit tests** cover CSV formatting, schemas, the clock math, concurrent writers, periodic flush,
   gap/rate stats, every warning rule, session.json, crash recovery, gzip/CRC, the batch payload
-  shape, every upload-queue rule, the Wf filter response vs ISO values, and a full 3-second
-  recording that checks every file on disk.
+  shape (non-finite values included), every upload-queue rule, the accepted-parts record, the
+  recap's cloud share and the delete guard, the Wf filter response vs ISO values, and a full
+  3-second recording that checks every file on disk.
 - **UI tests** drive the real app: Start (override on the Simulator) → Recording → short tap
   doesn't stop → hold-to-stop → Recap → Done, kill-while-recording → relaunch → recovered, and
   Settings (upload off; no recording switch, Back returns to Start).
@@ -232,6 +252,11 @@ xcodebuild -project SensorRecorder.xcodeproj -scheme SensorRecorder \
   tests use a test-only synthetic 100 Hz motion source to exercise the full pipeline.
 - Upload batches from the UI tests go to `tools/mock_ingest_server.py` on `:8765` when it is
   running (`-upload.baseURL`).
+- **CI** (`.github/workflows/ios-app.yml`, `macos-15` with the newest non-beta Xcode on the runner,
+  on an iPhone simulator with the newest iOS runtime) runs the unit tests only (`-only-testing:SensorRecorderTests`, no
+  UI tests), the unsigned Release device build (skipped on pull requests) and `tools/test_tools.py`
+  (also on Ubuntu). It runs on pushes to `main`/`staging` and on pull requests that touch
+  `src/mobile-ios/` (Markdown changes excluded).
 
 ### Tools (`tools/`)
 
@@ -241,11 +266,12 @@ xcodebuild -project SensorRecorder.xcodeproj -scheme SensorRecorder \
   with `--host 0.0.0.0 --key <throwaway>` and set the app's URL to `http://<mac-ip>:<port>`; the phone
   asks for Local Network permission the first time.
 - `test_tools.py`: tests for both tools. It includes cross-language contract tests:
-  - a batch written by the app's real encoder (`tools/fixtures/ingest_batch_v1.json.gz`) must be
-    accepted by the mock backend;
+  - a batch and a Stop copy written by the app's real encoder
+    (`tools/fixtures/ingest_batch_v1.json.gz`, `session_meta_stop_v1.json.gz`) must be accepted
+    by the mock backend;
   - the CSV headers in `tools/fixtures/csv_headers.json` must match `quick_check.py`.
-- The Swift tests compare against both fixtures and never rewrite them. After a deliberate format
+- The Swift tests compare against all three fixtures and never rewrite them. After a deliberate format
   change, regenerate with `TEST_RUNNER_REGENERATE_FIXTURES=1 xcodebuild … -only-testing:SensorRecorderTests/ContractFixtureTests test`.
 
 **Before the real drive, do the mandatory dry run (spec §10).** Record 5–10 min on the real
-phone, export it, and run `python3 tools/quick_check.py <folder>`.
+phone, copy its folder off (Files app or Finder over USB), and run `python3 tools/quick_check.py <folder>`.

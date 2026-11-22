@@ -51,7 +51,7 @@ The processing will be developed **after** the drive, from the recorded files. E
 ## 2. Tech stack and setup
 
 - **Language/UI:** Swift 5.9+, SwiftUI. Target **iOS 17+** (iPhone 14 Pro runs iOS 17/18).
-- **Frameworks:** CoreMotion, CoreLocation, AVFoundation, MapKit (live track), UIKit bits (idle timer, battery).
+- **Frameworks:** CoreMotion, CoreLocation, UIKit bits (idle timer, battery), Network (reachability), AudioToolbox (problem alert sound), Compression (gzip), Security (Keychain). *AVFoundation was dropped with audio (D48), MapKit with the live map (D51).*
 - **No third-party dependencies** unless unavoidable. Less to go wrong.
 - **Signing:** free Apple ID ("Personal Team") is enough to run on your own iPhone. The provisioning lasts 7 days, so re-run from Xcode if it expires. On the iPhone, enable **Settings → Privacy & Security → Developer Mode**.
 - **Code location in repo:** `src/mobile-ios/` (Xcode project inside).
@@ -61,11 +61,14 @@ The processing will be developed **after** the drive, from the recorded files. E
 |---|---|
 | `NSMotionUsageDescription` | "Records vehicle motion to measure road quality and ride comfort." |
 | `NSLocationWhenInUseUsageDescription` | "Maps road quality along the route." |
+| `NSLocationTemporaryUsageDescriptionDictionary` | Key `RoadMapping`: the reason shown when the app asks for temporary precise location after the user chose approximate |
 | ~~`NSLocationAlwaysAndWhenInUseUsageDescription`~~ | *Removed: the app only asks for When In Use; background mode `location` keeps a started recording alive.* |
 | ~~`NSMicrophoneUsageDescription`~~ | *Removed (D48): the app records no audio.* |
 | ~~`NSCameraUsageDescription`~~ | *Removed (D51): no setup form, so no mount photo.* |
 | `UIBackgroundModes` | `location` (`audio` removed by D48). Continuous location updates keep the app and sensors alive if it gets backgrounded |
 | `UIFileSharingEnabled` = YES, `LSSupportsOpeningDocumentsInPlace` = YES | Session files become visible in the **Files app** and in Finder over USB. This is the zero-code export fallback |
+| `NSLocalNetworkUsageDescription`, `NSAppTransportSecurity` → `NSAllowsLocalNetworking` = YES | Plain `http://` only to a test server on the local network (the mock ingest server); everything else is HTTPS |
+| `UIAppFonts` | `Geist-Variable.ttf`, the dashboard's typeface |
 
 ---
 
@@ -183,12 +186,15 @@ Seat and posture (`people.raterSeat`, `people.raterPosture` in §3.8) still desc
   "people": { "operatorSeat": "front passenger", "raterSeat": "rear left", "raterPosture": "seated|standing", "passengerCount": 3 },
   "conditions": { "weather": "dry", "notes": "" },
   "requestedRatesHz": { "deviceMotion": 100, "accel": 100, "gyro": 100, "mag": 50 },
+  "deviceId": "same as the batches' deviceId (§6)",
   "recovered": false,
   "stats": { "filled at end: sample counts and measured mean rate per stream, drop count, file sizes" : "" }
 }
 ```
 
-**Mount photo (P1):** before recording, the app asks for one photo of the phone in its mount and saves it as `mount.jpg`. Phone orientation relative to the vehicle is essential for the axis transformation, and a photo removes all ambiguity.
+Since D51 nothing is entered before recording: every trip is `car`, mount and people keep the remembered defaults (rigid/hand-held reset for every trip, D42) and `photoFile` is `null`. The app also writes `folderName`, `syntheticSensors`, `recoveredAtUtc`, `preflight` (each check's result and the override) and, locally only, `stats.uploadWindowsNotQueued` (D55). `deviceId` is required by the §6.1 PUT.
+
+**Mount photo (P1, removed by D51):** before recording, the app asked for one photo of the phone in its mount and saved it as `mount.jpg`. Phone orientation relative to the vehicle is essential for the axis transformation, and a photo removes all ambiguity.
 
 ---
 
@@ -206,13 +212,13 @@ Documents/sessions/2026-11-21T09-12-03Z_<shortId>/
 ├── mag_raw.csv           # M4 (P2)
 ├── location.csv          # L1
 ├── heading.csv           # L2 (P2)
-├── altimeter.csv         # B1 (+B2 columns or abs_altitude.csv)
+├── altimeter.csv         # B1
 ├── activity.csv          # A1
 ├── abs_altitude.csv      # B2
 ├── device.csv            # D1–D5
-├── labels.csv            # H1–H8
+├── labels.csv            # H1–H8 (header only since D51)
 ├── app_log.txt           # warnings, errors, permission states, rate drops, upload failures
-└── mount.jpg             # P1
+└── mount.jpg             # P1 (older builds only; no mount photo since D51)
 ```
 
 ### CSV schemas (header row required, comma-separated, `.` decimal, no thousands separators)
@@ -230,19 +236,21 @@ Common leading columns on every sensor CSV:
 | `location.csv` | `lat,lon,alt,ell_alt,h_acc,v_acc,speed,speed_acc,course,course_acc,is_simulated` (for location, `t_utc_ms` comes from `CLLocation.timestamp` and `t_up` is derived) |
 | `heading.csv` | `mag_heading,true_heading,heading_acc,x,y,z` |
 | `altimeter.csv` | `rel_alt_m,pressure_kpa` |
-| `activity.csv` | `stationary,walking,running,automotive,cycling,unknown,confidence` |
+| `abs_altitude.csv` | `altitude_m,accuracy_m,precision_m` |
+| `activity.csv` | `stationary,walking,running,automotive,cycling,unknown,confidence,start_utc_ms` (`start_utc_ms` = `CMMotionActivity.startDate`) |
 | `audio_level.csv` | `avg_dbfs,peak_dbfs` (older builds only; not written since D48) |
+| `audio_segments.csv` | `event,file` (older builds only; not written since D48) |
 | `device.csv` | `battery_level,battery_state,thermal_state,low_power,free_disk_bytes,net_status,net_type` |
-| `labels.csv` | `type,value,note` (e.g. `pothole,,` / `surface_start,cobblestones,` / `surface_end,cobblestones,` / `phone_moved,,`). The types `sickness`, `sickness_prompt` and `sickness_missed` are no longer written (D47); folders from older builds may still contain them |
+| `labels.csv` | `type,value,note` (e.g. `pothole,,` / `surface_start,cobblestones,` / `surface_end,cobblestones,` / `phone_moved,,`). Header only since D51: the app writes no labels. The types `sickness`, `sickness_prompt` and `sickness_missed` are no longer written (D47); folders from older builds may still contain them |
 | `clock.csv` | `t_up,t_utc_ms,source` (no extra columns) |
 
 Use the same numeric precision everywhere: 6 decimals for sensor values, 8 decimals for lat/lon.
 
 ### Writer requirements
 - One **serial background queue** per file (or one shared writer queue). Never write on the main thread.
-- Buffer in memory and **flush to disk at least every 1 second**. A crash then loses at most 1 s.
+- Buffer in memory and **flush to disk at least every 1 second** (the app flushes every 0.5 s and fsyncs about every 10 s). A crash then loses at most 1 s.
 - Append-only. Never rewrite sensor files.
-- On app launch, if a session folder lacks `endedAtUtc`, mark it `"recovered": true`, keep it, and show it in the session list.
+- On app launch, if a session folder lacks `endedAtUtc`, mark it `"recovered": true`, keep it, and say so on the Start screen (there is no session list since D51).
 - **Expected size:** about 70–120 MB per hour of CSV (no audio since D48). An iPhone 14 Pro has plenty of space; still show free space.
 
 ---
@@ -251,9 +259,9 @@ Use the same numeric precision everywhere: 6 decimals for sensor values, 8 decim
 
 - CoreMotion timestamps are **seconds since boot** (same clock as `ProcessInfo.processInfo.systemUptime`).
 - CoreLocation gives a UTC `Date`.
-- **Anchor:** at session start and then **every 10 s**, write `clock.csv` rows with `systemUptime` and `Date().timeIntervalSince1970*1000` read back-to-back. The conversion is `utc_ms = anchor_utc_ms + (t_up - anchor_up) * 1000`, using the nearest anchor.
+- **Anchor:** at session start and then **every 10 s**, write `clock.csv` rows with `systemUptime` and `Date().timeIntervalSince1970*1000` read back-to-back (`source` = `start`, `periodic`, `background`/`foreground`, `stop`). The conversion is `utc_ms = anchor_utc_ms + (t_up - anchor_up) * 1000`; the app uses the most recent anchor.
 - Keep the screen awake (`UIApplication.shared.isIdleTimerDisabled = true`) so the device never sleeps during recording.
-- **Sync tap (P1):** right after Start, and again before Stop, the operator presses "Sync tap" and then **knocks firmly on the phone/mount 3 times**. That leaves a sharp spike in the accelerometer **and** a click in the audio, so we can align audio and motion to the millisecond later.
+- ~~**Sync tap (P1):**~~ *Removed (D51): no label buttons, so no Sync tap. Original plan:* right after Start, and again before Stop, the operator presses "Sync tap" and then **knocks firmly on the phone/mount 3 times**. That leaves a sharp spike in the accelerometer **and** a click in the audio, so we can align audio and motion to the millisecond later.
 - ~~Record the uptime when `AVAudioRecorder.record()` returns, in `clock.csv` with `source=audio_start`.~~ *Removed (D48).*
 
 ---
@@ -264,7 +272,7 @@ The API base URL points at the Azure ingest function app (see [02-infrastructure
 
 The app must still work **fully offline**: recording never depends on the network. Without a connection, batches wait in the disk queue and are sent, oldest first, when the network returns, so a dead zone delays data but doesn't lose it.
 
-- **Settings screen:** `API base URL` and `Device key` (stored in UserDefaults/Keychain; **never hard-coded in the repo**). Empty URL = upload disabled. Show "UPLOAD OFF (local only)" in neutral grey, not red.
+- **Settings screen:** `API base URL` and `Device key` (stored in UserDefaults/Keychain; **never hard-coded in the repo**). Empty URL = upload disabled. Show "Upload off" in neutral grey, not red.
 - **Batching:** every **2 s**, build one batch from the samples of that window (in-memory copy; disk files stay the source of truth).
 - **Endpoint contract:**
 
@@ -279,7 +287,7 @@ x-device-key: <device key>
 {
   "schemaVersion": 1,
   "sessionId": "UUID",
-  "deviceId": "stable per-install UUID (identifierForVendor)",
+  "deviceId": "stable per-install UUID (first taken from identifierForVendor, then kept in the Keychain)",
   "batchSeq": 142,
   "t0Utc": "2026-11-21T09:15:32.120Z",
   "t0Up": 123532.408211,
@@ -300,10 +308,10 @@ x-device-key: <device key>
 
   - `t` arrays are **seconds relative to `t0Up`** (columnar to keep payloads small).
   - No `audioLevel` (nor `audioEnabled` in §6.1) since D48: the app no longer sends them, and the backend accepts and ignores them from older builds.
-  - Size: about 30 KB raw / ~10 KB gzipped per batch, roughly 20 MB/hour of mobile data.
-- **Queue on disk** (`Documents/upload_queue/`): write each batch as a `.json.gz` file, upload oldest first, **1 request at a time**, exponential backoff (1 s → 30 s max). Delete on HTTP 2xx. **Treat 409 (duplicate) as success.** Other 4xx: log, move to `upload_failed/`, continue.
+  - Size: with the full dataset of §6.2, about 45 KB raw / ~16 KB gzipped per batch, roughly 30 MB/hour of mobile data (an estimate, not measured on a drive).
+- **Queue on disk** (`Documents/upload_queue/`): write each batch as a `.json.gz` file, upload oldest first, **1 request at a time**, exponential backoff (1 s → 30 s max). Delete on HTTP 2xx. **Treat 409 (duplicate) as success.** Other 4xx: log, move to `upload_failed/`, continue (401/403/404/408/429 are retried instead, §6.2).
 - Idempotency key = `sessionId + batchSeq`.
-- After the drive, a **"Upload full session"** button can send the queued remainder.
+- ~~After the drive, a **"Upload full session"** button can send the queued remainder.~~ *Not built: after Stop the app asks iOS for background time until the queue is empty, and Settings has "Retry failed uploads (N)" for `upload_failed/` (D55).*
 
 ### 6.1 Session metadata (new: the backend needs it for the live path)
 
@@ -320,7 +328,7 @@ x-device-key: <device key>
 - Send it **at Start** (right after `session.json` is first written) and **at Stop** (after it is rewritten with `endedAtUtc` and `stats`).
 - Put it in the **same disk queue** as the batches, so it is sent in order: the Start copy before batch 0, the Stop copy after the last batch. The queue file name needs a marker that tells it apart from a batch.
 - Same rules as batches: 2xx and 409 = done, same backoff. The backend answers `200` for a repeat.
-- Until this exists, the backend creates the trip from its first batch with unknown context and closes it after 15 minutes without batches.
+- A trip whose first message is a batch is created with unknown context until a session copy arrives. A trip without a Stop copy (a crashed session) is closed after 15 minutes without batches.
 
 ### 6.2 What the app sends beyond the example above (implementation, app v1.0)
 
@@ -329,10 +337,24 @@ Everything here is **additive**: the §6 keys keep their names, types and units,
 - **Full dataset in every batch** (02 D32): `deviceMotion.roll/pitch/yaw`; `magRaw {t,x,y,z}` (µT, 50 Hz); `heading [{tUtcMs, magHeading, trueHeading, headingAcc, x, y, z}]`; `absAltitude {t, altitudeM, accuracyM, precisionM}`; `activity [{t, stationary, walking, running, automotive, cycling, unknown, confidence, startUtcMs}]`; `location[].ellAlt, vAcc, courseAcc, isSimulated`; `device.batteryState, freeDiskBytes, netStatus, netType`.
 - **Hackathon payload rule** ("device ID, event type, value, unit, UTC timestamp"): `eventType: "sensor_batch"`, `source: "live"`, `t0UtcMs` (sample UTC = `t0UtcMs + t[i]·1000`), `fieldUnits` (the unit of every field). Accelerations stay in **g** as the iPhone delivers them (`1 g = 9.80665 m/s²`); invalid speed/course/accuracies are **−1** as in iOS.
 - **Headers:** `x-idempotency-key: <sessionId>:<batchSeq>` for batches, `<sessionId>:meta-start|meta-stop` for §6.1.
-- **§6.1 body:** `session.json` plus `source: "live"` (the replay tool rewrites it) and, in the Stop copy, `batchCount`. `people.raterName` is removed from the cloud copy (personal data stays on the phone).
-- **Queue:** files `<createdMs>_<sessionId>_<batchSeq>.json.gz` and `<createdMs>_<sessionId>_meta-start|stop.json.gz`; lexical order is send order. `createdMs` is strictly increasing per queue (a wall clock that steps back can't sort the Stop copy before the last batch), and files are never re-ordered. `batchSeq` counts only batches actually queued: windows recorded while the URL was empty use no number, and a batch whose enqueue failed (full disk) keeps no number and is retried at the next tick (up to 30 s of windows), so `batchCount` is exact with no holes. A `.json.gz` file whose name the app didn't write (e.g. a Files-app copy) or that can't be read is moved to `upload_failed/`, never left blocking the queue. After the Stop copy is queued the app asks iOS for background time until the queue is empty. Recovered (crashed) sessions send no Stop copy; the 15-minute close applies.
-- **Statuses:** 2xx/409 done (the function answers 403 when the key isn't stored under the body's `deviceId`, or when the session was first sent by another `deviceId`, D53); 401/403/404 (batches) and 408/429/5xx/network retried in place with backoff 1→30 s, however long it takes (the ingest function answers 503 only for its own outages, never for a bad payload, so an outage never parks or re-orders anything); for session metadata 404/405 means "no PUT route yet" (or a redeploy in progress): it is retried 8 times (about 2 min) and then set aside in `upload_failed/`, so it never blocks the batches for good; other 4xx go to `upload_failed/`; redirects are never followed. A file that was sent but can't be deleted is not sent again. Plain `http://` is accepted only for local test servers, and a pasted base URL ending in `/api/ingest` is reduced to its base.
-- **Ranges** (ingest answers `400` outside them, as the mock): `batchSeq`/`batchCount` 0 … 2³¹−1; `t0Utc`, `t0UtcMs`, `location[].tUtcMs`, `startedAtUtc`, `endedAtUtc` from 1970 to 2099 (the two session times ISO-8601); sample and label `t` within ±30 days of the batch start; every number must fit a double.
+- **§6.1 body:** `session.json` plus `source: "live"` (the replay tool rewrites it) and, in the Stop copy, `batchCount`. `people.raterName` is removed from the cloud copy (personal data stays on the phone), and so is the local-only `stats.uploadWindowsNotQueued` (D55).
+- **Queue:** files `<createdMs>_<sessionId>_<batchSeq>.json.gz` and `<createdMs>_<sessionId>_meta-start|stop.json.gz`; lexical order is send order. `createdMs` is strictly increasing per queue (a wall clock that steps back can't sort the Stop copy before the last batch), and files are never re-ordered. `batchSeq` counts only batches actually queued: windows recorded while the URL was empty use no number, and a batch whose enqueue failed (full disk) keeps no number and is retried at the next tick (up to 30 s of windows), so `batchCount` is exact with no holes. A `.json.gz` file whose name the app didn't write (e.g. a Files-app copy) or that can't be read is moved to `upload_failed/`, never left blocking the queue. After the Stop copy is queued the app asks iOS for background time until the queue is empty. Recovered (crashed) sessions send no Stop copy; the 15-minute close applies. Before a sent file is deleted, its `batchSeq` (or `meta-start|stop`) is appended to `Documents/upload_acked/<sessionId>.txt` (D55); the Recap's cloud share and the phone's delete guard read it.
+- **Statuses** (what the ingest function answers, and what the app does):
+
+  | Status | Function answers it when | App |
+  |---|---|---|
+  | 200 | stored (a repeat also gets 200; the mock answers 201 for a new message) | done |
+  | 409 | never (only the mock run with `--dup-status 409` sends it, for a repeat) | done |
+  | 400 | wrong Content-Type, broken gzip, invalid JSON (NaN/∞ included), schema, ranges or string limits below, `x-idempotency-key` mismatch; also the connectivity probe | `upload_failed/` |
+  | 401 | unknown `x-device-key` | retried |
+  | 403 | the key isn't stored under the body's `deviceId`, or the session was first sent by another `deviceId` (D53) | retried |
+  | 404 | wrong path, or a `sessionId` in the PUT path that isn't `[A-Za-z0-9_-]{1,128}` | batches retried; session metadata (also 405) tried 8 times (about 1.5 min), then `upload_failed/`, so it never blocks the batches for good |
+  | 413 | body over 20 MB, or over 200 KB decompressed | `upload_failed/` |
+  | 503 | its own outage: device keys can't be loaded (or were last loaded more than 6 h ago), the owner marker can't be read or written, Event Hubs or Blob Storage fails | retried |
+
+  408/429, other 5xx, 3xx and network errors are retried too. Every retry is in place with backoff 1→30 s, however long it takes: a 503 never means a bad payload, so an outage never parks or re-orders anything. Other 4xx go to `upload_failed/`, where they wait for "Retry failed uploads" in Settings (D55). Redirects are never followed. A file that was sent but can't be deleted is not sent again. Plain `http://` is accepted only for local test servers, and a pasted base URL ending in `/api/ingest` is reduced to its base.
+- **Ranges** (ingest answers `400` outside them, as the mock): `batchSeq`/`batchCount` 0 … 2³¹−1; `t0Utc`, `t0UtcMs`, `location[].tUtcMs`, `startedAtUtc`, `endedAtUtc` from 1970 to 2099 (the two session times ISO-8601); the `t` of `deviceMotion`, `accelRaw`, `gyroRaw`, `altimeter` and `labels` within ±30 days of the batch start; lat ±90, lon ±180; every number finite and fitting a double. **String limits** (400): `deviceId` at most 128 characters, `sessionId` `[A-Za-z0-9_-]{1,128}`, `labels[].type` at most 64, every other string and object key at most 2000; no NUL or unpaired surrogate.
+- **Non-finite values:** the app never sends NaN/∞ or null for a number. Fields where iOS uses −1 for invalid (speed, course, accuracies, battery) get −1 (a fix with a non-finite altitude is kept with `alt` 0 and `vAcc` −1); any other sample with a non-finite value, or a fix outside lat ±90 / lon ±180, is left out of the batch (the CSV keeps the row, with an empty field). A non-finite batch `t0UtcMs` or activity `startUtcMs` is sent as 0.
 - **Size:** a 2 s batch is about 45 KB of JSON (about 16 KB gzipped); the app logs a warning above 180 KB (the function's limit is 200 KB decompressed).
 
 ---
@@ -358,7 +380,7 @@ Everything here is **additive**: the §6 keys keep their names, types and units,
 | Device motion / accel / gyro available | `is…Available == true` |
 | Barometer available | `CMAltimeter.isRelativeAltitudeAvailable()` |
 | **GPS fix** | `horizontalAccuracy ≤ 10 m` (live value shown) |
-| **Measured motion rate** | ≥ 90 Hz for each motion stream over a 3 s test |
+| **Measured motion rate** | ≥ 90 Hz for device motion, accel and gyro, measured during the 5 s stillness test |
 | **Mount stillness test** | 5 s with vehicle stopped: accel std-dev below 0.03 g (an idling engine exceeds 0.01 g). Also stores the gravity vector |
 | Low Power Mode | **off** |
 | Battery | ≥ 50 % or charging |
@@ -446,7 +468,9 @@ On PROBLEM: red banner with the reason, a strong haptic, and a sound, plus an `a
 
 ---
 
-## 9. Drive protocol (for the operator, also shown on an in-app help screen)
+## 9. Drive protocol (for the operator)
+
+> **Partly superseded by D51:** the app has no in-app help screen, setup form, mount photo, label buttons (PHONE MOVED, `idle`) or SYNC TAP; skip those steps. The preflight runs silently when you tap Start, and the Recap replaces the summary screen. The rest still applies.
 
 **Before driving**
 1. Phone charged and **plugged into the car charger**. Low Power Mode off, Do Not Disturb on.
@@ -467,7 +491,7 @@ On PROBLEM: red banner with the reason, a strong haptic, and a sound, plus an `a
 **After the drive**
 1. 30 s stationary, engine idling, then SYNC TAP + 3 knocks, then **hold to Stop**.
 2. Check the summary screen for red rows.
-3. **Immediately export** the session folder (AirDrop to a laptop, plus Files → iCloud Drive or another copy). Keep **two copies** before doing anything else.
+3. **Immediately copy** the session folder off the phone (Files app → AirDrop to a laptop or iCloud Drive, or Finder over USB; no in-app export since D51). Keep **two copies** before doing anything else.
 
 ---
 
@@ -476,7 +500,7 @@ On PROBLEM: red banner with the reason, a strong haptic, and a sound, plus an `a
 Do a **5–10 minute test** (walk or drive around the block) and then verify on a laptop:
 
 ```python
-# quick_check.py: run on the exported session folder
+# quick_check.py: run on the copied session folder
 import pandas as pd, sys, pathlib
 d = pathlib.Path(sys.argv[1])
 for f in ["device_motion","accel_raw","gyro_raw","location","altimeter","labels"]:

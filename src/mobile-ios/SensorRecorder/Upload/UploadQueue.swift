@@ -88,7 +88,7 @@ final class UploadQueue: Sendable {
 
     /// Session metadata answered 404/405 (backend without the PUT route, or a redeploy in progress)
     /// this many times in a row is set aside in `upload_failed/`, so it never blocks the batches for
-    /// good. With the 1 → 30 s backoff that is about two minutes of retries.
+    /// good. With the 1 → 30 s backoff that is about 1.5 minutes of retries.
     static let maxMetadataNotFoundAttempts = 8
     private let notFoundAttempts = Locked<(name: String, count: Int)>(("", 0))
 
@@ -597,7 +597,7 @@ final class UploadQueue: Sendable {
         releaseBackgroundTime()
     }
 
-    /// Retry now: resets backoff and wakes the loop ("Upload full session").
+    /// Retry now: resets backoff and wakes the loop (Settings saved, a recording started).
     func kick() {
         statusBox.withLock { $0.currentBackoff = 0 }
         kickFlag.withLock { $0 = true }

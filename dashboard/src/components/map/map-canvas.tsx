@@ -46,6 +46,8 @@ interface MapCanvasProps {
   /** Fit the view to these bounds whenever `boundsKey` changes. */
   bounds?: [Position, Position] | null;
   boundsKey?: string;
+  /** Off: a `boundsKey` change leaves the camera alone (something else drives it); turning it back on doesn't re-fit. */
+  autoFit?: boolean;
   /** Padding for the fit: leave room for a panel that covers part of the map. */
   fitPadding?: { top: number; right: number; bottom: number; left: number };
   /** Base map style; the light OpenFreeMap one by default. */
@@ -53,7 +55,7 @@ interface MapCanvasProps {
   children?: ReactNode;
 }
 
-export function MapCanvas({ ariaLabel, className, bounds, boundsKey, fitPadding, styleUrl = MAP_STYLE_URL, children }: MapCanvasProps) {
+export function MapCanvas({ ariaLabel, className, bounds, boundsKey, autoFit = true, fitPadding, styleUrl = MAP_STYLE_URL, children }: MapCanvasProps) {
   const containerRef = useRef<HTMLDivElement>(null);
   const [state, setState] = useState<MapState | null>(null);
   const map = state?.map ?? null;
@@ -111,7 +113,7 @@ export function MapCanvas({ ariaLabel, className, bounds, boundsKey, fitPadding,
   }, [map, basemapFailed, fallbackColors]);
 
   useEffect(() => {
-    if (!map || !bounds) return;
+    if (!map || !bounds || !autoFit) return;
     map.fitBounds(bounds, { padding: fitPadding ?? FIT_BOUNDS_PADDING_PX, maxZoom: FIT_BOUNDS_MAX_ZOOM, duration: FIT_BOUNDS_DURATION_MS });
     // boundsKey decides when to re-fit, so live updates don't fight the user's panning.
     // eslint-disable-next-line react-hooks/exhaustive-deps

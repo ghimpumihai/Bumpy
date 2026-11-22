@@ -47,9 +47,11 @@ Python 3, standard library only.
 
    `REPLAY_API_URL` is `ingest_base_url` from `./infra/tf.ps1 output`: the function's host with no path,
    the same value as in the app. A URL that already ends in `/api/ingest` works too (the tool strips it).
+   Without `REPLAY_DEVICE_KEY` the tool asks for the key when run in a terminal.
 
 | Option | What it does |
 |---|---|
+| `--url <url>` | The ingest URL, instead of `REPLAY_API_URL`. |
 | `--speed 4` | 4× faster (`0` = as fast as possible). Default is real time. |
 | `--from 600 --duration 300` | Replay only minutes 10–15 of the trip. |
 | `--device-id <id>` | Use your own device ID. The default is `replay-<the phone's deviceId>`, which gives the replay its own marker on the Live page. |
@@ -59,13 +61,15 @@ Python 3, standard library only.
 **Ctrl+C** stops the replay and closes the trip: the Stop metadata is sent with the batches that
 went out, so the trip doesn't stay "Recording".
 
+Exit code: `0` when done, `1` on an error (with its reason), `130` after Ctrl+C, `2` for bad options.
+
 ## What it sends
 
 The same requests as the app (spec §6, §6.1): `PUT /api/ingest/sessions/{id}` with `session.json` at
 Start, then one `POST /api/ingest` per 2-second window, then the Stop copy with `batchCount`. Errors
 are handled like the app's queue: network errors, `429` and `5xx` are retried with backoff from
-1 s up to 30 s. `401`/`403` (bad key), `404` (wrong URL) or any other `4xx` stop the replay with
-the server's reason.
+1 s up to 30 s, for at most 5 minutes per request. `409` counts as delivered. `401`/`403` (bad key),
+`404` (wrong URL) or any other `4xx` stop the replay with the server's reason.
 
 The replay is a separate trip from the original:
 

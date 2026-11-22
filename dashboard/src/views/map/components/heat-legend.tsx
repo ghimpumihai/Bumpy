@@ -1,3 +1,5 @@
+import type { ReactNode } from "react";
+
 import { Label } from "@/components/ui/label";
 import { Switch } from "@/components/ui/switch";
 import { cn } from "@/lib/utils";
@@ -10,12 +12,14 @@ const EVENT_KEY = [
 
 interface HeatLegendProps {
   className?: string;
+  /** The trip replay controls. */
+  replay?: ReactNode;
   showEvents: boolean;
   onShowEventsChange: (show: boolean) => void;
 }
 
 /** One quiet card: what the colour means, and the switch for the detected-event dots. */
-export function HeatLegend({ className, showEvents, onShowEventsChange }: HeatLegendProps) {
+export function HeatLegend({ className, replay, showEvents, onShowEventsChange }: HeatLegendProps) {
   return (
     <section aria-label="Map legend" className={cn("vertical w-40 gap-2 rounded-2xl border border-white/10 bg-card/70 p-3 text-xs shadow-lg backdrop-blur-md", className)}>
       <div className="vertical gap-1.5">
@@ -26,6 +30,7 @@ export function HeatLegend({ className, showEvents, onShowEventsChange }: HeatLe
           <span>12+</span>
         </div>
       </div>
+      {replay}
       <div className="horizontal justify-between gap-2 border-t border-white/10 pt-2">
         <Label htmlFor="events-toggle" className="text-xs font-medium text-foreground">
           Detected events

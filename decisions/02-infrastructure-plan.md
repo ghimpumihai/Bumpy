@@ -296,10 +296,10 @@ Nothing secret is ever committed to the repo.
 **GitHub Actions.** CI/CD inside GitHub: workflows run on every pull request and every merge. They log in to Azure with **OIDC**: GitHub proves which repo and branch a job comes from, Azure trusts that through a **federated credential** on a managed identity, and hands out short-lived tokens (`azure/login` v2, pinned to a commit SHA like every action). No Azure secrets are stored anywhere; the client, tenant and subscription IDs are plain repo variables.
 
 Our repo was created on 2026-11-20, after GitHub switched new repos to **immutable subject claims** (2026-07-15). The token's subject therefore carries the numeric owner and repo IDs, and the federated credentials must match them exactly:
-- deploy: `repo:ghimpumihai@163877193/DataInfrastructure_Chuds@1465690625:environment:prod`
-- plan: `repo:ghimpumihai@163877193/DataInfrastructure_Chuds@1465690625:pull_request`
+- deploy: `repo:ghimpumihai@163877193/Bumpy@1465690625:environment:prod`
+- plan: `repo:ghimpumihai@163877193/Bumpy@1465690625:pull_request`
 
-These IDs are public and never change, even if the repo is renamed. If login fails, print the real `sub` claim in a workflow step and compare.
+These IDs are public and never change, but the subject also carries the repo name: after a rename (this repo was `DataInfrastructure_Chuds` until 2026-11-22), update `github_repo` in `infra/bootstrap/variables.tf` and apply the bootstrap stack, or every Azure login fails. If login fails, print the real `sub` claim in a workflow step and compare.
 
 **Docker Compose (local development).** Runs PostgreSQL with PostGIS on a laptop (`docker-compose.yml`). The processor can run directly on session CSV files, so most development and testing needs no Azure at all.
 
@@ -621,7 +621,7 @@ Every point the plan had marked as unsure, what we found, and what it changed. S
 | Is Flex Consumption in North Europe, with which Python? | North Europe was a launch region; Python 3.12 and 3.13 are GA | Python 3.12; confirm region with the CLI on day 0 |
 | Is Log Analytics free? | First 5 GB per month per billing account | Daily cap 0.5 GB (§5) |
 | Static Web Apps Free limits? | 100 GB traffic per month, 250 MB per app, 10 apps per subscription | Unchanged |
-| GitHub OIDC subject format for this repo? | Repo created 2026-11-20, after GitHub's switch to immutable subjects (2026-07-15) | Federated credentials use `repo:ghimpumihai@163877193/DataInfrastructure_Chuds@1465690625:...` (§5, D36) |
+| GitHub OIDC subject format for this repo? | Repo created 2026-11-20, after GitHub's switch to immutable subjects (2026-07-15) | Federated credentials use `repo:ghimpumihai@163877193/Bumpy@1465690625:...` (§5, D36) |
 | What can't the free credit pay for? | Marketplace products, support plans and a few others; the account must be upgraded within 30 days to keep running | Noted in §5 and §14 |
 | Does the plan match what is already built on `main`? (merged 2026-11-20) | The app has no health route and tests its connection with a probe POST; the dashboard is built with its own read-API contract (`dashboard/API.md`) and a mock backend | Ingest follows the probe and status rules of `mock_ingest_server.py`; the read API follows `API.md`; dashboard pages listed in §5; session status names match the dashboard |
 | Where does the session metadata call go? | The read API already uses `GET /api/sessions/{id}` on another host | The app's call is `PUT /api/ingest/sessions/{id}`, so every app route sits under `/api/ingest` |

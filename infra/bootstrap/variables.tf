@@ -19,7 +19,8 @@ variable "admin_object_ids" {
   default     = []
 }
 
-# Public, never-changing GitHub IDs for the immutable OIDC subject (plan §5).
+# Public GitHub names and never-changing IDs for the immutable OIDC subject (plan §5). A repo rename changes
+# the subject: update github_repo and apply, or every Azure login from Actions fails.
 variable "github_owner" {
   type    = string
   default = "ghimpumihai"
@@ -32,7 +33,7 @@ variable "github_owner_id" {
 
 variable "github_repo" {
   type    = string
-  default = "DataInfrastructure_Chuds"
+  default = "Bumpy"
 }
 
 variable "github_repo_id" {

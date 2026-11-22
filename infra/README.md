@@ -87,12 +87,12 @@ Terraform turns it off again.
 ### If the Azure login fails in a workflow
 
 The federated credentials in `bootstrap/main.tf` use GitHub's immutable subject format
-(`repo:ghimpumihai@163877193/DataInfrastructure_Chuds@1465690625:environment:prod` and `…:pull_request`),
-which GitHub uses for repositories created after 2026-07-15 (plan §5, D36). On 2026-11-21 the repo's
-OIDC settings returned exactly that prefix:
+(`repo:ghimpumihai@163877193/Bumpy@1465690625:environment:prod` and `…:pull_request`),
+which GitHub uses for repositories created after 2026-07-15 (plan §5, D36). The name in it changes with a
+repo rename: set `github_repo` in `bootstrap/variables.tf` and apply. The prefix GitHub sends now:
 
 ```
-gh api repos/ghimpumihai/DataInfrastructure_Chuds/actions/oidc/customization/sub
+gh api repos/ghimpumihai/Bumpy/actions/oidc/customization/sub
 ```
 
 If a login fails with `AADSTS700213` (no matching federated identity record), compare the `sub` that

@@ -100,7 +100,7 @@ final class LocationService: NSObject, LocationSource, CLLocationManagerDelegate
     /// While recording: why location data is degraded (shown as PROBLEM on the dashboard).
     var degradedReason: String? {
         guard recordingCallbacks != nil else { return nil }
-        if !isAuthorized { return "Location permission revoked: Settings → Sensor Recorder → Location" }
+        if !isAuthorized { return "Location permission revoked: Settings → Bumpy → Location" }
         if !isFullAccuracy { return "Precise Location is OFF: GPS is approximate" }
         return nil
     }

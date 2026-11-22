@@ -118,7 +118,7 @@ resource "azurerm_role_assignment" "tfstate_admins" {
 
 resource "azuread_group" "team" {
   display_name     = "${var.project}-team"
-  description      = "Road & Ride team: Owner on the project resource groups."
+  description      = "Bumpy team: Owner on the project resource groups."
   security_enabled = true
   owners           = [data.azurerm_client_config.current.object_id]
 }

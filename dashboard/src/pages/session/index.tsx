@@ -6,7 +6,7 @@ export function SessionPage() {
   return (
     <>
       <Helmet>
-        <title>Session · Road &amp; Ride</title>
+        <title>Session · Bumpy</title>
       </Helmet>
       <SessionView />
     </>

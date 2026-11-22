@@ -1,4 +1,4 @@
-# The whole Road & Ride stack in one resource group (plan §12). The group itself, the state storage
+# The whole Bumpy stack in one resource group (plan §12). The group itself, the state storage
 # and the GitHub identities are created by ../bootstrap.
 
 data "azurerm_client_config" "current" {}

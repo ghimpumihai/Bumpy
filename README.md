@@ -1,4 +1,4 @@
-# DataInfrastructure_Chuds: Road & Ride
+# DataInfrastructure_Chuds: Bumpy
 
 Codelap Hackathon 2026 (Porsche Engineering, "Data-Driven Infrastructure Engineering"). Road quality and motion sickness measured with phone sensors in cars, buses and trams, sent to Azure live while driving, processed, and shown on a map dashboard.
 

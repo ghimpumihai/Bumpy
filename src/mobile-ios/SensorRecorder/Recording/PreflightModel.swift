@@ -176,7 +176,7 @@ final class PreflightModel {
         if !loc.isAuthorized {
             set("perm.location", .fail, loc.authorization == .notDetermined ? "not determined" : "denied: Settings → Privacy → Location")
         } else if !loc.isFullAccuracy {
-            set("perm.location", .fail, "Precise Location is OFF: Settings → Sensor Recorder → Location → Precise")
+            set("perm.location", .fail, "Precise Location is OFF: Settings → Bumpy → Location → Precise")
         } else {
             set("perm.location", .pass, loc.authorization == .authorizedAlways ? "always, precise" : "when in use, precise")
         }

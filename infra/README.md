@@ -141,7 +141,7 @@ Terraform doesn't see the setting (the provider hides it), so deleting it never 
 
 ## Monitoring workbook
 
-`modules/observability/workbook.tf` defines one Azure Monitor workbook, **Road & Ride: live path**. In the portal: Application Insights `appi-roadride-*` → Workbooks. It is free (queries and platform metrics only) and follows the time range picked at the top (4 h by default).
+`modules/observability/workbook.tf` defines one Azure Monitor workbook, **Bumpy: live path**. In the portal: Application Insights `appi-roadride-*` → Workbooks. It is free (queries and platform metrics only) and follows the time range picked at the top (4 h by default).
 
 | Section | Shows | From |
 |---|---|---|

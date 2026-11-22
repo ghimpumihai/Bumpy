@@ -4,16 +4,16 @@ on:
   pull_request:
     paths:
       - "services/ingest/**"
-      - "src/mobile-ios/tools/mock_ingest_server.py"
-      - "src/mobile-ios/tools/fixtures/**"
+      - "mobile/mobile-ios/tools/mock_ingest_server.py"
+      - "mobile/mobile-ios/tools/fixtures/**"
       - ".github/workflows/ingest-ci.yml"
       - "!**/*.md"
   push:
     branches: [staging] # main: tested by the release PR, then again by the release pipeline (release.yml)
     paths:
       - "services/ingest/**"
-      - "src/mobile-ios/tools/mock_ingest_server.py"
-      - "src/mobile-ios/tools/fixtures/**"
+      - "mobile/mobile-ios/tools/mock_ingest_server.py"
+      - "mobile/mobile-ios/tools/fixtures/**"
       - ".github/workflows/ingest-ci.yml"
       - "!**/*.md"
 

@@ -173,8 +173,8 @@ services/processor/   stream processor, signal processing, migrate/finalize/aggr
 services/read-api/    FastAPI read API for the dashboard
 db/migrations/        SQL migrations
 dashboard/            React + MapLibre + uPlot web app (mock backend built in)
-src/mobile-ios/       the iPhone recorder (Swift)
-src/mobile-android/   the Android recorder (Kotlin)
+mobile/mobile-ios/    the iPhone recorder (Swift)
+mobile/mobile-android/ the Android recorder (Kotlin)
 tools/replay/         re-sends a recorded trip through the live path (Python, stdlib only)
 tools/upload/         laptop fallback: uploads a session folder for the finalize job (Python, stdlib only)
 .github/workflows/    CI and deploys

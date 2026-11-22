@@ -11,8 +11,8 @@ ROOT = pathlib.Path(__file__).resolve().parents[3]
 SERVICE = pathlib.Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(SERVICE))
 
-FIXTURE = ROOT / "src" / "mobile-ios" / "tools" / "fixtures" / "ingest_batch_v1.json.gz"
-MOCK = ROOT / "src" / "mobile-ios" / "tools" / "mock_ingest_server.py"
+FIXTURE = ROOT / "mobile" / "mobile-ios" / "tools" / "fixtures" / "ingest_batch_v1.json.gz"
+MOCK = ROOT / "mobile" / "mobile-ios" / "tools" / "mock_ingest_server.py"
 
 DEVICE_KEY = "test-device-key"
 DEVICE_ID = "FIXTURE-DEVICE"  # the deviceId in the app-encoded fixture batch

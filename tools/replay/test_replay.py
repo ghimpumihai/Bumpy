@@ -27,7 +27,7 @@ import replay  # noqa: E402
 from ingest_core import contract, handler  # noqa: E402
 from roadride.live import parse_batch, parse_session  # noqa: E402
 
-HEADERS = json.loads((ROOT / "src/mobile-ios/tools/fixtures/csv_headers.json").read_text())
+HEADERS = json.loads((ROOT / "mobile/mobile-ios/tools/fixtures/csv_headers.json").read_text())
 START_UP = 1000.0  # phone uptime at Start
 UTC0 = 1_763_716_532_000  # Unix ms at START_UP
 DURATION = 7.3  # seconds of trip -> 4 batches
@@ -75,7 +75,7 @@ def session(tmp_path) -> Path:
     with open(folder / "device_motion.csv", "a") as fh:
         fh.write(f"{START_UP + DURATION:.6f},123,0.1")
     meta = json.loads(gzip.decompress(
-        (ROOT / "src/mobile-ios/tools/fixtures/session_meta_stop_v1.json.gz").read_bytes()))
+        (ROOT / "mobile/mobile-ios/tools/fixtures/session_meta_stop_v1.json.gz").read_bytes()))
     meta.update(sessionId="orig-session", deviceId="PHONE-1", startUptimeSec=START_UP)
     meta["people"] = dict(meta.get("people") or {}, raterName="Rater A")  # the phone's local copy has it
     (folder / "session.json").write_text(json.dumps(meta))

@@ -8,7 +8,7 @@ are in [`decisions/01-initial-plan.md`](../../decisions/01-initial-plan.md) (bac
 
 ## Run it on the iPhone
 
-1. Open `src/mobile-ios/SensorRecorder.xcodeproj` in Xcode (16 or newer).
+1. Open `mobile/mobile-ios/SensorRecorder.xcodeproj` in Xcode (16 or newer).
 2. Target **SensorRecorder** → *Signing & Capabilities* → pick your **Personal Team**.
    If Xcode says the bundle id is taken, change `com.chuds.sensorrecorder` to something unique.
 3. On the iPhone: **Settings → Privacy & Security → Developer Mode → On** (reboot), plug it in
@@ -228,7 +228,7 @@ SensorRecorder/
 ## Tests
 
 ```bash
-cd src/mobile-ios
+cd mobile/mobile-ios
 SIM="iPhone 17 Pro"   # any iOS 17+ simulator
 # optional, for the UI tests: grant permissions and give the simulator a GPS position
 xcrun simctl boot "$SIM"; for p in location motion; do
@@ -256,7 +256,7 @@ xcodebuild -project SensorRecorder.xcodeproj -scheme SensorRecorder \
   on an iPhone simulator with the newest iOS runtime) runs the unit tests only (`-only-testing:SensorRecorderTests`, no
   UI tests), the unsigned Release device build (skipped on pull requests) and `tools/test_tools.py`
   (on macOS and Ubuntu). It runs on pushes to `staging` and on pull requests that touch
-  `src/mobile-ios/` (Markdown changes excluded).
+  `mobile/mobile-ios/` (Markdown changes excluded).
 
 ### Tools (`tools/`)
 

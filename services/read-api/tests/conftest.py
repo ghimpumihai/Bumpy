@@ -16,7 +16,7 @@ ROOT = pathlib.Path(__file__).resolve().parents[3]
 sys.path.insert(0, str(ROOT / "services" / "read-api"))
 sys.path.insert(0, str(ROOT / "services" / "processor"))
 
-FIXTURE = ROOT / "src" / "mobile-ios" / "tools" / "fixtures" / "ingest_batch_v1.json.gz"
+FIXTURE = ROOT / "mobile" / "mobile-ios" / "tools" / "fixtures" / "ingest_batch_v1.json.gz"
 MIGRATIONS = ROOT / "db" / "migrations"
 
 UTC = dt.timezone.utc

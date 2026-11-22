@@ -136,7 +136,7 @@ Read this section if a tool name is unfamiliar. Each entry says what the tool is
 | `POST /api/ingest` | one 2-second batch (spec §6) |
 | `PUT /api/ingest/sessions/{sessionId}` | the session's metadata, sent at Start and at Stop (spec §6.1) |
 
-There is no health route. The app tests its connection with a **probe**: a gzipped `{"probe":true,"deviceId":"<Device ID>"}` with the device key and the header `x-probe: 1`, sent to `/api/ingest`. Because the function checks the key before the body, the answer tells the app everything it needs: `401` = unknown key, `403` = the key is stored under another device ID, `400` = reachable and key accepted (the probe is rejected and never stored), `404` = wrong address. `src/mobile-ios/tools/mock_ingest_server.py` implements the same order and is the reference for the function's responses; only the two `403` checks below (device binding and session owner) are not in the mock.
+There is no health route. The app tests its connection with a **probe**: a gzipped `{"probe":true,"deviceId":"<Device ID>"}` with the device key and the header `x-probe: 1`, sent to `/api/ingest`. Because the function checks the key before the body, the answer tells the app everything it needs: `401` = unknown key, `403` = the key is stored under another device ID, `400` = reachable and key accepted (the probe is rejected and never stored), `404` = wrong address. `mobile/mobile-ios/tools/mock_ingest_server.py` implements the same order and is the reference for the function's responses; only the two `403` checks below (device binding and session owner) are not in the mock.
 
 For each batch or metadata message the function:
 - checks the `x-device-key` header against hashed device keys (stored in Key Vault, compared in constant time so timing can't leak them). The function caches them and reloads the secret every 5 minutes, and within a minute when an unknown key arrives, so a new key works without a restart. If Key Vault can't be read when a reload is needed (the first load, an unknown key, a key sending as another device) it answers `503`; known keys keep working from the cache, but not with keys older than 6 hours;
@@ -475,7 +475,7 @@ infra/
 | `deploy-services.yml` | called by the release when `services/processor/**`, `services/read-api/**` or `db/**` changed, or ticked | runs the processor and read API tests, builds images, pushes to ACR, runs the migrate job and waits for it, updates the finalize and aggregate jobs, the processor and the read API, then checks that the read API's main routes answer `200` |
 | `deploy-dashboard.yml` | called by the release when `dashboard/**` changed, or ticked | runs `dashboard-ci.yml`, checks that the read API answers the site (JSON, CORS), builds, writes `config.json` with the read API address (from `az containerapp show`), deploys to Static Web Apps (the deploy token is fetched with `az` after OIDC login, not stored) |
 | `security.yml` | every PR, and every push to `main` and `staging` | gitleaks over the whole history (scans for committed secrets) |
-| `ios-app.yml` | PR, or push to `staging`, touching `src/mobile-ios/**` | tests the app's Python tools, builds the app for device (unsigned, not on PRs) and runs its unit tests on a macOS runner (free for public repos) |
+| `ios-app.yml` | PR, or push to `staging`, touching `mobile/mobile-ios/**` | tests the app's Python tools, builds the app for device (unsigned, not on PRs) and runs its unit tests on a macOS runner (free for public repos) |
 
 There is no teardown workflow: `infra/tf.ps1 destroy` runs from a laptop after the hackathon, because purging the soft-deleted Key Vault needs rights at subscription level.
 
@@ -512,7 +512,7 @@ Either covers the hackathon: three days cost about $2. Run `infra/tf.ps1 destroy
 
 ```
 decisions/            # this folder: plans and decision log
-src/mobile-ios/       # iPhone app (teammate, built on a Mac)
+mobile/mobile-ios/       # iPhone app (teammate, built on a Mac)
   tools/              # quick_check.py (sanity check of a session folder, initial plan §10), mock_ingest_server.py
 services/
   ingest/             # Function app: validate, send to Event Hubs, archive
@@ -563,7 +563,7 @@ docker-compose.yml    # local PostGIS
 1. **Account limits.** The free account's credit lasts 30 days and some sizes may be unavailable in the region. Fix on day 0; fall back to West Europe if needed.
 2. **Login and network surprises.** The database must reach Entra ID to accept token logins (NSG rule plus default outbound access on `snet-psql`); a scale rule that can't log in never starts the finalize job. Test both on day 1. Reported quirk: suspending or updating a Container Apps Job can break its event trigger; if the finalize job stops starting, recreate it (`infra/tf.ps1 apply -replace=module.compute.azurerm_container_app_job.finalize`).
 3. **The app's metadata call isn't ready.** Without it the backend doesn't know the vehicle or when a trip ended. Fallback: the processor creates the trip from its first batch with unknown context and closes it after 15 minutes of silence; such trips stay out of the aggregated map until their folder is uploaded.
-4. **Bad recordings:** loose mount, clock problems, wrong axes. Do a 10-minute dry run, watch it live on the dashboard, and check the folder with `src/mobile-ios/tools/quick_check.py` before the first real drive.
+4. **Bad recordings:** loose mount, clock problems, wrong axes. Do a 10-minute dry run, watch it live on the dashboard, and check the folder with `mobile/mobile-ios/tools/quick_check.py` before the first real drive.
 5. **Mobile network on the route.** Dead zones delay data (the queue catches up) but don't lose it. Pick a loop with decent coverage so the live view looks live.
 6. **Not enough overlapping trips** for aggregation. Plan a fixed loop and repeat it.
 7. **Live parts fail in the room** (Wi-Fi, function cold start). The replay through the real live path is the main demo; the video of a real drive is the backup.

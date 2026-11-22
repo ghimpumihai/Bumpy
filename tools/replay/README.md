@@ -92,6 +92,6 @@ python3 -m pip install pytest
 python3 -m pytest -q tools/replay
 ```
 
-The tests build a session folder in the app's CSV format (`src/mobile-ios/tools/fixtures/csv_headers.json`).
+The tests build a session folder in the app's CSV format (`mobile/mobile-ios/tools/fixtures/csv_headers.json`).
 They check every batch against the real ingest contract and the processor's parser, and send a whole
 replay over HTTP through the real ingest handler, with one forced `503`. CI: `replay-ci`.

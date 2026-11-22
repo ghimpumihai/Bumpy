@@ -1,6 +1,6 @@
 # Android Sensor Recorder rules
 
-A port of `src/mobile-ios` (D58). Its `CLAUDE.md` rules on the contract, files on disk, upload, UI and real data apply here too; a behaviour change goes into both apps. Only the differences are below.
+A port of `mobile/mobile-ios` (D58). Its `CLAUDE.md` rules on the contract, files on disk, upload, UI and real data apply here too; a behaviour change goes into both apps. Only the differences are below.
 
 - **iOS semantics everywhere.** Units, axes and signs are converted in `sensors/` and nowhere else. Never feed `TYPE_GRAVITY` or `TYPE_LINEAR_ACCELERATION` into `deviceMotion` (D46, README).
 - **Layers:** `ui → app → recording → (core, sensors, upload)`. `core/`, `upload/`, `RecordingSession` and `MotionFusion` use no Android classes, so the data path is tested on the JVM.

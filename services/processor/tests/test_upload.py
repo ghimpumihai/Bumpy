@@ -21,7 +21,7 @@ from roadride import finalize as fz
 from roadride import upload as up
 from roadride.live import parse_batch, parse_session
 
-HEADERS = json.loads((ROOT / "src/mobile-ios/tools/fixtures/csv_headers.json").read_text())
+HEADERS = json.loads((ROOT / "mobile/mobile-ios/tools/fixtures/csv_headers.json").read_text())
 SID = "4f1c2b9e-1111-4222-8333-444455556666"
 START_UP = 5000.0
 UTC0 = 1_795_000_000_000  # ms at START_UP
@@ -92,7 +92,7 @@ def make_folder(root, *, sid=SID, seconds=SECONDS, ended=True):
         (d / f"{name}.csv").write_text("\n".join([HEADERS[name], *lines]) + "\n")
     with open(d / "device_motion.csv", "a") as fh:
         fh.write(f"{START_UP + seconds:.6f},123,0.1")  # torn
-    fixture = ROOT / "src/mobile-ios/tools/fixtures/session_meta_stop_v1.json.gz"
+    fixture = ROOT / "mobile/mobile-ios/tools/fixtures/session_meta_stop_v1.json.gz"
     meta = json.loads(gzip.decompress(fixture.read_bytes()))
     meta.pop("batchCount", None)
     meta.update(sessionId=sid, deviceId="PHONE-1", startUptimeSec=START_UP - 0.4, recovered=False,

@@ -1,8 +1,8 @@
 ---
 description: iOS app rules — backend contract, project file, layers, threading, on-disk data contract, upload queue, UI and testing
-globs: src/mobile-ios/**/*.swift,src/mobile-ios/**/*.plist,src/mobile-ios/**/*.xcscheme,src/mobile-ios/**/*.pbxproj,src/mobile-ios/tools/**/*.py
+globs: mobile/mobile-ios/**/*.swift,mobile/mobile-ios/**/*.plist,mobile/mobile-ios/**/*.xcscheme,mobile/mobile-ios/**/*.pbxproj,mobile/mobile-ios/tools/**/*.py
 alwaysApply: false
-scope: This rule applies ONLY to `src/mobile-ios/` in the DataInfrastructure_Chuds repository. Do not apply it anywhere else.
+scope: This rule applies ONLY to `mobile/mobile-ios/` in the DataInfrastructure_Chuds repository. Do not apply it anywhere else.
 ---
 
 # iOS app rules (Bumpy, Xcode project `SensorRecorder`)

@@ -1,6 +1,6 @@
 """The ingest contract: body decoding and schema checks.
 
-Ported from src/mobile-ios/tools/mock_ingest_server.py, the server the iPhone app was built and tested
+Ported from mobile/mobile-ios/tools/mock_ingest_server.py, the server the iPhone app was built and tested
 against. Keep the two in step: tests/test_parity.py runs the same cases through both.
 
 Pure standard library, so it is testable without Azure.

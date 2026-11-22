@@ -54,7 +54,7 @@ The processing will be developed **after** the drive, from the recorded files. E
 - **Frameworks:** CoreMotion, CoreLocation, UIKit bits (idle timer, battery), Network (reachability), AudioToolbox (problem alert sound), Compression (gzip), Security (Keychain). *AVFoundation was dropped with audio (D48), MapKit with the live map (D51).*
 - **No third-party dependencies** unless unavoidable. Less to go wrong.
 - **Signing:** free Apple ID ("Personal Team") is enough to run on your own iPhone. The provisioning lasts 7 days, so re-run from Xcode if it expires. On the iPhone, enable **Settings → Privacy & Security → Developer Mode**.
-- **Code location in repo:** `src/mobile-ios/` (Xcode project inside).
+- **Code location in repo:** `mobile/mobile-ios/` (Xcode project inside).
 
 ### Info.plist / capabilities
 | Key | Value / reason |
@@ -332,7 +332,7 @@ x-device-key: <device key>
 
 ### 6.2 What the app sends beyond the example above (implementation, app v1.0)
 
-Everything here is **additive**: the §6 keys keep their names, types and units, so the backend must accept extra keys (no pydantic `extra="forbid"`, no fixed `units` literal). The app's `tools/mock_ingest_server.py` validates all of it and is tested against payloads produced by the app's own encoder (`src/mobile-ios/tools/fixtures/`).
+Everything here is **additive**: the §6 keys keep their names, types and units, so the backend must accept extra keys (no pydantic `extra="forbid"`, no fixed `units` literal). The app's `tools/mock_ingest_server.py` validates all of it and is tested against payloads produced by the app's own encoder (`mobile/mobile-ios/tools/fixtures/`).
 
 - **Full dataset in every batch** (02 D32): `deviceMotion.roll/pitch/yaw`; `magRaw {t,x,y,z}` (µT, 50 Hz); `heading [{tUtcMs, magHeading, trueHeading, headingAcc, x, y, z}]`; `absAltitude {t, altitudeM, accuracyM, precisionM}`; `activity [{t, stationary, walking, running, automotive, cycling, unknown, confidence, startUtcMs}]`; `location[].ellAlt, vAcc, courseAcc, isSimulated`; `device.batteryState, freeDiskBytes, netStatus, netType`.
 - **Hackathon payload rule** ("device ID, event type, value, unit, UTC timestamp"): `eventType: "sensor_batch"`, `source: "live"`, `t0UtcMs` (sample UTC = `t0UtcMs + t[i]·1000`), `fieldUnits` (the unit of every field). Accelerations stay in **g** as the iPhone delivers them (`1 g = 9.80665 m/s²`); invalid speed/course/accuracies are **−1** as in iOS.
@@ -514,7 +514,7 @@ for f in ["device_motion","accel_raw","gyro_raw","location","altimeter","labels"
         print(f"{f:15s} rows={len(df)}")
 ```
 
-The full verifier is `src/mobile-ios/tools/quick_check.py` (stdlib only): headers, rates, gaps, clock alignment, labels, coverage and session.json (audio files from builds before D48 are reported and ignored).
+The full verifier is `mobile/mobile-ios/tools/quick_check.py` (stdlib only): headers, rates, gaps, clock alignment, labels, coverage and session.json (audio files from builds before D48 are reported and ignored).
 
 Pass criteria: motion streams ~100 Hz with max gap < 0.1 s; GPS ~1 Hz with sane coordinates; labels (if any; the app records none since D51) with the right timestamps; `t_utc_ms` values are the correct real time.
 
@@ -536,4 +536,4 @@ Pass criteria: motion streams ~100 Hz with max gap < 0.1 s; GPS ~1 Hz with sane 
 ## 12. Out of scope for the app
 - Any real signal processing (filtering, MSDV, roughness, pothole detection). That happens in the cloud from the raw data. On-device estimates are only for the live display.
 - User accounts or login. A per-install device ID and a device key are enough.
-- Android. Single device: iPhone 14 Pro. (The Android app came later: D58, `src/mobile-android/`.)
+- Android. Single device: iPhone 14 Pro. (The Android app came later: D58, `mobile/mobile-android/`.)

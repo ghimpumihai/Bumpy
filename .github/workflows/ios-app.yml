@@ -4,13 +4,13 @@ on:
   push:
     branches: [staging] # main only receives release PRs, which run these checks on the same tree
     paths:
-      - "src/mobile-ios/**"
-      - "!src/mobile-ios/**/*.md"
+      - "mobile/mobile-ios/**"
+      - "!mobile/mobile-ios/**/*.md"
       - ".github/workflows/ios-app.yml"
   pull_request:
     paths:
-      - "src/mobile-ios/**"
-      - "!src/mobile-ios/**/*.md"
+      - "mobile/mobile-ios/**"
+      - "!mobile/mobile-ios/**/*.md"
       - ".github/workflows/ios-app.yml"
 
 permissions:
@@ -50,7 +50,7 @@ jobs:
       - name: Python tools tests
         run: |
           ${{ matrix.python }} --version
-          ${{ matrix.python }} -I src/mobile-ios/tools/test_tools.py -v
+          ${{ matrix.python }} -I mobile/mobile-ios/tools/test_tools.py -v
 
   build-and-test:
     name: Xcode build and unit tests
@@ -58,7 +58,7 @@ jobs:
     timeout-minutes: 30
     defaults:
       run:
-        working-directory: src/mobile-ios
+        working-directory: mobile/mobile-ios
         shell: bash
     steps:
       - name: Check out the code
@@ -123,6 +123,6 @@ jobs:
         with:
           name: build-logs-and-test-results
           path: |
-            src/mobile-ios/build-logs/
-            src/mobile-ios/TestResults.xcresult
+            mobile/mobile-ios/build-logs/
+            mobile/mobile-ios/TestResults.xcresult
           if-no-files-found: ignore

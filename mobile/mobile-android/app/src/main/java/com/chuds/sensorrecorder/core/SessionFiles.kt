@@ -9,7 +9,7 @@ import java.util.concurrent.TimeUnit
 
 /**
  * Every CSV in a session folder, with its exact header (spec §4): the same schema the iOS app writes
- * (`src/mobile-ios/tools/fixtures/csv_headers.json`). The backend parses by header name.
+ * (`mobile/mobile-ios/tools/fixtures/csv_headers.json`). The backend parses by header name.
  */
 enum class StreamFile(val stem: String, vararg columns: String) {
     DEVICE_MOTION("device_motion", "ua_x", "ua_y", "ua_z", "g_x", "g_y", "g_z", "rr_x", "rr_y", "rr_z",

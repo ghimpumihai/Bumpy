@@ -45,6 +45,15 @@ The look follows the redesign mock-up: the dashboard's neutral palette, an ink-b
 dashboard's typeface, Geist (`SensorRecorder/Resources/Fonts/Geist-Variable.ttf`, SIL Open Font
 License in `Geist-OFL.txt`, registered through `UIAppFonts`; `Theme.font` sets its weight axis).
 
+### Finding the Device ID
+
+A device key works only under this phone's Device ID, a UUID kept in the Keychain. No screen shows it
+since D51 (the app's and the ingest function's 403 messages still say "Settings"). Either:
+- record a short trip (upload may be off) and read `deviceId` in its `session.json`, in the Files app
+  or over USB; or
+- with any valid key entered, run **Test connection**: the 403's reason, in the ingest function's logs
+  (Application Insights), names the Device ID the phone sent.
+
 ## What gets written
 
 `Documents/sessions/<UTC start>_<shortId>/` is visible in the **Files app** and in Finder over USB
@@ -206,7 +215,7 @@ SensorRecorder/
   Core/       TimeBase (clock anchors), CSV formatting, SessionFiles (schemas + buffered writers),
               SessionMetadata, SessionStore (folders, recovery), StreamMonitor (rates/gaps),
               HealthEvaluator (warning rules)
-  Sensors/    CoreMotion / synthetic motion, CoreLocation, device health
+  Sensors/    CoreMotion, CoreLocation, device health (the synthetic source is in the test target)
   Recording/  RecordingSession (wires everything to disk), RecordingController (8 Hz dashboard),
               PreflightModel, TripSummary + SessionVerdict (recap data quality),
               LiveSignals (plots, roughness, ISO 2631-1 Wf MSDV estimate)
@@ -265,4 +274,4 @@ xcodebuild -project SensorRecorder.xcodeproj -scheme SensorRecorder \
   change, regenerate with `TEST_RUNNER_REGENERATE_FIXTURES=1 xcodebuild … -only-testing:SensorRecorderTests/ContractFixtureTests test`.
 
 **Before the real drive, do the mandatory dry run (spec §10).** Record 5–10 min on the real
-phone, export it, and run `python3 tools/quick_check.py <folder>`.
+phone, copy its folder off (Files app or Finder over USB), and run `python3 tools/quick_check.py <folder>`.

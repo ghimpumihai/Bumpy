@@ -287,7 +287,7 @@ x-device-key: <device key>
 {
   "schemaVersion": 1,
   "sessionId": "UUID",
-  "deviceId": "stable per-install UUID (identifierForVendor, kept in the Keychain)",
+  "deviceId": "stable per-install UUID (first taken from identifierForVendor, then kept in the Keychain)",
   "batchSeq": 142,
   "t0Utc": "2026-11-21T09:15:32.120Z",
   "t0Up": 123532.408211,
@@ -308,7 +308,7 @@ x-device-key: <device key>
 
   - `t` arrays are **seconds relative to `t0Up`** (columnar to keep payloads small).
   - No `audioLevel` (nor `audioEnabled` in §6.1) since D48: the app no longer sends them, and the backend accepts and ignores them from older builds.
-  - Size: about 30 KB raw / ~10 KB gzipped per batch, roughly 20 MB/hour of mobile data.
+  - Size: with the full dataset of §6.2, about 45 KB raw / ~16 KB gzipped per batch, roughly 30 MB/hour of mobile data (an estimate, not measured on a drive).
 - **Queue on disk** (`Documents/upload_queue/`): write each batch as a `.json.gz` file, upload oldest first, **1 request at a time**, exponential backoff (1 s → 30 s max). Delete on HTTP 2xx. **Treat 409 (duplicate) as success.** Other 4xx: log, move to `upload_failed/`, continue (401/403/404/408/429 are retried instead, §6.2).
 - Idempotency key = `sessionId + batchSeq`.
 - ~~After the drive, a **"Upload full session"** button can send the queued remainder.~~ *Not built: after Stop the app asks iOS for background time until the queue is empty, and Settings has "Retry failed uploads (N)" for `upload_failed/` (D55).*
@@ -491,7 +491,7 @@ On PROBLEM: red banner with the reason, a strong haptic, and a sound, plus an `a
 **After the drive**
 1. 30 s stationary, engine idling, then SYNC TAP + 3 knocks, then **hold to Stop**.
 2. Check the summary screen for red rows.
-3. **Immediately export** the session folder (AirDrop to a laptop, plus Files → iCloud Drive or another copy). Keep **two copies** before doing anything else.
+3. **Immediately copy** the session folder off the phone (Files app → AirDrop to a laptop or iCloud Drive, or Finder over USB; no in-app export since D51). Keep **two copies** before doing anything else.
 
 ---
 
@@ -500,7 +500,7 @@ On PROBLEM: red banner with the reason, a strong haptic, and a sound, plus an `a
 Do a **5–10 minute test** (walk or drive around the block) and then verify on a laptop:
 
 ```python
-# quick_check.py: run on the exported session folder
+# quick_check.py: run on the copied session folder
 import pandas as pd, sys, pathlib
 d = pathlib.Path(sys.argv[1])
 for f in ["device_motion","accel_raw","gyro_raw","location","altimeter","labels"]:

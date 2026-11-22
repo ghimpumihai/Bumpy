@@ -69,7 +69,7 @@ The app ships real sensors only: no mock or demo mode. Fakes live in the test ta
 xcodebuild -project SensorRecorder.xcodeproj -scheme SensorRecorder \
   -destination 'platform=iOS Simulator,name=iPhone 17 Pro' test
 python3 tools/mock_ingest_server.py --port 8765 --out /tmp/ingest
-python3 tools/quick_check.py <exported session folder>
+python3 tools/quick_check.py <session folder>
 ```
 
 Done means it builds for device (`-sdk iphoneos CODE_SIGNING_ALLOWED=NO`) with no new warnings and all tests pass. Never silence a concurrency warning with `@unchecked Sendable` or `nonisolated(unsafe)` to get there.

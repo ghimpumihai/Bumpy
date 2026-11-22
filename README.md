@@ -51,7 +51,7 @@ Everything in the diagram is built and deployed. The laptop upload is the fallba
 
 | Part | What's missing |
 |---|---|
-| **iPhone app** ([`src/mobile-ios/`](src/mobile-ios/README.md)) | Built and tested by the team. The phone needs the ingest URL and a device key in its upload settings. The URL is `ingest_base_url` from `./infra/tf.ps1 output` (`https://<function host>`, no path; the app adds `/api/ingest`); `pwsh infra/scripts/add-device-key.ps1 -DeviceId <the app's Device ID>` creates the key (Settings → Device ID in the app). |
+| **iPhone app** ([`src/mobile-ios/`](src/mobile-ios/README.md)) | Built and tested by the team. The phone needs the ingest URL and a device key in its upload settings. The URL is `ingest_base_url` from `./infra/tf.ps1 output` (`https://<function host>`, no path; the app adds `/api/ingest`); `pwsh infra/scripts/add-device-key.ps1 -DeviceId <the app's Device ID>` creates the key. The app has no screen for the Device ID since D51: it is `deviceId` in any trip's `session.json` ([how to find it](src/mobile-ios/README.md#finding-the-device-id)). |
 | **End-to-end test** | Every piece is tested on its own, and the deploys check the Azure logins. **No test in CI covers the whole path from a phone to the dashboard.** The test is either a real drive or a [replay](tools/replay/README.md) of a recorded session folder. If the Live page stays empty, check the ingest function's logs first. |
 
 ### Not built yet

@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- The "b" of the app icon. -->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="24dp" android:height="24dp"
+    android:viewportWidth="1024" android:viewportHeight="1024">
+    <path android:fillColor="#FFFFFFFF" android:fillType="evenOdd"
+        android:pathData="M512,202A221,221 0,1 1,294,460L250,208A61,61 0,0 1,370,187L380,245A221,221 0,0 1,512,202ZM512,324A99,99 0,1 0,512,522A99,99 0,1 0,512,324Z" />
+    <path android:strokeColor="#FFFFFFFF" android:strokeWidth="124"
+        android:pathData="M0,872H188C350,872 360,724 512,724C664,724 674,872 836,872H1024" />
+</vector>

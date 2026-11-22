@@ -1,0 +1,10 @@
+.gradle/
+.kotlin/
+build/
+local.properties
+captures/
+*.apk
+*.jks
+*.keystore
+# Written by Android Studio on sync; would make every build download the JDK of whoever synced last.
+gradle/gradle-daemon-jvm.properties

@@ -157,6 +157,7 @@ Everything in the diagrams is built and deployed. The laptop upload is the fallb
 | Part | Where it stands |
 |---|---|
 | **iPhone app** ([`src/mobile-ios/`](src/mobile-ios/README.md)) | Built, and streaming to Azure since 2026-11-21. Each new phone needs the ingest URL and a device key in its upload settings. The URL is `ingest_base_url` from `./infra/tf.ps1 output` (`https://<function host>`, no path; the app adds `/api/ingest`); `pwsh infra/scripts/add-device-key.ps1 -DeviceId <the app's Device ID>` creates the key. The app has no screen for the Device ID since D51: it is `deviceId` in any trip's `session.json` ([how to find it](src/mobile-ios/README.md#finding-the-device-id)). |
+| **Android app** ([`src/mobile-android/`](src/mobile-android/README.md)) | Built (D58): the iPhone app's screens, files and upload contract in Kotlin. Run on an emulator against the mock ingest server only; not yet on a phone or against Azure. Drive it next to the iPhone before trusting its trips. |
 | **End-to-end test** | Done by hand: on 2026-11-21 ten trips streamed from an iPhone (the longest 9 km, all as `car`) were finalized and now count in the map. Every piece is also tested on its own, and the deploys check the Azure logins. **No test in CI covers the whole path from a phone to the dashboard**, so after a deploy repeat it with a real drive or a [replay](tools/replay/README.md) of a recorded session folder. If the Live page stays empty, check the ingest function's logs first. |
 
 ### Not built yet
@@ -187,6 +188,7 @@ services/read-api/    FastAPI read API for the dashboard
 db/migrations/        SQL migrations
 dashboard/            React + MapLibre + uPlot web app (mock backend built in)
 src/mobile-ios/       the iPhone recorder (Swift)
+src/mobile-android/   the Android recorder (Kotlin)
 tools/replay/         re-sends a recorded trip through the live path (Python, stdlib only)
 tools/upload/         laptop fallback: uploads a session folder for the finalize job (Python, stdlib only)
 .github/workflows/    CI and deploys

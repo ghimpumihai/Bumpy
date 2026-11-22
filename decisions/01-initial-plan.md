@@ -536,4 +536,4 @@ Pass criteria: motion streams ~100 Hz with max gap < 0.1 s; GPS ~1 Hz with sane 
 ## 12. Out of scope for the app
 - Any real signal processing (filtering, MSDV, roughness, pothole detection). That happens in the cloud from the raw data. On-device estimates are only for the live display.
 - User accounts or login. A per-install device ID and a device key are enough.
-- Android. Single device: iPhone 14 Pro.
+- Android. Single device: iPhone 14 Pro. (The Android app came later: D58, `src/mobile-android/`.)

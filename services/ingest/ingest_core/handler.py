@@ -118,7 +118,7 @@ def _not_this_device(device_ids: AbstractSet[str], device_id: str, info: str,
         return None
     return _error(403, f"deviceId {device_id!r} is not the device this x-device-key was issued to "
                        f"({', '.join(sorted(device_ids))}); store the key under the app's Device ID "
-                       "(Settings) with infra/scripts/add-device-key.ps1", info)
+                       "(deviceId in session.json) with infra/scripts/add-device-key.ps1", info)
 
 
 def _not_the_owner(sinks: Sinks, session_id: str, device_id: str, info: str) -> Response | None:

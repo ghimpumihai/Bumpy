@@ -255,7 +255,7 @@ xcodebuild -project SensorRecorder.xcodeproj -scheme SensorRecorder \
 - **CI** (`.github/workflows/ios-app.yml`, `macos-15` with the newest non-beta Xcode on the runner,
   on an iPhone simulator with the newest iOS runtime) runs the unit tests only (`-only-testing:SensorRecorderTests`, no
   UI tests), the unsigned Release device build (skipped on pull requests) and `tools/test_tools.py`
-  (also on Ubuntu). It runs on pushes to `main`/`staging` and on pull requests that touch
+  (on macOS and Ubuntu). It runs on pushes to `staging` and on pull requests that touch
   `src/mobile-ios/` (Markdown changes excluded).
 
 ### Tools (`tools/`)

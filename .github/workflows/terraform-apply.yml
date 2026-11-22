@@ -1,9 +1,10 @@
-name: terraform-apply
+name: CD - Terraform apply
 
-# Applies infra/main from GitHub instead of a laptop (plan 02 §13). Manual only (Actions → terraform-apply
-# → Run workflow): the plan's "apply on merge, after approval in the protected prod environment" needs
-# required reviewers on `prod`, and `prod` has none, since the code deploys use it unattended. Running it
-# by hand is the approval. Read the PR's terraform-plan comment first.
+# Applies infra/main from GitHub instead of a laptop (plan 02 §13). Called by release.yml (D57) when a
+# release changes the Terraform code, before any code deploy; no trigger of its own. The approval is the
+# merge of the release PR, where terraform-plan.yml posts the plan. release.yml never runs a code deploy at
+# the same time: an apply writes back the container image it read at plan time (ignore_changes), so one
+# overlapping deploy-services could put the old image back.
 #
 # Same settings as terraform-plan.yml (repo variables + the TF_VAR_ALERT_EMAIL secret, infra/README.md
 # "CI for Terraform"), but logs in as the deploy identity (Contributor + RBAC Administrator on the stack).
@@ -16,20 +17,19 @@ name: terraform-apply
 # subscription-level rights the deploy identity doesn't have.
 
 on:
-  workflow_dispatch:
+  workflow_call:
     inputs:
       allow_data_loss:
         description: "Allow deleting or replacing the database, storage, Event Hubs, Service Bus, Key Vault or registry"
         type: boolean
         default: false
+    secrets:
+      TF_VAR_ALERT_EMAIL:
+        required: true
 
 permissions:
   id-token: write
   contents: read
-
-concurrency:
-  group: terraform-apply
-  cancel-in-progress: false
 
 env:
   TF_VERSION: "1.13.4"
@@ -38,6 +38,7 @@ env:
 
 jobs:
   apply:
+    name: Plan, guard and apply
     # Like the deploys: production changes only from main, never from staging or a feature branch.
     if: github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
@@ -48,15 +49,18 @@ jobs:
       ARM_TENANT_ID: ${{ vars.AZURE_TENANT_ID }}
       ARM_SUBSCRIPTION_ID: ${{ vars.AZURE_SUBSCRIPTION_ID }}
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - name: Check out the code
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
 
-      - uses: hashicorp/setup-terraform@b9cd54a3c349d3f38e8881555d616ced269862dd # v3.1.2
+      - name: Set up Terraform
+        uses: hashicorp/setup-terraform@b9cd54a3c349d3f38e8881555d616ced269862dd # v3.1.2
         with:
           terraform_version: ${{ env.TF_VERSION }}
           terraform_wrapper: false
 
       # For the az clean-up after the apply; Terraform logs in by itself (ARM_USE_OIDC).
-      - uses: azure/login@7184910d9eb2b1c5e48f7073824a90609bb9b6d6 # v2.3.1
+      - name: Log in to Azure (OIDC, deploy identity)
+        uses: azure/login@7184910d9eb2b1c5e48f7073824a90609bb9b6d6 # v2.3.1
         with:
           client-id: ${{ vars.AZURE_CLIENT_ID_DEPLOY }}
           tenant-id: ${{ vars.AZURE_TENANT_ID }}
@@ -83,7 +87,7 @@ jobs:
           put TF_VAR_admin_object_ids "$ADMIN_OBJECT_IDS"
           put TF_VAR_budget_amount "$BUDGET"
 
-      - name: init
+      - name: Initialise with the remote state
         env:
           STATE_RG: ${{ vars.TFSTATE_RESOURCE_GROUP }}
           STATE_ACCOUNT: ${{ vars.TFSTATE_STORAGE_ACCOUNT }}
@@ -96,10 +100,25 @@ jobs:
             -backend-config="container_name=$STATE_CONTAINER" \
             -backend-config="key=$STATE_KEY"
 
-      - name: plan
+      # Exit code 0 = nothing to change, 2 = changes. The lock wait covers a laptop apply still running.
+      - name: Plan
+        id: plan
         run: |
-          terraform -chdir=infra/main plan -input=false -no-color -out=tfplan
+          code=0
+          terraform -chdir=infra/main plan -input=false -no-color -lock-timeout=10m -detailed-exitcode -out=tfplan || code=$?
+          if [ "$code" != "0" ] && [ "$code" != "2" ]; then exit "$code"; fi
+          echo "exitcode=$code" >> "$GITHUB_OUTPUT"
           terraform -chdir=infra/main show -json tfplan > "$RUNNER_TEMP/plan.json"
+          function_app=$(jq 'any((.resource_changes // [])[];
+            .type == "azurerm_function_app_flex_consumption" and (.change.actions - ["no-op", "read"] | length > 0))' \
+            "$RUNNER_TEMP/plan.json")
+          echo "function_app=$function_app" >> "$GITHUB_OUTPUT"
+          {
+            echo "### Terraform plan (infra/main)"
+            echo
+            terraform -chdir=infra/main show -no-color tfplan \
+              | grep -E '^Plan:|^No changes|must be replaced|will be destroyed' | sed 's/^/    /' || true
+          } >> "$GITHUB_STEP_SUMMARY"
 
       - name: No data-holding resource is deleted or replaced
         env:
@@ -118,15 +137,20 @@ jobs:
           if [ -s "$RUNNER_TEMP/stateful.txt" ]; then
             while read -r line; do echo "::error::This plan deletes or replaces $line"; done < "$RUNNER_TEMP/stateful.txt"
             if [ "$ALLOW" != "true" ]; then
-              echo "::error::Not applied. Re-run with allow_data_loss only if losing that data is intended."
+              echo "::error::Not applied. If losing that data is intended, start CD - Release to production by hand with allow_data_loss ticked."
               exit 1
             fi
           fi
 
-      - name: apply
-        run: terraform -chdir=infra/main apply -input=false -no-color tfplan
+      - name: Apply
+        id: apply
+        if: steps.plan.outputs.exitcode == '2'
+        run: terraform -chdir=infra/main apply -input=false -no-color -lock-timeout=10m tfplan
 
+      # Also after an apply that failed halfway: the function app may already have been written, and while
+      # the key-based setting is there every phone's upload fails.
       - name: Host storage uses the managed identity only
+        if: always() && steps.apply.outcome != '' && steps.apply.outcome != 'skipped'
         run: |
           app=$(terraform -chdir=infra/main output -raw ingest_function_name)
           rg=$(terraform -chdir=infra/main output -raw resource_group)
@@ -134,5 +158,16 @@ jobs:
           if printf '%s\n' "$names" | grep -qx 'AzureWebJobsStorage'; then
             echo "Removing the key-based AzureWebJobsStorage setting (provider bug, infra/README.md)"
             az functionapp config appsettings delete -n "$app" -g "$rg" --setting-names AzureWebJobsStorage --output none
+            names=$(az functionapp config appsettings list -n "$app" -g "$rg" --query '[].name' -o tsv)
+          fi
+          if printf '%s\n' "$names" | grep -qx 'AzureWebJobsStorage'; then
+            echo "::error::AzureWebJobsStorage is still set on $app"; exit 1
           fi
           echo "$app: identity-based host storage only"
+
+      - name: The ingest function still answers
+        if: steps.apply.outcome == 'success' && steps.plan.outputs.function_app == 'true'
+        env:
+          APP: ${{ vars.INGEST_FUNCTION_APP }}
+          RG: ${{ vars.RESOURCE_GROUP }}
+        run: bash .github/scripts/ingest-smoke.sh

@@ -112,7 +112,7 @@ no framing). `vite preview` serves the same headers, so the e2e tests run under 
 ## Runtime configuration
 
 The deployed site reads `/config.json` at startup: `{"apiBase": "https://<read-api>.<env>.northeurope.azurecontainerapps.io"}`.
-The manual `deploy-dashboard.yml` workflow (main only) writes this file just before uploading, with the
+The `deploy-dashboard.yml` workflow (called by the release, main only) writes this file just before uploading, with the
 read API container app's address (`az containerapp show`), after checking that its `/api/overview` answers
 JSON with a CORS header for the site's origin; the committed `public/config.json` stays empty. An empty `apiBase` (the
 default in `public/config.json`) makes the dashboard use its built-in mock data. A missing, unreachable

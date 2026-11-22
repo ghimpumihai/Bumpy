@@ -8,4 +8,10 @@ resource "azurerm_static_web_app" "dashboard" {
   sku_tier            = "Free"
   sku_size            = "Free"
   tags                = var.tags
+
+  lifecycle {
+    # Every site upload (deploy-dashboard) records the repository and branch here; Terraform must not
+    # clear them again on the next apply.
+    ignore_changes = [repository_url, repository_branch]
+  }
 }

@@ -2,27 +2,132 @@
 
 Codelap Hackathon 2026 (Porsche Engineering, "Data-Driven Infrastructure Engineering"). Road quality and motion sickness measured with phone sensors in cars, buses and trams, sent to Azure live while driving, processed, and shown on a map dashboard.
 
+**Data path:** from the phone to the map.
+
 ```mermaid
-flowchart LR
-  phone["iPhone app"] -->|"gzip batch every 2 s"| ingest["Ingest Function"]
-  replay["Replay tool"] -->|"same API"| ingest
-  ingest -->|"raw archive"| lake[("Blob: lake")]
-  ingest --> eh["Event Hubs"] --> proc["Stream processor"]
-  proc --> pg[("PostgreSQL + PostGIS")]
-  proc -->|"trip ended"| sb["Service Bus"]
-  laptop["Laptop upload<br/>(fallback)"] --> sessions[("Blob: sessions")]
-  sessions -->|"Event Grid"| sb
-  sb --> fin["Finalize job<br/>whole trip + map"]
-  lake --> fin
-  sessions --> fin
-  fin --> pg
+flowchart TB
+  phone["iPhone app<br/>CSVs + upload queue on disk"]
+  kv["Key Vault<br/>device-key hashes"]
+  lake[("Blob: lake<br/>raw, owners, processed")]
+  fnst[("Function storage<br/>host + package")]
+  web["Dashboard<br/>Static Web App"]
+  replay["Replay tool"]
+  eg["Event Grid"]
+  ingest["Ingest Function<br/>Flex Consumption plan"]
+  sessions[("Blob: sessions")]
+  user["Browser"]
+  sb["Service Bus<br/>session-ready + dead letters"]
+  laptop["Laptop upload tool<br/>(fallback)"]
+  eh["Event Hubs"]
+  carto["CARTO basemap<br/>(external)"]
+  subgraph VNET["VNet"]
+    subgraph ACA["snet-aca: Container Apps"]
+      agg["Aggregate job<br/>started by hand"]
+      mig["Migrate job<br/>each services deploy"]
+      proc["Stream processor"]
+      fin["Finalize job<br/>whole trip + map"]
+      api["Read API"]
+    end
+    subgraph PSN["snet-psql: private, NSG"]
+      pg[("PostgreSQL 17<br/>+ PostGIS")]
+    end
+    dns["Private DNS zone"]
+  end
+  phone -.->|"opens, if a URL is set"| web
+  mig -->|"schema, roles"| pg
+  sessions -->|"_complete.json created"| eg --> sb
+  kv -->|"key hashes"| ingest
+  ingest -->|"partition key = device"| eh
+  proc <-->|"live results,<br/>checkpoints"| pg
+  phone -->|"batch every 2 s;<br/>session.json at Start, Stop"| ingest
+  dns -.-> pg
+  api -->|"JSON"| user
+  sb -->|"KEDA starts it"| fin
+  fnst <--> ingest
+  eh --> proc
+  carto -->|"style + tiles"| user
+  web -->|"site + config.json"| user
+  replay -->|"same API"| ingest
+  laptop -->|"_complete.json last"| sessions
+  proc -->|"trip ended or<br/>15 min silence"| sb
+  lake -->|"raw batches"| fin
   fin -->|"Parquet"| lake
-  pg --> api["Read API"] --> web["Dashboard"]
+  phone -.->|"session folder, if it never streamed"| laptop
+  ingest <-->|"raw archive,<br/>owner marker"| lake
+  agg <-->|"map"| pg
+  sessions -->|"uploaded trip"| fin
+  fin <-->|"trip results + map"| pg
+  pg -->|"as reader"| api
+  fin -.->|"unusable: dead letter"| sb
 ```
 
-Not drawn: Key Vault (the device-key hashes ingest checks), the Container Registry, the migrate job (runs before each services deploy), the aggregate job (rebuilds the map on demand; finalize also does it after every trip), Log Analytics + Application Insights, budget alerts, and GitHub Actions (tests, Terraform, deploys via OIDC).
+**Platform:** how it is deployed, logged in and watched.
 
-Everything in the diagram is built and deployed. The laptop upload is the fallback for a trip that never streamed; its Event Grid → Service Bus wiring is part of the Terraform stack.
+```mermaid
+flowchart LR
+  team["Team (Entra group)"]
+  subgraph GH["GitHub Actions"]
+    ci["Tests + gitleaks"]
+    plan["Terraform plan<br/>on PRs that change infra/"]
+    rel["Release on main"]
+  end
+  ghp["Plan identity<br/>OIDC, read-only"]
+  ghd["Deploy identity<br/>OIDC"]
+  tfs[("Terraform state<br/>rg-roadride-tfstate")]
+  acr["Container Registry"]
+  kv["Key Vault"]
+  data["Event Hubs, Blob: lake,<br/>Blob: sessions"]
+
+  subgraph RUN["Runs our code"]
+    ingest["Ingest Function<br/>Flex Consumption plan"]
+    apps["Stream processor, Read API"]
+    jobs["Finalize + Aggregate jobs"]
+    mig["Migrate job"]
+  end
+  web["Dashboard<br/>Static Web App"]
+  ids["Managed identities<br/>ingest, worker, migrate, readapi"]
+
+  subgraph MON["Monitoring"]
+    appi["Application Insights"]
+    law["Log Analytics"]
+    wb["Workbook: live path"]
+    metrics["Azure metrics: Event Hubs, Service Bus,<br/>PostgreSQL, processor, finalize, Read API"]
+    budget["Cost budget"]
+    ag["Email action group"]
+  end
+
+  plan --> ghp -->|"reads"| tfs
+  rel --> ghd
+  ghd <-->|"Terraform apply"| tfs
+  ghd -->|"first: Terraform"| AZ["Every Azure resource<br/>in rg-roadride"]
+  ghd -->|"then: images"| acr
+  ghd -->|"then: code"| ingest
+  ghd -->|"then: migrate, before apps and jobs"| mig
+  ghd -->|"update"| apps
+  ghd -->|"update"| jobs
+  ghd -->|"last: site"| web
+  acr -.->|"images"| apps
+  acr -.-> jobs
+  acr -.-> mig
+  team -->|"device keys"| kv
+  team -.->|"uploads, test events, lake reads"| data
+  ids -.->|"Entra logins, no passwords"| RUN
+  ingest -.->|"telemetry"| appi
+  apps -.-> appi
+  jobs -.-> appi
+  apps -.->|"console logs"| law
+  jobs -.-> law
+  mig -.-> law
+  appi --> law --> wb
+  metrics --> wb
+  budget -->|"forecast"| ag
+  budget -->|"actual spend"| mail["Team email"]
+  ag --> mail
+```
+
+All Azure resources are in `rg-roadride`, except the Terraform state and the two GitHub identities (`rg-roadride-tfstate`). Solid arrows are the main flow; dotted ones are fallbacks and supporting links.
+
+Everything in the diagrams is built and deployed. The laptop upload is the fallback for a trip that never streamed; its Event Grid → Service Bus wiring is part of the Terraform stack.
 
 - Plans and decision log: [decisions/](decisions/README.md)
 - iPhone recorder spec: [decisions/01-initial-plan.md](decisions/01-initial-plan.md)

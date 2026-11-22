@@ -7,7 +7,7 @@
   The ingest function compares x-device-key in constant time (plan §5) and reloads the secret by
   itself within a minute when it sees an unknown key.
   A key may only send data whose deviceId is the name it is stored under, so -DeviceId must be the
-  app's Device ID (Settings -> Device ID). Use -DeviceId replay for the replay tool: that key may
+  app's Device ID (deviceId in any trip's session.json). Use -DeviceId replay for the replay tool: that key may
   send any replay-... device ID.
   The plain key is printed once: type it into the app's upload settings. It is not stored anywhere.
 

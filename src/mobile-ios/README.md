@@ -48,7 +48,7 @@ License in `Geist-OFL.txt`, registered through `UIAppFonts`; `Theme.font` sets i
 ### Finding the Device ID
 
 A device key works only under this phone's Device ID, a UUID kept in the Keychain. No screen shows it
-since D51 (the app's and the ingest function's 403 messages still say "Settings"). Either:
+since D51. Either:
 - record a short trip (upload may be off) and read `deviceId` in its `session.json`, in the Files app
   or over USB; or
 - with any valid key entered, run **Test connection**: the 403's reason, in the ingest function's logs

@@ -649,7 +649,7 @@ final class UploadQueue: Sendable {
         case 400, 422: return (true, "reachable, key accepted (HTTP \(status) to probe)", "Connected")
         case 200..<300: return (true, "reachable (HTTP \(status))", "Connected")
         case 401: return (false, "device key rejected (HTTP 401)", "Wrong device key")
-        case 403: return (false, "device key is stored under another Device ID (HTTP 403): add it for this phone's Device ID (Settings)",
+        case 403: return (false, "device key is stored under another Device ID (HTTP 403): add it for this phone's Device ID (deviceId in session.json)",
                           "Key belongs to another phone")
         case 404: return (false, "endpoint not found (HTTP 404): check the API URL", "Wrong server address")
         default: return (false, "HTTP \(status) from /api/ingest", "Server error (HTTP \(status))")

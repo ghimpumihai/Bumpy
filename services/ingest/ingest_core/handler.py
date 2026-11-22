@@ -1,7 +1,7 @@
 """Request handling for both routes, independent of Azure Functions and the Azure SDKs.
 
 Checks run in the same order as the mock server the app was tested against
-(src/mobile-ios/tools/mock_ingest_server.py):
+(mobile/mobile-ios/tools/mock_ingest_server.py):
   1. x-device-key (401), then the body as sent: present (400) and at most contract.MAX_BODY (413)
   2. Content-Type application/json (400)
   3. gunzip when the body starts with the gzip magic bytes, whatever Content-Encoding says: the

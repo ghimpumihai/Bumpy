@@ -15,7 +15,7 @@ Python 3.12 everywhere (Function runtime, Dockerfiles, CI); no 3.13+ features.
 - The app sends acceleration in g; convert with `G`. The `WF` values are cited ISO 2631-1 constants, not tunables; only the pothole, speed-bump and forward-axis thresholds and the lateral weighting `WY` / `LATERAL_K` (PROVISIONAL in the `dsp.py` docstring) may be tuned.
 
 ## Ingest
-- Validation order and status codes mirror `src/mobile-ios/tools/mock_ingest_server.py` (`tests/test_parity.py`), except the differences listed in `ingest/README.md`; add any new one there.
+- Validation order and status codes mirror `mobile/mobile-ios/tools/mock_ingest_server.py` (`tests/test_parity.py`), except the differences listed in `ingest/README.md`; add any new one there.
 - Answer 200 only after the session owner check (D53), the Event Hubs send and the `lake` blob write succeed; any Azure failure (Key Vault and the owner marker included) is 503 so the app retries.
 
 ## Deploys ship a whitelist

@@ -6,7 +6,7 @@ on:
       - "tools/replay/**"
       - "services/ingest/ingest_core/**"
       - "services/processor/roadride/live.py"
-      - "src/mobile-ios/tools/fixtures/**"
+      - "mobile/mobile-ios/tools/fixtures/**"
       - ".github/workflows/replay-ci.yml"
       - "!**/*.md"
   push:
@@ -15,7 +15,7 @@ on:
       - "tools/replay/**"
       - "services/ingest/ingest_core/**"
       - "services/processor/roadride/live.py"
-      - "src/mobile-ios/tools/fixtures/**"
+      - "mobile/mobile-ios/tools/fixtures/**"
       - ".github/workflows/replay-ci.yml"
       - "!**/*.md"
 

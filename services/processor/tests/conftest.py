@@ -11,7 +11,7 @@ import pytest
 ROOT = pathlib.Path(__file__).resolve().parents[3]
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1]))
 
-FIXTURE = ROOT / "src" / "mobile-ios" / "tools" / "fixtures" / "ingest_batch_v1.json.gz"
+FIXTURE = ROOT / "mobile" / "mobile-ios" / "tools" / "fixtures" / "ingest_batch_v1.json.gz"
 MIGRATIONS = ROOT / "db" / "migrations"
 
 

@@ -2,7 +2,7 @@
 
 Data goes in through the stream processor's own write path (roadride.store.Store, the code that runs on
 Azure), starting from the batch the iPhone app's real encoder produced
-(src/mobile-ios/tools/fixtures/ingest_batch_v1.json.gz), so the read API answers exactly as in production.
+(mobile/mobile-ios/tools/fixtures/ingest_batch_v1.json.gz), so the read API answers exactly as in production.
 
 Three trips, one per state the dashboard must handle:
 - LIVE: recording now, so it shows on the live view;
@@ -32,7 +32,7 @@ from roadride.live import parse_batch, parse_session  # noqa: E402
 from roadride.migrate import apply_migrations  # noqa: E402
 from roadride.store import Store  # noqa: E402
 
-FIXTURE = ROOT / "src" / "mobile-ios" / "tools" / "fixtures" / "ingest_batch_v1.json.gz"
+FIXTURE = ROOT / "mobile" / "mobile-ios" / "tools" / "fixtures" / "ingest_batch_v1.json.gz"
 MIGRATIONS = ROOT / "db" / "migrations"
 UTC = dt.timezone.utc
 

@@ -2,7 +2,7 @@
 """test_tools.py: stdlib unittest suite for quick_check.py and mock_ingest_server.py.
 
 Usage:
-    python3 -I src/mobile-ios/tools/test_tools.py -v
+    python3 -I mobile/mobile-ios/tools/test_tools.py -v
 
 Both tools are run as subprocesses (exactly as the team runs them), with the same interpreter.
   - quick_check: synthetic session folders (valid and deliberately broken) in a temp dir: rates,

@@ -9,7 +9,7 @@ barometer are used when present.
 
 ## Run it on a phone
 
-1. Open `src/mobile-android` in Android Studio, or build from a terminal (JDK 17+, the Android SDK in
+1. Open `mobile/mobile-android` in Android Studio, or build from a terminal (JDK 17+, the Android SDK in
    `local.properties`): `./gradlew :app:assembleRelease`.
 2. Turn on USB debugging on the phone and run `adb install app/build/outputs/apk/release/app-release.apk`.
 3. Open Bumpy and allow **Precise** location **while using the app**.

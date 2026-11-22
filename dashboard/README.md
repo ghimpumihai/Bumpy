@@ -5,9 +5,8 @@ Web dashboard of the Codelap 2026 project (plan: [02-infrastructure-plan.md](../
 Azure Static Web Apps (`public/staticwebapp.config.json`: SPA fallback, caching, security headers), reading the **read API** ([API.md](API.md)).
 
 **Real backend:** the read API ([`services/read-api/`](../services/read-api/README.md)) is deployed on Azure and
-serves every route below. The site itself goes live with the manual **deploy-dashboard** workflow (Actions tab, runs
-only from `main`), which writes `config.json` with the read API's address and uploads the build to Static Web Apps; it
-last succeeded on 2026-11-21. Live, sessions, tracks, chart series, detected events and the motion-sickness dose come
+serves every route below. The site itself goes live with the release on merge to `main`
+(`deploy-dashboard.yml`, after the read API), which writes `config.json` with the read API's address and uploads the build to Static Web Apps. Live, sessions, tracks, chart series, detected events and the motion-sickness dose come
 from the live path; the Map page (heat lines, H3 segments, aggregation, events of finalized trips) and detection scores
 fill in once the finalize and aggregate jobs have processed a trip.
 

@@ -1,0 +1,145 @@
+name: CD - Release to production
+
+# The only workflow that changes Azure (D57). Every merge to main runs it; it deploys what changed since the
+# last successful release, in a fixed order:
+#
+#   Terraform  ->  ingest function + processor and read API  ->  dashboard website
+#
+# A part that fails stops the parts after it. One release at a time: a merge that lands while a release is
+# running waits for it. GitHub keeps only the newest waiting run and cancels the older ones, so the diff
+# starts at the last *successful* release, not at the previous push: a cancelled or failed release's changes
+# are picked up by the next one. Everything here is safe to deploy twice.
+#
+# Manual runs (Actions -> CD - Release to production -> Run workflow) deploy the ticked parts on top of
+# whatever changed, e.g. to redeploy a part that has no new code.
+
+on:
+  push:
+    branches: [main] # no path filter: a run with nothing to deploy just moves the starting point forward
+  workflow_dispatch:
+    inputs:
+      terraform:
+        description: "Apply Terraform even if infra/ did not change"
+        type: boolean
+        default: false
+      ingest:
+        description: "Deploy the ingest function even if it did not change"
+        type: boolean
+        default: false
+      services:
+        description: "Deploy the processor and the read API even if they did not change"
+        type: boolean
+        default: false
+      dashboard:
+        description: "Deploy the dashboard website even if it did not change"
+        type: boolean
+        default: false
+      allow_data_loss:
+        description: "Terraform may delete or replace the database, storage, Event Hubs, Service Bus, Key Vault or registry"
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+jobs:
+  changes:
+    name: Find what to deploy
+    # Production deploys only from main: a manual run started from any other branch deploys nothing.
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      actions: read # the last successful release
+    outputs:
+      terraform: ${{ steps.diff.outputs.terraform }}
+      ingest: ${{ steps.diff.outputs.ingest }}
+      services: ${{ steps.diff.outputs.services }}
+      dashboard: ${{ steps.diff.outputs.dashboard }}
+    steps:
+      - name: Check out the code
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          fetch-depth: 0 # the diff starts at an older commit
+
+      - name: Compare with the last successful release
+        id: diff
+        env:
+          GH_TOKEN: ${{ github.token }}
+          FORCE_TERRAFORM: ${{ inputs.terraform }}
+          FORCE_INGEST: ${{ inputs.ingest }}
+          FORCE_SERVICES: ${{ inputs.services }}
+          FORCE_DASHBOARD: ${{ inputs.dashboard }}
+        run: |
+          base=$(gh run list --workflow release.yml --branch main --status success --limit 1 --json headSha --jq '.[0].headSha // ""')
+          if [ -n "$base" ] && [ "$base" != "$GITHUB_SHA" ] && git merge-base --is-ancestor "$GITHUB_SHA" "$base" 2>/dev/null; then
+            echo "::error::${base::12}, newer than this run's ${GITHUB_SHA::12}, is already released. Start a new run on main instead of re-running an old one."
+            exit 1
+          fi
+          if [ -n "$base" ] && git merge-base --is-ancestor "$base" "$GITHUB_SHA" 2>/dev/null; then
+            since="since the release of ${base::12}"
+            git diff --name-only --no-renames "$base" "$GITHUB_SHA" | grep -v '\.md$' > "$RUNNER_TEMP/files" || true
+          else
+            since="no earlier release to compare with: everything"
+            git ls-files > "$RUNNER_TEMP/files"
+          fi
+          decide() { # part, forced?, path pattern
+            local value=false
+            if [ "$2" = "true" ] || grep -qE "$3" "$RUNNER_TEMP/files"; then value=true; fi
+            echo "$1=$value" >> "$GITHUB_OUTPUT"
+            echo "| $1 | $value |" >> "$GITHUB_STEP_SUMMARY"
+          }
+          printf '### Release of %s (%s)\n\n| Part | Deploy |\n|---|---|\n' "${GITHUB_SHA::12}" "$since" >> "$GITHUB_STEP_SUMMARY"
+          # infra/bootstrap is not here: it is applied by hand (infra/README.md).
+          decide terraform "$FORCE_TERRAFORM" '^(infra/(main|modules)/|\.github/workflows/terraform-apply\.yml$)'
+          decide ingest "$FORCE_INGEST" '^(services/ingest/|\.github/workflows/deploy-ingest\.yml$|\.github/scripts/ingest-smoke\.sh$)'
+          decide services "$FORCE_SERVICES" '^(services/(processor|read-api)/|db/|\.github/workflows/deploy-services\.yml$)'
+          decide dashboard "$FORCE_DASHBOARD" '^(dashboard/|\.github/workflows/deploy-dashboard\.yml$)'
+          cat "$GITHUB_OUTPUT"
+
+  # First and alone: the code may need new infrastructure, and an apply must not overlap a code deploy
+  # (terraform-apply.yml says why).
+  terraform:
+    name: Terraform
+    needs: changes
+    if: needs.changes.outputs.terraform == 'true'
+    uses: ./.github/workflows/terraform-apply.yml
+    permissions:
+      id-token: write
+      contents: read
+    with:
+      allow_data_loss: ${{ inputs.allow_data_loss || false }}
+    secrets:
+      TF_VAR_ALERT_EMAIL: ${{ secrets.TF_VAR_ALERT_EMAIL }}
+
+  # !failure() && !cancelled(): runs when the parts before it succeeded or were skipped.
+  ingest:
+    name: Ingest
+    needs: [changes, terraform]
+    if: ${{ !failure() && !cancelled() && needs.changes.outputs.ingest == 'true' }}
+    uses: ./.github/workflows/deploy-ingest.yml
+    permissions:
+      id-token: write
+      contents: read
+
+  services:
+    name: Services
+    needs: [changes, terraform]
+    if: ${{ !failure() && !cancelled() && needs.changes.outputs.services == 'true' }}
+    uses: ./.github/workflows/deploy-services.yml
+    permissions:
+      id-token: write
+      contents: read
+
+  dashboard:
+    name: Dashboard
+    needs: [changes, terraform, services]
+    if: ${{ !failure() && !cancelled() && needs.changes.outputs.dashboard == 'true' }}
+    uses: ./.github/workflows/deploy-dashboard.yml
+    permissions:
+      id-token: write
+      contents: read

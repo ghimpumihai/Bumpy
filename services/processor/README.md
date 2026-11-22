@@ -125,4 +125,4 @@ Without `PGHOST` and `PGPASSWORD`, the database tests are skipped and only the u
 
 ## Deploy
 
-`.github/workflows/deploy-services.yml` runs on every merge to `main` that touches `services/processor/`, `services/read-api/` or `db/`. It first runs `processor-ci` and `read-api-ci`, then builds the image (and the read API's), pushes it to ACR, runs the migrate job and waits for it to succeed, then points the finalize and aggregate jobs at the new image and updates the processor. Besides the ingest deploy's variables it needs `ACR_NAME`.
+`.github/workflows/deploy-services.yml` is called by the release (`release.yml`) on a merge to `main` that touches `services/processor/`, `services/read-api/` or `db/`. It first runs `processor-ci` and `read-api-ci`, then builds the image (and the read API's), pushes it to ACR, runs the migrate job and waits for it to succeed, then points the finalize and aggregate jobs at the new image and updates the processor. Besides the ingest deploy's variables it needs `ACR_NAME`.

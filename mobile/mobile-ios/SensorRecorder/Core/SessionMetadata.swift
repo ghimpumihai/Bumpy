@@ -166,6 +166,13 @@ struct SessionMetadata: Codable, Equatable {
         var measuredRatesHz: [String: Double]?
     }
 
+    /// A trip that started by itself (D59). Absent for manual trips.
+    struct AutoStart: Codable, Equatable {
+        var detectedAtUtc: String
+        /// Set when the trip was cancelled after its upload hold; omitted otherwise.
+        var cancelledAtUtc: String?
+    }
+
     var sessionId: String
     var appVersion: String
     var device: Device
@@ -185,13 +192,14 @@ struct SessionMetadata: Codable, Equatable {
     var folderName: String
     var deviceId: String
     var preflight: Preflight?
+    var autoStart: AutoStart? = nil
     var stats: Stats?
 
     // Explicit encoding so that `endedAtUtc` is written as `null` (spec shows it) instead of omitted.
     enum CodingKeys: String, CodingKey {
         case sessionId, appVersion, device, timezone, startedAtUtc, startUptimeSec, endedAtUtc
         case vehicle, mount, people, conditions, requestedRatesHz, recovered, recoveredAtUtc
-        case syntheticSensors, folderName, deviceId, preflight, stats
+        case syntheticSensors, folderName, deviceId, preflight, autoStart, stats
     }
 
     func encode(to encoder: Encoder) throws {
@@ -214,6 +222,7 @@ struct SessionMetadata: Codable, Equatable {
         try c.encode(folderName, forKey: .folderName)
         try c.encode(deviceId, forKey: .deviceId)
         try c.encodeIfPresent(preflight, forKey: .preflight)
+        try c.encodeIfPresent(autoStart, forKey: .autoStart)
         try c.encode(stats, forKey: .stats) // Optional -> null until the end
     }
 
@@ -237,6 +246,7 @@ struct SessionMetadata: Codable, Equatable {
         folderName = try c.decodeIfPresent(String.self, forKey: .folderName) ?? ""
         deviceId = try c.decodeIfPresent(String.self, forKey: .deviceId) ?? ""
         preflight = try? c.decodeIfPresent(Preflight.self, forKey: .preflight)
+        autoStart = try? c.decodeIfPresent(AutoStart.self, forKey: .autoStart)
         stats = try? c.decodeIfPresent(Stats.self, forKey: .stats)
     }
 

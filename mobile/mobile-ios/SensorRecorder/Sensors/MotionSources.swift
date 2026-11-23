@@ -126,8 +126,12 @@ final class CoreAltimeterSource: AltimeterSource {
     }
 }
 
-/// CMMotionActivityManager (A1): free "driving vs stopped" segmentation.
-final class CoreActivitySource: ActivitySource {
+/// The one owner of `CMMotionActivityManager` updates. The recorder and the auto-start monitor (D59)
+/// both subscribe; updates run while anyone is subscribed, so a recording's stop no longer turns off
+/// the monitor's driving detection (`startActivityUpdates` keeps only the last handler).
+final class ActivityHub {
+    static let shared = ActivityHub()
+
     private let manager = SharedMotion.activity
     private let queue: OperationQueue = {
         let q = OperationQueue()
@@ -135,23 +139,68 @@ final class CoreActivitySource: ActivitySource {
         q.maxConcurrentOperationCount = 1
         return q
     }()
+    private let subscribers = Locked<[UUID: (ActivitySample) -> Void]>([:])
 
     var isAvailable: Bool { CMMotionActivityManager.isActivityAvailable() }
 
-    func start(_ handler: @escaping (ActivitySample) -> Void) {
-        guard isAvailable else { return }
-        manager.startActivityUpdates(to: queue) { a in
-            guard let a else { return }
-            handler(ActivitySample(t: a.timestamp, stationary: a.stationary, walking: a.walking, running: a.running,
-                                   automotive: a.automotive, cycling: a.cycling, unknown: a.unknown,
-                                   confidence: a.confidence.rawValue,
-                                   startUtcMs: a.startDate.timeIntervalSince1970 * 1000))
+    func subscribe(_ handler: @escaping (ActivitySample) -> Void) -> UUID? {
+        guard isAvailable else { return nil }
+        let id = UUID()
+        let first = subscribers.withLock { s -> Bool in
+            s[id] = handler
+            return s.count == 1
         }
+        if first {
+            manager.startActivityUpdates(to: queue) { [subscribers] a in
+                guard let a else { return }
+                let sample = ActivitySample(t: a.timestamp, stationary: a.stationary, walking: a.walking, running: a.running,
+                                            automotive: a.automotive, cycling: a.cycling, unknown: a.unknown,
+                                            confidence: a.confidence.rawValue,
+                                            startUtcMs: a.startDate.timeIntervalSince1970 * 1000)
+                for h in subscribers.current.values { h(sample) }
+            }
+        }
+        return id
+    }
+
+    /// No callback for `id` after this returns.
+    func unsubscribe(_ id: UUID) {
+        let last = subscribers.withLock { s -> Bool in
+            s[id] = nil
+            return s.isEmpty
+        }
+        if last { manager.stopActivityUpdates() }
+        if OperationQueue.current != queue { queue.waitUntilAllOperationsAreFinished() }
+    }
+
+    /// Activity of the last `seconds` (for a relaunch: what happened before the app was woken).
+    func recent(seconds: TimeInterval, completion: @escaping ([ActivitySample]) -> Void) {
+        guard isAvailable else { completion([]); return }
+        let now = Date()
+        manager.queryActivityStarting(from: now.addingTimeInterval(-seconds), to: now, to: queue) { list, _ in
+            completion((list ?? []).map { a in
+                ActivitySample(t: a.timestamp, stationary: a.stationary, walking: a.walking, running: a.running,
+                               automotive: a.automotive, cycling: a.cycling, unknown: a.unknown,
+                               confidence: a.confidence.rawValue,
+                               startUtcMs: a.startDate.timeIntervalSince1970 * 1000)
+            })
+        }
+    }
+}
+
+/// CMMotionActivityManager (A1): free "driving vs stopped" segmentation, through `ActivityHub`.
+final class CoreActivitySource: ActivitySource {
+    private var subscription: UUID?
+
+    var isAvailable: Bool { ActivityHub.shared.isAvailable }
+
+    func start(_ handler: @escaping (ActivitySample) -> Void) {
+        subscription = ActivityHub.shared.subscribe(handler)
     }
 
     func stop() {
-        manager.stopActivityUpdates()
-        queue.waitUntilAllOperationsAreFinished()
+        if let id = subscription { ActivityHub.shared.unsubscribe(id) }
+        subscription = nil
     }
 }
 

@@ -63,6 +63,9 @@ struct UploadStatus: Equatable, Sendable {
 /// - Idempotency key = `sessionId:batchSeq` (also inside the body).
 /// - Every 2xx/409 is recorded in `upload_acked/<sessionId>.txt` before the queue file is deleted,
 ///   so the app knows which parts of a trip reached the cloud (Recap, delete guard; D55).
+/// - An automatic trip's files wait in the queue for its first 2 minutes (`upload_held/<sessionId>.txt`
+///   holds the release time, D59), so a Cancel in that window can delete a trip nothing of which
+///   reached the cloud. Held files don't block other trips' files.
 final class UploadQueue: Sendable {
     enum Outcome: Equatable {
         case uploaded(status: Int)
@@ -79,9 +82,11 @@ final class UploadQueue: Sendable {
     let directory: URL
     let failedDirectory: URL
     let ackedDirectory: URL
+    let heldDirectory: URL
     private let transport: HTTPTransport
     private let configProvider: @Sendable () -> UploadConfig
     private let uptime: @Sendable () -> TimeInterval
+    private let nowUtcMs: @Sendable () -> Int64
     private let statusBox = Locked(UploadStatus())
     private let kickFlag = Locked(false)
     private let loopTask = Locked<Task<Void, Never>?>(nil)
@@ -126,20 +131,24 @@ final class UploadQueue: Sendable {
 
     init(directory: URL, transport: HTTPTransport = URLSessionTransport(),
          uptime: @escaping @Sendable () -> TimeInterval = { ProcessInfo.processInfo.systemUptime },
+         nowUtcMs: @escaping @Sendable () -> Int64 = { Int64(Date().timeIntervalSince1970 * 1000) },
          backgroundTime: BackgroundTimeProvider? = UIKitBackgroundTime(),
          writeFile: @escaping FileWriter = UploadQueue.atomicWrite,
          config: @escaping @Sendable () -> UploadConfig) {
         self.directory = directory
         failedDirectory = directory.deletingLastPathComponent().appendingPathComponent("upload_failed", isDirectory: true)
         ackedDirectory = directory.deletingLastPathComponent().appendingPathComponent("upload_acked", isDirectory: true)
+        heldDirectory = directory.deletingLastPathComponent().appendingPathComponent("upload_held", isDirectory: true)
         self.transport = transport
         self.configProvider = config
         self.uptime = uptime
+        self.nowUtcMs = nowUtcMs
         self.backgroundTime = backgroundTime
         self.writeFile = writeFile
         try? FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
         try? FileManager.default.createDirectory(at: failedDirectory, withIntermediateDirectories: true)
         try? FileManager.default.createDirectory(at: ackedDirectory, withIntermediateDirectories: true)
+        try? FileManager.default.createDirectory(at: heldDirectory, withIntermediateDirectories: true)
         let existing = Self.queueFileNames(in: directory).compactMap { Self.parseItem(fileName: $0)?.createdMs }
         lastNamedMs = Locked(existing.max() ?? 0)
         refreshCounts()
@@ -364,6 +373,80 @@ final class UploadQueue: Sendable {
         try? FileManager.default.removeItem(at: ackFile(sessionId))
     }
 
+    // MARK: Upload hold (D59)
+
+    /// How long an automatic trip's files wait before they are sent.
+    static let holdSeconds: TimeInterval = 120
+    /// A discard needs this much of the hold left: the loop may already be sending a file whose hold
+    /// ended a moment ago, and a trip deleted on the phone must not leave a stub in the cloud.
+    static let discardMarginSeconds: TimeInterval = 15
+
+    private func holdFile(_ sessionId: String) -> URL {
+        heldDirectory.appendingPathComponent(sessionId + ".txt")
+    }
+
+    /// Holds the trip's files until `holdSeconds` from now. Call before its Start copy is queued.
+    /// Returns false when the hold could not be written: the trip then uploads at once (never lost),
+    /// and a Cancel can't delete it.
+    @discardableResult
+    func hold(sessionId: String, seconds: TimeInterval = UploadQueue.holdSeconds) -> Bool {
+        let release = nowUtcMs() + Int64(seconds * 1000)
+        do {
+            try writeFile(Data(String(release).utf8), holdFile(sessionId))
+            return true
+        } catch {
+            onEvent?(.warn, "upload: could not hold \(sessionId) for its first minutes: \(error.localizedDescription)")
+            return false
+        }
+    }
+
+    /// Milliseconds of hold left for the trip; nil when it isn't held (or the hold ended).
+    func holdRemainingMs(sessionId: String) -> Int64? {
+        guard let text = try? String(contentsOf: holdFile(sessionId), encoding: .utf8),
+              let release = Int64(text.trimmingCharacters(in: .whitespacesAndNewlines)) else { return nil }
+        let left = release - nowUtcMs()
+        // A release further away than a whole hold means the clock stepped back: end it now.
+        guard left > 0, left <= Int64(Self.holdSeconds * 1000) else { return nil }
+        return left
+    }
+
+    func releaseHold(sessionId: String) {
+        try? FileManager.default.removeItem(at: holdFile(sessionId))
+    }
+
+    /// Sessions whose files must not be sent yet. Ended holds are removed here.
+    func activeHolds() -> Set<String> {
+        let names = (try? FileManager.default.contentsOfDirectory(atPath: heldDirectory.path)) ?? []
+        var held = Set<String>()
+        for name in names where name.hasSuffix(".txt") {
+            let id = String(name.dropLast(".txt".count))
+            if holdRemainingMs(sessionId: id) != nil { held.insert(id) } else { releaseHold(sessionId: id) }
+        }
+        return held
+    }
+
+    /// Cancel within the hold: removes the trip's queued files, so nothing of it is ever sent. Refuses
+    /// (false) when the hold has ended or nearly ended, or when any part of the trip was already
+    /// acknowledged; the caller then keeps the trip.
+    func discardHeldSession(sessionId: String) -> Bool {
+        guard let left = holdRemainingMs(sessionId: sessionId),
+              left >= Int64(Self.discardMarginSeconds * 1000) else { return false }
+        if FileManager.default.fileExists(atPath: ackFile(sessionId).path) { return false }
+        for f in Self.queueFileNames(in: directory) where Self.parseItem(fileName: f)?.sessionId == sessionId {
+            do {
+                try FileManager.default.removeItem(at: directory.appendingPathComponent(f))
+            } catch {
+                // Whatever is left uploads after the hold: the trip is then kept, never half-deleted.
+                onEvent?(.warn, "upload: could not discard \(f): \(error.localizedDescription)")
+                refreshCounts()
+                return false
+            }
+        }
+        releaseHold(sessionId: sessionId)
+        refreshCounts()
+        return true
+    }
+
     // MARK: Processing
 
     func makeRequest(for file: QueueFile, body: Data, config: UploadConfig) throws -> URLRequest {
@@ -400,8 +483,12 @@ final class UploadQueue: Sendable {
         }
         finishLeftovers()
         setAsideForeignFiles()
-        guard let file = pendingFiles().first, let item = Self.parseItem(fileName: file.lastPathComponent) else {
-            statusBox.withLock { $0.queueCount = 0 }
+        let held = activeHolds()
+        guard let file = pendingFiles().first(where: { f in
+                  Self.parseItem(fileName: f.lastPathComponent).map { !held.contains($0.sessionId) } ?? true
+              }),
+              let item = Self.parseItem(fileName: file.lastPathComponent) else {
+            if held.isEmpty { statusBox.withLock { $0.queueCount = 0 } } else { refreshCounts() }
             releaseBackgroundTime()
             return .empty
         }

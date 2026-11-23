@@ -73,7 +73,7 @@ final class RecordingSession: @unchecked Sendable {
 
     /// Creates the session folder, writers, `session.json` and the first clock anchor.
     init(store: SessionStore, setup: SessionSetup, preflight: SessionMetadata.Preflight?, deps: Dependencies,
-         id: UUID = UUID()) throws {
+         id: UUID = UUID(), autoStart: SessionMetadata.AutoStart? = nil) throws {
         self.id = id
         self.deps = deps
         timeBase = TimeBase(clock: deps.clock)
@@ -99,7 +99,7 @@ final class RecordingSession: @unchecked Sendable {
         var mount = setup.mount
         mount.photoFile = nil // no mount photo since D51
 
-        let meta = SessionMetadata(
+        var meta = SessionMetadata(
             sessionId: id.uuidString, appVersion: deps.appVersion, device: deps.deviceInfo,
             timezone: deps.timezone, startedAtUtc: ISO8601.string(startDate), startUptimeSec: anchor.up,
             endedAtUtc: nil, vehicle: setup.vehicle, mount: mount, people: setup.people,
@@ -107,6 +107,7 @@ final class RecordingSession: @unchecked Sendable {
             requestedRatesHz: SessionMetadata.requestedRates,
             recovered: false, recoveredAtUtc: nil, syntheticSensors: deps.motion.isSynthetic,
             folderName: folder.lastPathComponent, deviceId: deps.deviceId, preflight: preflight, stats: nil)
+        meta.autoStart = autoStart
         metadataBox = Locked(meta)
         do {
             try meta.write(to: folder.appendingPathComponent(SessionFileName.metadata))
@@ -190,6 +191,16 @@ final class RecordingSession: @unchecked Sendable {
     }
 
     var isRunning: Bool { stateBox.withLock { $0.started && !$0.stopped } }
+
+    /// An automatic trip cancelled after its upload hold (D59): call before `stop()`, so the local
+    /// session.json and the Stop copy carry it.
+    func markCancelled(at date: Date) {
+        metadataBox.withLock { m in
+            guard m.autoStart != nil else { return }
+            m.autoStart?.cancelledAtUtc = ISO8601.string(date)
+        }
+        writer.log(.info, "automatic trip cancelled")
+    }
 
     // MARK: - Sensor wiring
 

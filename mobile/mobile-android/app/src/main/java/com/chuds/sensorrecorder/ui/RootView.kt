@@ -73,6 +73,18 @@ fun RootView(app: AppModel) {
             last?.let { RecordingFlowView(app, it) }
         }
     }
+    // Before Android 12 the notification's Cancel opens the app instead of asking for an unlock (D59).
+    if (app.autoTrips.confirmCancel) {
+        AlertBox(
+            "Cancel this trip?",
+            "Within its first 2 minutes it is deleted from the phone. Later it stops and is kept, marked as cancelled.",
+            cancel = "Keep", confirm = "Cancel trip", confirmId = "confirmCancelAutoTrip", destructive = true,
+            onCancel = { app.autoTrips.confirmCancel = false },
+        ) {
+            app.autoTrips.confirmCancel = false
+            app.autoTrips.cancel()
+        }
+    }
 }
 
 /** Recording while it runs, the recap after Stop. */

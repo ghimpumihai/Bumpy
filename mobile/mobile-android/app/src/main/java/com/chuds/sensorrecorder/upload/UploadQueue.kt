@@ -65,6 +65,9 @@ interface BackgroundTimeProvider {
  * - Idempotency key = `sessionId:batchSeq` (also inside the body).
  * - Every 2xx/409 is recorded in `upload_acked/<sessionId>.txt` before the queue file is deleted, so the
  *   app knows which parts of a trip reached the cloud (Recap, delete guard; D55).
+ * - An automatic trip's files wait in the queue for its first 2 minutes (`upload_held/<sessionId>.txt`
+ *   holds the release time, D59), so a Cancel in that window can delete a trip nothing of which reached
+ *   the cloud. Held files don't block other trips' files.
  */
 class UploadQueue(
     private val directory: File,
@@ -72,6 +75,8 @@ class UploadQueue(
     private val uptime: () -> Double,
     private val backgroundTime: BackgroundTimeProvider? = null,
     private val files: QueueFiles = QueueFiles.Real,
+    /** Wall clock for holds: they must survive a relaunch and a reboot, which reset the uptime. */
+    private val nowUtcMs: () -> Long = System::currentTimeMillis,
     private val config: () -> UploadConfig,
 ) {
     sealed interface Outcome {
@@ -90,6 +95,13 @@ class UploadQueue(
     private val parent: File = directory.absoluteFile.parentFile!!
     private val failedDirectory = File(parent, "upload_failed")
     private val ackedDirectory = File(parent, "upload_acked")
+    private val heldDirectory = File(parent, "upload_held")
+
+    /**
+     * Held while a file is chosen, sent and acknowledged, and while a held trip is discarded: a Cancel must
+     * never delete a trip whose Start copy is on its way to the server.
+     */
+    private val sendLock = Any()
     private val statusBox = Locked(UploadStatus())
     private val ackLock = Any()
 
@@ -125,7 +137,7 @@ class UploadQueue(
     @Volatile var onEvent: ((LogLevel, String) -> Unit)? = null
 
     init {
-        for (d in listOf(directory, failedDirectory, ackedDirectory)) d.mkdirs()
+        for (d in listOf(directory, failedDirectory, ackedDirectory, heldDirectory)) d.mkdirs()
         // A half-written enqueue from a killed run; it was never queued under its final name.
         directory.listFiles().orEmpty().filter { it.name.endsWith(FileUtil.TMP_SUFFIX) }.forEach { it.delete() }
         lastNamedMs = Locked(queueFileNames(directory).mapNotNull { parseItem(it)?.createdMs }.maxOrNull() ?: 0L)
@@ -265,6 +277,74 @@ class UploadQueue(
         synchronized(ackLock) { ackFile(sessionId).delete() }
     }
 
+    // Upload hold (D59)
+
+    private fun holdFile(sessionId: String) = File(heldDirectory, "$sessionId.txt")
+
+    /**
+     * Holds the trip's files until [seconds] from now. Call before its Start copy is queued. Returns false
+     * when the hold could not be written: the trip then uploads at once (never lost), and a Cancel can't
+     * delete it.
+     */
+    fun hold(sessionId: String, seconds: Double = HOLD_SECONDS): Boolean {
+        val release = nowUtcMs() + (seconds * 1000).toLong()
+        return try {
+            files.write(release.toString().toByteArray(), holdFile(sessionId))
+            true
+        } catch (e: IOException) {
+            onEvent?.invoke(LogLevel.WARN, "upload: could not hold $sessionId for its first minutes: ${e.text}")
+            false
+        }
+    }
+
+    /** Milliseconds of hold left for the trip; null when it isn't held (or the hold ended). */
+    fun holdRemainingMs(sessionId: String): Long? {
+        val release = runCatching { holdFile(sessionId).readText().trim().toLong() }.getOrNull() ?: return null
+        val left = release - nowUtcMs()
+        // A release further away than a whole hold means the clock stepped back: end it now.
+        return left.takeIf { it > 0 && it <= (HOLD_SECONDS * 1000).toLong() }
+    }
+
+    fun releaseHold(sessionId: String) {
+        holdFile(sessionId).delete()
+    }
+
+    /** Sessions whose files must not be sent yet. Ended holds are removed here. */
+    fun activeHolds(): Set<String> {
+        val held = HashSet<String>()
+        for (name in heldDirectory.list().orEmpty()) {
+            if (!name.endsWith(".txt") || name.endsWith(FileUtil.TMP_SUFFIX)) continue
+            val id = name.removeSuffix(".txt")
+            if (holdRemainingMs(id) != null) held.add(id) else releaseHold(id)
+        }
+        return held
+    }
+
+    /**
+     * Cancel within the hold: removes every queue file of the trip (also any in `upload_failed/`) and its
+     * hold, so nothing of it is ever sent. Refuses (false) when the hold has ended or anything of the trip
+     * was acknowledged; the caller then keeps the trip. Waits for a request in flight. Not on the main thread.
+     */
+    fun discardHeldSession(sessionId: String): Boolean = synchronized(sendLock) {
+        if (holdRemainingMs(sessionId) == null) return false
+        val (batches, stopAcked) = acknowledged(sessionId)
+        if (batches.isNotEmpty() || stopAcked || synchronized(ackLock) { ackFile(sessionId).exists() }) return false
+        val mine = { f: File -> parseItem(f.name)?.sessionId == sessionId }
+        for (f in pendingFiles().filter(mine) + failedFiles().filter(mine)) {
+            try {
+                files.delete(f)
+            } catch (e: IOException) {
+                // What is left uploads after the hold, so the trip is kept: the caller must not delete it.
+                onEvent?.invoke(LogLevel.WARN, "upload: could not discard ${f.name}: ${e.text}")
+                refreshCounts()
+                return false
+            }
+        }
+        releaseHold(sessionId)
+        refreshCounts()
+        true
+    }
+
     // Processing
 
     private fun makeRequest(file: QueueFile, body: ByteArray, cfg: UploadConfig): HttpRequest {
@@ -293,10 +373,15 @@ class UploadQueue(
         }
         finishLeftovers()
         setAsideForeignFiles()
-        val file = pendingFiles().firstOrNull()
+        return synchronized(sendLock) { sendHead(cfg) }
+    }
+
+    private fun sendHead(cfg: UploadConfig): Outcome {
+        val held = activeHolds()
+        val file = pendingFiles().firstOrNull { f -> parseItem(f.name)?.sessionId !in held }
         val item = file?.let { parseItem(it.name) }
         if (file == null || item == null) {
-            statusBox.update { it.copy(queueCount = 0) }
+            if (held.isEmpty()) statusBox.update { it.copy(queueCount = 0) } else refreshCounts()
             releaseBackgroundTimeIfDrained()
             return Outcome.Empty
         }
@@ -496,6 +581,9 @@ class UploadQueue(
         const val MAX_METADATA_NOT_FOUND_ATTEMPTS = 8
         const val MIN_BACKOFF = 1.0
         const val MAX_BACKOFF = 30.0
+
+        /** An automatic trip's uploads wait this long from its start (D59). */
+        const val HOLD_SECONDS = 120.0
         private const val REQUEST_TIMEOUT_MS = 15_000
         private const val PROBE_TIMEOUT_MS = 8_000
         private const val SUFFIX = ".json.gz"

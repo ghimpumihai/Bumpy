@@ -2,6 +2,10 @@
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
     <uses-permission android:name="android.permission.ACCESS_FINE_LOCATION" />
     <uses-permission android:name="android.permission.ACCESS_COARSE_LOCATION" />
+    <!-- Automatic trips (D59): watching while the app is closed, the step detector, re-arming after a reboot. -->
+    <uses-permission android:name="android.permission.ACCESS_BACKGROUND_LOCATION" />
+    <uses-permission android:name="android.permission.ACTIVITY_RECOGNITION" />
+    <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
     <uses-permission android:name="android.permission.INTERNET" />
     <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
@@ -50,6 +54,19 @@
             android:name=".app.RecordingService"
             android:exported="false"
             android:foregroundServiceType="location|dataSync" />
+
+        <receiver
+            android:name=".app.AutoTripCancelReceiver"
+            android:exported="false" />
+
+        <receiver
+            android:name=".app.AutoTripBootReceiver"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="android.intent.action.BOOT_COMPLETED" />
+                <action android:name="android.intent.action.MY_PACKAGE_REPLACED" />
+            </intent-filter>
+        </receiver>
 
         <!-- Read-only: session folders in the phone's Files app, as on iOS. -->
         <provider

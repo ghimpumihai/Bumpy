@@ -28,9 +28,11 @@ final class AutoTripUploadHoldTests: XCTestCase {
         try queueStartAndBatches("AUTO", batches: 2, at: 1)          // older files, held
         try queue.enqueue(gzippedBody: body, sessionId: "MANUAL", seq: 0, createdUtcMs: 10)
 
-        XCTAssertEqual(await queue.processOnce(), .uploaded(status: 200), "the held head doesn't block the next trip")
+        let o1 = await queue.processOnce()
+        XCTAssertEqual(o1, .uploaded(status: 200), "the held head doesn't block the next trip")
         XCTAssertEqual(queue.acknowledged(sessionId: "MANUAL").batches, [0])
-        XCTAssertEqual(await queue.processOnce(), .empty)
+        let o2 = await queue.processOnce()
+        XCTAssertEqual(o2, .empty)
         XCTAssertEqual(transport.requests.count, 1)
         XCTAssertEqual(queue.tripState(sessionId: "AUTO").pendingItems, 3, "held files are still pending, not lost")
     }
@@ -39,10 +41,12 @@ final class AutoTripUploadHoldTests: XCTestCase {
         queue.hold(sessionId: "AUTO")
         try queueStartAndBatches("AUTO", batches: 2, at: 1)
         advance(seconds: UploadQueue.holdSeconds - 1)
-        XCTAssertEqual(await queue.processOnce(), .empty)
+        let o3 = await queue.processOnce()
+        XCTAssertEqual(o3, .empty)
         advance(seconds: 2)
-        for _ in 0..<3 { XCTAssertEqual(await queue.processOnce(), .uploaded(status: 200)) }
-        XCTAssertEqual(await queue.processOnce(), .empty)
+        for _ in 0..<3 { let o = await queue.processOnce(); XCTAssertEqual(o, .uploaded(status: 200)) }
+        let o5 = await queue.processOnce()
+        XCTAssertEqual(o5, .empty)
         XCTAssertEqual(queue.acknowledged(sessionId: "AUTO").batches, [0, 1])
         XCTAssertNil(queue.holdRemainingMs(sessionId: "AUTO"))
         XCTAssertTrue(queue.activeHolds().isEmpty, "the ended hold's file is removed")
@@ -55,7 +59,8 @@ final class AutoTripUploadHoldTests: XCTestCase {
         let relaunched = UploadQueue(directory: queue.directory, transport: transport, nowUtcMs: { clock.current },
                                      backgroundTime: nil,
                                      config: { UploadConfig(baseURL: URL(string: "https://fn.test"), deviceKey: "k") })
-        XCTAssertEqual(await relaunched.processOnce(), .empty)
+        let o6 = await relaunched.processOnce()
+        XCTAssertEqual(o6, .empty)
         XCTAssertNotNil(relaunched.holdRemainingMs(sessionId: "AUTO"))
     }
 
@@ -64,7 +69,8 @@ final class AutoTripUploadHoldTests: XCTestCase {
         try queueStartAndBatches("AUTO", batches: 1, at: 1)
         advance(seconds: -3600) // the wall clock stepped back an hour
         XCTAssertNil(queue.holdRemainingMs(sessionId: "AUTO"))
-        XCTAssertEqual(await queue.processOnce(), .uploaded(status: 200), "never held for longer than a hold")
+        let o7 = await queue.processOnce()
+        XCTAssertEqual(o7, .uploaded(status: 200), "never held for longer than a hold")
     }
 
     func testCancelWithinTheHoldDiscardsEveryQueuedPart() throws {
@@ -90,7 +96,8 @@ final class AutoTripUploadHoldTests: XCTestCase {
 
     func testNoDiscardWhenAnyPartWasAcknowledged() async throws {
         try queueStartAndBatches("AUTO", batches: 1, at: 1)
-        XCTAssertEqual(await queue.processOnce(), .uploaded(status: 200)) // Start copy sent before the hold
+        let o8 = await queue.processOnce()
+        XCTAssertEqual(o8, .uploaded(status: 200)) // Start copy sent before the hold
         queue.hold(sessionId: "AUTO")
         XCTAssertFalse(queue.discardHeldSession(sessionId: "AUTO"))
         XCTAssertEqual(queue.tripState(sessionId: "AUTO").pendingItems, 1)
@@ -112,7 +119,8 @@ final class AutoTripUploadHoldTests: XCTestCase {
                                   config: { UploadConfig(baseURL: URL(string: "https://fn.test"), deviceKey: "k") })
         XCTAssertFalse(failing.hold(sessionId: "AUTO"))
         try failing.enqueue(gzippedBody: body, sessionId: "AUTO", seq: 0, createdUtcMs: 1)
-        XCTAssertEqual(await failing.processOnce(), .uploaded(status: 200), "never lost, just not cancellable")
+        let o9 = await failing.processOnce()
+        XCTAssertEqual(o9, .uploaded(status: 200), "never lost, just not cancellable")
     }
 }
 

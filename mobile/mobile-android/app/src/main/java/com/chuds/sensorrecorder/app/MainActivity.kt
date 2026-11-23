@@ -1,6 +1,7 @@
 package com.chuds.sensorrecorder.app
 
 import android.graphics.Color
+import android.content.Intent
 import android.os.Bundle
 import android.view.WindowManager
 import androidx.activity.ComponentActivity
@@ -28,6 +29,7 @@ class MainActivity : ComponentActivity() {
             intent.getStringExtra("upload.baseURL")?.let { model.settings.baseUrlString = it }
             intent.getStringExtra("dashboard.baseURL")?.let { model.settings.dashboardOverride = it }
         }
+        model.autoTrips.onIntent(intent)
         setContent {
             val recording = model.recording?.takeIf { !it.isFinished }
             LaunchedEffect(recording != null) {
@@ -37,6 +39,11 @@ class MainActivity : ComponentActivity() {
             }
             RootView(model)
         }
+    }
+
+    override fun onNewIntent(intent: Intent) {
+        super.onNewIntent(intent)
+        model.autoTrips.onIntent(intent)
     }
 
     override fun onStart() {

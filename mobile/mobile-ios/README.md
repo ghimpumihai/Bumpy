@@ -33,8 +33,29 @@ seconds after GPS recovers). Hold **Hold to end trip** for 2 s. The recap shows 
 of the trip with motion and GPS data) and how much of the trip reached the cloud: only parts the
 backend accepted count, and every 2 s window left out of the live upload (upload off for part of the
 trip, a full disk) and the Stop copy count too, so 100 % means the cloud has the whole trip. When a
-part will never arrive by itself, the recap says so in amber and asks for the laptop upload. Every trip is
-recorded as a car; there are no labels or sickness prompts. Results are on the web dashboard.
+part will never arrive by itself, the recap says so in amber and asks for the laptop upload. The
+vehicle type (car, bus or tram) is set once in Settings (D59); there are no labels or sickness
+prompts. Results are on the web dashboard.
+
+### Automatic trips (D59)
+
+Settings → Trips → **Start trips automatically** (off by default). It needs location **Always**
+(the Location row shows the state and asks for it, or opens the Settings app once it was refused),
+Motion & Fitness, Precise Location and notifications. While it is on, the app watches for driving
+(motion activity and significant location changes, which wake it even when iOS has closed it):
+
+- **Start:** in a vehicle (motion activity `automotive`, no running or cycling in the last minute)
+  and ≥ 20 km/h for 30 s within 90 s. The Start screen's checks run first, silently, except the
+  stillness test; a failing one is recorded in `preflight` (`overridden: true`) and the trip starts
+  anyway. Missing permissions, missing motion sensors or < 2 GB free disk block it with a notification.
+- **Notification:** "Trip started automatically". Press and hold it for **Cancel trip** (needs the
+  phone unlocked). Within the first 2 minutes nothing of the trip has been uploaded (`upload_held/`),
+  so Cancel deletes it from the phone; later, Cancel stops it and marks `autoStart.cancelledAtUtc`.
+- **Stop:** 10 minutes below 1.5 m/s, or a minute of walking below 2 m/s. The 2 s hold still works.
+- **Mount:** "Phone is firmly mounted" in Settings sets `mount.rigid` for automatic trips; off, they
+  count for motion sickness only.
+- **Not recorded:** the ~500 m before iOS notices the drive, and the warm-up. A force-quit app is
+  not woken again until it is opened.
 
 The menu (top left) holds **Web app** and **Settings**: server address, device key and Test
 connection, with how many trips are still waiting to upload, and **Retry failed uploads (N)** while

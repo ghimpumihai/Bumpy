@@ -26,6 +26,10 @@ final class AppModel {
     /// starts or the session is deleted. Read from the upload loop's background thread.
     @ObservationIgnored let uploadLogSession = Locked<RecordingSession?>(nil)
     var isRecovering = false
+    /// A 5 s motion test (Start screen or an automatic trip's warm-up) holds the shared motion manager.
+    @ObservationIgnored var motionTestBusy = false
+    /// Automatic trips (D59). Set at the end of init.
+    @ObservationIgnored private(set) var autoTrip: AutoTripMonitor!
 
     init() {
         let args = AppInfo.arguments
@@ -35,7 +39,7 @@ final class AppModel {
         // build) must never be able to delete recorded sessions.
         if args.contains("-uiTestingReset") {
             let docs = SessionStore.documentsDirectory
-            for name in ["sessions", "upload_queue", "upload_failed", "upload_acked"] {
+            for name in ["sessions", "upload_queue", "upload_failed", "upload_acked", "upload_held"] {
                 try? FileManager.default.removeItem(at: docs.appendingPathComponent(name))
             }
             UserDefaults.standard.removeObject(forKey: SetupDefaults.key)
@@ -58,6 +62,9 @@ final class AppModel {
             appLogger.log(level: level == .info ? .info : .error, "\(msg, privacy: .public)")
             logTarget.current?.log(level, msg)
         }
+        autoTrip = AutoTripMonitor(app: self)
+        // A relaunch by a significant location change has no scene: arm here, not in onAppear.
+        if !AppInfo.isRunningUnitTests { autoTrip.armIfEnabled() }
     }
 
     /// Launch tasks: recover interrupted sessions, list sessions, start the upload loop.
@@ -134,8 +141,9 @@ final class AppModel {
         guard !isRecovering else {
             throw CocoaError(.userCancelled, userInfo: [NSLocalizedDescriptionKey: "Still checking previous sessions, try again in a second."])
         }
-        // D51: no setup form. Every trip is a car; mount and people keep the remembered defaults.
-        setup.vehicle = SessionMetadata.Vehicle()
+        // D51: no setup form; mount and people keep the remembered defaults. D59: the vehicle type
+        // comes from Settings.
+        setup.vehicle = AutoStartSettings.vehicle
         SetupDefaults.save(setup)
         let deps = makeDependencies()
         let session = try RecordingSession(store: store, setup: setup, preflight: preflight, deps: deps)
@@ -145,6 +153,59 @@ final class AppModel {
         uploadLogSession.withLock { $0 = session }
         controller.start()
         uploadQueue.kick()
+    }
+
+    /// Starts an automatic trip (D59) through the same path as Start, without touching the
+    /// remembered setup. Its uploads are held first, so a Cancel in the first minutes deletes a trip
+    /// nothing of which reached the cloud.
+    func startAutoRecording(preflight: SessionMetadata.Preflight, detectedAt: Date) throws -> RecordingSession {
+        closeFinishedRecording()
+        guard recording == nil else { throw CocoaError(.userCancelled, userInfo: [NSLocalizedDescriptionKey: "A trip is already recording."]) }
+        guard !isRecovering else {
+            throw CocoaError(.userCancelled, userInfo: [NSLocalizedDescriptionKey: "Still checking previous sessions."])
+        }
+        var tripSetup = setup
+        tripSetup.vehicle = AutoStartSettings.vehicle
+        tripSetup.mount.rigid = AutoStartSettings.mounted
+        tripSetup.mount.handheld = false
+        let id = UUID()
+        uploadQueue.hold(sessionId: id.uuidString)
+        let session: RecordingSession
+        do {
+            session = try RecordingSession(store: store, setup: tripSetup, preflight: preflight, deps: makeDependencies(),
+                                           id: id, autoStart: .init(detectedAtUtc: ISO8601.string(detectedAt)))
+        } catch {
+            uploadQueue.releaseHold(sessionId: id.uuidString)
+            throw error
+        }
+        let controller = RecordingController(session: session)
+        location.stopPreview()
+        recording = controller
+        uploadLogSession.withLock { $0 = session }
+        controller.start()
+        uploadQueue.kick()
+        return session
+    }
+
+    /// A trip that ended while nobody looked at its recap (an automatic stop) must not block the next.
+    func closeFinishedRecording() {
+        guard let rec = recording, rec.isFinished else { return }
+        closeRecording()
+    }
+
+    /// An automatic trip cancelled within its upload hold (D59): the queue already dropped every part
+    /// of it (`UploadQueue.discardHeldSession`), so the D55 delete guard, which waits for the cloud
+    /// copy, doesn't apply: there is none, and it was never a trip.
+    func deleteDiscardedAutoTrip(folder: URL, sessionId: String) {
+        if recording?.session.folder.standardizedFileURL == folder.standardizedFileURL { recording = nil }
+        uploadLogSession.withLock { s in
+            if s?.folder.standardizedFileURL == folder.standardizedFileURL { s = nil }
+        }
+        let store = self.store
+        Task.detached(priority: .userInitiated) {
+            try? store.deleteSession(folder)
+            await MainActor.run { self.refreshSessions() }
+        }
     }
 
     /// Called from the summary screen's "Done".

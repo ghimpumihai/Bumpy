@@ -65,6 +65,9 @@ final class PreflightModel {
     private(set) var running = false
 
     @ObservationIgnored private let app: AppModel
+    /// The warm-up of an automatic trip (D59): no prompts, no upload probe, and no stillness test
+    /// (the vehicle is moving); its failures are recorded, not shown.
+    let auto: Bool
     @ObservationIgnored private var gpsTimer: Timer?
     @ObservationIgnored private var runTask: Task<Void, Never>?
     @ObservationIgnored private var motionTask: Task<Void, Never>?
@@ -75,8 +78,9 @@ final class PreflightModel {
     /// True while any check is still running — Start/Override must wait.
     var busy: Bool { running || motionTestRunning }
 
-    init(app: AppModel) {
+    init(app: AppModel, auto: Bool = false) {
         self.app = app
+        self.auto = auto
         checks = [
             Check(id: "perm.motion", title: "Motion permission", required: true),
             Check(id: "perm.location", title: "Location: authorized + precise", required: true),
@@ -85,7 +89,7 @@ final class PreflightModel {
             Check(id: "gps.fix", title: "GPS fix ≤ 10 m", required: true),
             Check(id: "motion.rate", title: "Motion rate ≥ 90 Hz", required: true),
             // A hand-held phone can't pass a stillness test; the backend excludes such sessions anyway.
-            Check(id: "motion.still", title: "Mount stillness (5 s, vehicle stopped)", required: !app.setup.mount.handheld),
+            Check(id: "motion.still", title: "Mount stillness (5 s, vehicle stopped)", required: !auto && !app.setup.mount.handheld),
             Check(id: "dev.lpm", title: "Low Power Mode off", required: true),
             Check(id: "dev.battery", title: "Battery ≥ 50 % or charging", required: true),
             Check(id: "dev.thermal", title: "Thermal nominal / fair", required: true),
@@ -96,6 +100,11 @@ final class PreflightModel {
 
     var allRequiredPass: Bool { checks.filter(\.required).allSatisfy { $0.status == .pass } }
     var failingRequired: [Check] { checks.filter { $0.required && $0.status != .pass } }
+
+    /// What stops an automatic trip from starting (D59): recording would be useless or unsafe.
+    /// Every other failing check is recorded with the trip instead.
+    static let autoBlockingIds: Set<String> = ["perm.motion", "perm.location", "avail.motion", "dev.disk"]
+    var autoBlockers: [Check] { checks.filter { Self.autoBlockingIds.contains($0.id) && $0.status != .pass } }
 
     private func set(_ id: String, _ status: Status, _ detail: String) {
         guard let i = checks.firstIndex(where: { $0.id == id }) else { return }
@@ -133,13 +142,23 @@ final class PreflightModel {
         guard !running else { return }
         running = true
         defer { running = false }
-        await checkPermissions()
+        if auto {
+            checkPermissionStatus()
+        } else {
+            await checkPermissions()
+        }
         checkAvailability()
         updateDeviceChecks()
         updateGPS()
-        async let upload: Void = checkUpload()
-        await runMotionTest()
-        await upload
+        if auto {
+            set("upload", .info, "not checked (automatic trip)")
+            set("motion.still", .info, "not checked: the vehicle was moving (automatic trip)")
+            await runMotionTest()
+        } else {
+            async let upload: Void = checkUpload()
+            await runMotionTest()
+            await upload
+        }
     }
 
     private func checkPermissions() async {
@@ -169,6 +188,16 @@ final class PreflightModel {
         guard !Task.isCancelled else { return }
         updateLocationPermission()
         if app.location.isAuthorized { app.location.startPreview() }
+    }
+
+    /// Automatic trips run in the background: read the permissions, never prompt.
+    private func checkPermissionStatus() {
+        switch MotionPermission.status {
+        case .authorized: set("perm.motion", .pass, "authorized")
+        case .notDetermined: set("perm.motion", .fail, "not determined")
+        default: set("perm.motion", .fail, "denied: Settings → Privacy → Motion & Fitness")
+        }
+        updateLocationPermission()
     }
 
     private func updateLocationPermission() {
@@ -253,12 +282,16 @@ final class PreflightModel {
     /// Captures 5 s of motion: the first 3 s+ give the rate check, all 5 s the stillness check.
     func runMotionTest() async {
         // CMMotionManager is shared app-wide: starting the test would replace a live recording's handlers.
-        guard !motionTestRunning, app.recording == nil, !Task.isCancelled else { return }
+        guard !motionTestRunning, app.recording?.isFinished ?? true, !app.motionTestBusy, !Task.isCancelled else { return }
         motionTestRunning = true
+        app.motionTestBusy = true
         motionTestProgress = 0
         set("motion.rate", .running, "measuring…")
-        set("motion.still", .running, "keep the vehicle stopped and the phone untouched…")
-        defer { motionTestRunning = false }
+        if !auto { set("motion.still", .running, "keep the vehicle stopped and the phone untouched…") }
+        defer {
+            motionTestRunning = false
+            app.motionTestBusy = false
+        }
 
         let source = app.makeMotionSource()
         let buf = Locked((dm: [Double](), grav: [Vec3](), accel: [Vec3Sample](), gyro: [Double](), mag: [Double]()))
@@ -283,6 +316,7 @@ final class PreflightModel {
             + String(format: " · mag %.1f Hz", r.rates[.mag] ?? 0)
         let ratesOK = core.allSatisfy { (r.rates[$0] ?? 0) >= Self.minMotionRate }
         set("motion.rate", ratesOK ? .pass : .fail, rateText)
+        guard !auto else { return }
         let stdText = String(format: "max σ %.4f g (need < %.2f)", r.maxStd, Self.stillnessMaxStdG)
         set("motion.still", r.maxStd < Self.stillnessMaxStdG && !b.accel.isEmpty ? .pass : .fail,
             b.accel.isEmpty ? "no accelerometer data" : stdText)
@@ -318,6 +352,15 @@ final class PreflightModel {
 
     func result(overridden: Bool) -> SessionMetadata.Preflight {
         let r = motionResult
+        if auto {
+            // Taken while driving: the rates hold, the "still" vectors would describe a moving phone.
+            return .init(
+                completedAtUtc: ISO8601.string(Date()),
+                overridden: overridden,
+                checks: checks.map { .init(id: $0.id, title: $0.title, status: $0.status.rawValue, detail: $0.detail, required: $0.required) },
+                stillAccelMeanG: nil, stillGravityG: nil, stillAccelStdG: nil,
+                measuredRatesHz: r.map { Dictionary(uniqueKeysWithValues: $0.rates.map { ($0.key.rawValue, $0.value) }) })
+        }
         return .init(
             completedAtUtc: ISO8601.string(Date()),
             overridden: overridden,

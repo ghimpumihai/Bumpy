@@ -23,7 +23,9 @@ import com.chuds.sensorrecorder.upload.BackgroundTimeProvider
 
 /**
  * Keeps the process and its sensors running while a trip records (iOS: background mode `location`) and,
- * after Stop, until the upload queue is empty (iOS: a background task). It owns no state of the trip: the
+ * after Stop, until the upload queue is empty (iOS: a background task). While automatic trips are armed
+ * (D59) it also keeps the process watching, so an automatic trip starts inside an already running
+ * location service: Android doesn't let a background app start one. It owns no state of the trip: the
  * notification only opens the app, because Stop must stay a 2 s hold.
  */
 class RecordingService : Service() {
@@ -41,7 +43,7 @@ class RecordingService : Service() {
 
     @SuppressLint("WakelockTimeout") // released in onDestroy; a trip has no maximum length
     private fun show() {
-        val type = if (recording && checkSelfPermission(Manifest.permission.ACCESS_FINE_LOCATION) == PackageManager.PERMISSION_GRANTED) {
+        val type = if ((recording || armed != Armed.OFF) && checkSelfPermission(Manifest.permission.ACCESS_FINE_LOCATION) == PackageManager.PERMISSION_GRANTED) {
             ServiceInfo.FOREGROUND_SERVICE_TYPE_LOCATION
         } else {
             ServiceInfo.FOREGROUND_SERVICE_TYPE_DATA_SYNC // uploading, or a trip started without location
@@ -51,19 +53,30 @@ class RecordingService : Service() {
         } catch (e: Exception) {
             AppLog.log(LogLevel.PROBLEM, "foreground service refused: ${e.text}. Keep the app on screen")
         }
-        if (wakeLock == null) {
+        // Watching alone sleeps between low-power fixes; a candidate's warm-up needs the sensors awake.
+        val awake = recording || uploading || armed == Armed.CANDIDATE
+        if (awake && wakeLock == null) {
             wakeLock = getSystemService(PowerManager::class.java)
                 .newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "bumpy:recording").also { it.acquire() }
+        } else if (!awake) {
+            wakeLock?.release()
+            wakeLock = null
         }
     }
 
     private fun notification(): Notification {
-        getSystemService(NotificationManager::class.java)
-            .createNotificationChannel(NotificationChannel(CHANNEL, "Recording", NotificationManager.IMPORTANCE_LOW))
+        val manager = getSystemService(NotificationManager::class.java)
+        manager.createNotificationChannel(NotificationChannel(CHANNEL, "Recording", NotificationManager.IMPORTANCE_LOW))
+        manager.createNotificationChannel(NotificationChannel(CHANNEL_ARMED, "Auto-start on", NotificationManager.IMPORTANCE_MIN))
         val open = PendingIntent.getActivity(this, 0, Intent(this, MainActivity::class.java), PendingIntent.FLAG_IMMUTABLE)
-        return Notification.Builder(this, CHANNEL)
+        val title = when {
+            recording -> "Recording"
+            uploading -> "Uploading the trip"
+            else -> "Auto-start on"
+        }
+        return Notification.Builder(this, if (recording || uploading) CHANNEL else CHANNEL_ARMED)
             .setSmallIcon(R.drawable.ic_notification)
-            .setContentTitle(if (recording) "Recording" else "Uploading the trip")
+            .setContentTitle(title)
             .setContentIntent(open)
             .setOngoing(true)
             .build()
@@ -93,16 +106,26 @@ class RecordingService : Service() {
     /** Main thread only. */
     companion object {
         private const val CHANNEL = "recording"
+        private const val CHANNEL_ARMED = "armed"
         private const val NOTIFICATION_ID = 1
 
         private var instance: RecordingService? = null
         private var recording = false
         private var uploading = false
+        private var armed = Armed.OFF
         private var onExpire: (() -> Unit)? = null
-        private val needed get() = recording || uploading
+        private val needed get() = recording || uploading || armed != Armed.OFF
+
+        val isRunning: Boolean get() = instance != null
 
         fun setRecording(context: Context, on: Boolean) {
             recording = on
+            update(context)
+        }
+
+        fun setArmed(context: Context, state: Armed) {
+            if (armed == state) return
+            armed = state
             update(context)
         }
 
@@ -126,6 +149,9 @@ class RecordingService : Service() {
         }
     }
 }
+
+/** Automatic trips (D59): watching on low-power location, or a candidate on full GPS. */
+enum class Armed { OFF, WATCHING, CANDIDATE }
 
 /** Both calls hop to the main thread in FIFO order, so an `end()` right after a `begin()` can't run first. */
 class ServiceBackgroundTime(private val context: Context) : BackgroundTimeProvider {

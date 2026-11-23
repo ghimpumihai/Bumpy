@@ -201,7 +201,7 @@ private fun fix(context: Context, app: AppModel, c: Check, model: PreflightModel
 /** An iOS-style alert. */
 @OptIn(ExperimentalComposeUiApi::class)
 @Composable
-private fun AlertBox(
+internal fun AlertBox(
     title: String,
     message: String,
     cancel: String?,

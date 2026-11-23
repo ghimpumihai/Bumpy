@@ -119,7 +119,9 @@ class ContractTest {
         assertFalse("local only (D55)", String(body).contains("uploadWindowsNotQueued"))
         assertTrue(String(meta.jsonData()).contains("uploadWindowsNotQueued"))
         File(out, "session_stop.json.gz").writeBytes(Gzip.compress(body))
-        File(out, "session_start.json.gz").writeBytes(Gzip.compress(RecordingSession.sessionMetadataBody(sampleMetadata(), null)))
+        // An automatic trip's Start copy (D59), so check_contract.py also runs `autoStart` through the validator.
+        val auto = sampleMetadata().copy(autoStart = SessionMetadata.AutoStart("2026-11-21T09:12:00.000Z"))
+        File(out, "session_start.json.gz").writeBytes(Gzip.compress(RecordingSession.sessionMetadataBody(auto, null)))
     }
 
     /** One bad value rejects the whole batch, so a NaN/Inf sample is left out or sent as -1. */

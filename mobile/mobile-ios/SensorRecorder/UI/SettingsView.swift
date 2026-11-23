@@ -15,6 +15,8 @@ struct SettingsView: View {
     private var urlEmpty: Bool { baseURL.trimmingCharacters(in: .whitespaces).isEmpty }
 
     var body: some View {
+        // Scrolls: with the Trips section the page is taller than a small iPhone.
+        ScrollView {
         VStack(alignment: .leading, spacing: 24) {
             HStack(spacing: 6) {
                 CircleIconButton(systemName: "chevron.left", label: "Back", id: "settingsBack", size: 34) { dismiss() }
@@ -85,6 +87,8 @@ struct SettingsView: View {
                 }
             }
 
+            TripSettingsSection()
+
             Spacer(minLength: 0)
             Text("Version \(AppInfo.shortVersion) · \(AppInfo.modelName)")
                 .font(Theme.font(13))
@@ -92,8 +96,10 @@ struct SettingsView: View {
         }
         .padding(.horizontal, Theme.gutter)
         .padding(.bottom, 8)
-        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
-        .ignoresSafeArea(.keyboard) // the footer stays at the bottom; the fields are near the top
+        .frame(maxWidth: .infinity, alignment: .topLeading)
+        }
+        .scrollBounceBehavior(.basedOnSize)
+        .ignoresSafeArea(.keyboard) // the fields are near the top
         .background(Theme.background)
         .toolbar(.hidden, for: .navigationBar)
         .onDisappear { save() }

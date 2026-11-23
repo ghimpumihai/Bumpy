@@ -27,6 +27,8 @@ data class SessionMetadata(
     val deviceId: String,
     val preflight: Preflight? = null,
     val stats: Stats? = null,
+    /** Only for trips that started by themselves (D59); manual trips have no `autoStart` key at all. */
+    val autoStart: AutoStart? = null,
 ) {
     /** `iosVersion` is a key of the session.json contract, so it stays and holds the Android version. */
     data class Device(val model: String, val name: String, val osVersion: String, val platform: String = "android") {
@@ -162,6 +164,13 @@ data class SessionMetadata(
         }
     }
 
+    data class AutoStart(val detectedAtUtc: String, val cancelledAtUtc: String? = null) {
+        fun json() = buildMap<String, Any?> {
+            put("detectedAtUtc", detectedAtUtc)
+            if (cancelledAtUtc != null) put("cancelledAtUtc", cancelledAtUtc)
+        }
+    }
+
     /** `endedAtUtc` and `stats` are explicit nulls until the end (spec shows them). */
     fun json(): Map<String, Any?> = buildMap {
         put("sessionId", sessionId)
@@ -182,6 +191,7 @@ data class SessionMetadata(
         put("folderName", folderName)
         put("deviceId", deviceId)
         if (preflight != null) put("preflight", preflight.json())
+        if (autoStart != null) put("autoStart", autoStart.json())
         put("stats", stats?.json())
     }
 
@@ -223,6 +233,7 @@ data class SessionMetadata(
                 deviceId = o.str("deviceId") ?: "",
                 preflight = if (o.has("preflight")) runCatching { preflight(o.obj("preflight")) }.getOrNull() else null,
                 stats = if (o.has("stats")) runCatching { stats(o.obj("stats")) }.getOrNull() else null,
+                autoStart = o.obj("autoStart").str("detectedAtUtc")?.let { AutoStart(it, o.obj("autoStart").str("cancelledAtUtc")) },
             )
         }
 

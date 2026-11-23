@@ -15,6 +15,10 @@ final class LocationService: NSObject, LocationSource, CLLocationManagerDelegate
     @ObservationIgnored private let manager = CLLocationManager()
     @ObservationIgnored private var recordingCallbacks: LocationCallbacks?
     @ObservationIgnored private var previewActive = false
+    /// Auto-start (D59): every fix, in any mode (significant changes included), also goes here (main thread).
+    @ObservationIgnored var fixObserver: ((LocationSample) -> Void)?
+    @ObservationIgnored private var watchActive = false
+    @ObservationIgnored private(set) var significantChangesActive = false
 
     override init() {
         super.init()
@@ -31,6 +35,58 @@ final class LocationService: NSObject, LocationSource, CLLocationManagerDelegate
 
     var isAuthorized: Bool { authorization == .authorizedWhenInUse || authorization == .authorizedAlways }
     var isFullAccuracy: Bool { accuracyAuthorization == .fullAccuracy }
+    var isAlways: Bool { authorization == .authorizedAlways }
+
+    static let alwaysAskedKey = "location.alwaysAsked"
+
+    /// iOS shows the "Always" prompt once; after that only the Settings app can change it.
+    var canAskForAlways: Bool {
+        authorization == .notDetermined
+            || (authorization == .authorizedWhenInUse && !UserDefaults.standard.bool(forKey: Self.alwaysAskedKey))
+    }
+
+    /// Asks for "Always" (auto-start, D59). From "not determined" iOS first offers While Using and
+    /// upgrades later; from While Using it shows the upgrade prompt once.
+    func requestAlways() {
+        UserDefaults.standard.set(manager.authorizationStatus == .authorizedWhenInUse, forKey: Self.alwaysAskedKey)
+        manager.requestAlwaysAuthorization()
+    }
+
+    /// Relaunches a suspended or terminated app after ~500 m of movement (not after a force-quit).
+    func startSignificantChanges() {
+        dispatchPrecondition(condition: .onQueue(.main))
+        guard isAlways, CLLocationManager.significantLocationChangeMonitoringAvailable() else { return }
+        significantChangesActive = true
+        manager.startMonitoringSignificantLocationChanges()
+    }
+
+    func stopSignificantChanges() {
+        dispatchPrecondition(condition: .onQueue(.main))
+        significantChangesActive = false
+        manager.stopMonitoringSignificantLocationChanges()
+    }
+
+    /// Full-rate GPS for the auto-start monitor, kept running in the background.
+    func startWatch() {
+        dispatchPrecondition(condition: .onQueue(.main))
+        watchActive = true
+        if isAuthorized {
+            manager.allowsBackgroundLocationUpdates = true
+            manager.showsBackgroundLocationIndicator = true
+        }
+        startUpdates()
+    }
+
+    func stopWatch() {
+        dispatchPrecondition(condition: .onQueue(.main))
+        watchActive = false
+        if recordingCallbacks == nil {
+            if isAuthorized { manager.allowsBackgroundLocationUpdates = false }
+            if !previewActive { stopUpdates() }
+        }
+    }
+
+    var isWatching: Bool { watchActive }
 
     func requestPermission() {
         switch manager.authorizationStatus {
@@ -63,7 +119,7 @@ final class LocationService: NSObject, LocationSource, CLLocationManagerDelegate
 
     func stopPreview() {
         previewActive = false
-        if recordingCallbacks == nil { stopUpdates() }
+        if recordingCallbacks == nil && !watchActive { stopUpdates() }
     }
 
     func startRecording(_ callbacks: LocationCallbacks) {
@@ -82,8 +138,10 @@ final class LocationService: NSObject, LocationSource, CLLocationManagerDelegate
         dispatchPrecondition(condition: .onQueue(.main))
         recordingCallbacks = nil
         manager.stopUpdatingHeading()
-        if isAuthorized { manager.allowsBackgroundLocationUpdates = false }
-        if !previewActive { stopUpdates() }
+        if !watchActive {
+            if isAuthorized { manager.allowsBackgroundLocationUpdates = false }
+            if !previewActive { stopUpdates() }
+        }
     }
 
     private func startUpdates() {
@@ -114,8 +172,8 @@ final class LocationService: NSObject, LocationSource, CLLocationManagerDelegate
         }
         if isAuthorized {
             requestFullAccuracyIfNeeded()
-            if previewActive || recordingCallbacks != nil {
-                if recordingCallbacks != nil {
+            if previewActive || recordingCallbacks != nil || watchActive {
+                if recordingCallbacks != nil || watchActive {
                     manager.allowsBackgroundLocationUpdates = true
                     manager.showsBackgroundLocationIndicator = true
                 }
@@ -129,6 +187,7 @@ final class LocationService: NSObject, LocationSource, CLLocationManagerDelegate
         for loc in locations {
             let s = Self.sample(from: loc)
             recordingCallbacks?.location(s)
+            fixObserver?(s)
             // Freshness is based on the fix's own timestamp: the first delivery is often a cached,
             // minutes-old fix. Invalid fixes (hAcc < 0) don't count as a fix.
             if loc.horizontalAccuracy >= 0 {

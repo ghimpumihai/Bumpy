@@ -25,6 +25,30 @@ Device ID depends on the signing key too, so a build from another PC also needs 
 `./gradlew :app:assembleRelease -PdashboardUrl=https://…` turns on the web app links. Debug builds also take
 `adb shell am start -n com.chuds.sensorrecorder/.app.MainActivity --es upload.baseURL http://10.0.2.2:8765 --es dashboard.baseURL https://…`.
 
+## Automatic trips (D59)
+
+Menu → Settings → **Start trips automatically** (off by default). It needs location **Allow all the time** (the
+Location row asks once, then opens the system settings), **Physical activity** (the step detector) and
+notifications; without them the switch stays off and says what is missing. **Vehicle** (car, bus, tram) applies to
+every trip, manual ones too; **Phone is firmly mounted** is an automatic trip's `mount.rigid`.
+
+- **Watching:** the recording service runs as a location service with a silent "Auto-start on" notification,
+  network/passive location every ~20 s and the step detector. No step for a minute while moving makes the phone a
+  candidate: GPS then runs at 1 Hz and the Start screen's checks run silently (no stillness test, no upload probe).
+  30 s above 20 km/h within 90 s starts the trip; 10 min below 1.5 m/s, or 60 s of walking below 2 m/s, stops it.
+  Without Play Services there is no activity recognition: a bike ride above 20 km/h starts a trip too (Cancel it).
+- **Cancel** in the "Trip started automatically" notification needs the phone unlocked (Android 11 and older:
+  it opens Bumpy to confirm). Within the first 2 minutes nothing has been uploaded and the trip is deleted; later
+  it stops, is kept and is marked `autoStart.cancelledAtUtc`.
+- **Not recorded:** the drive before the phone notices it (about the first minute) and the warm-up.
+- **Battery:** watching costs little (no GPS, no wake lock); a candidate runs GPS and keeps the CPU awake until it
+  either starts a trip or stops moving for 3 minutes.
+- **Limits:** Android lets an app start a location service only from the foreground, so watching starts when
+  Bumpy is opened. After a reboot or an app update Bumpy tries to re-arm by itself; on Android 14+ and on phones
+  whose maker blocks boot starts this can be refused: if "Auto-start on" isn't in the notifications, open Bumpy
+  once. The same after Android killed the app (battery setting not *Unrestricted*) or after a force stop: nothing
+  starts until Bumpy is opened again.
+
 ## Getting trips off the phone
 
 `Android/data/com.chuds.sensorrecorder/files/sessions/` over USB or with `adb pull`, or the **Bumpy** entry in

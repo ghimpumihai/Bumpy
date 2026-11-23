@@ -55,6 +55,7 @@ class RecordingSession(
     preflight: SessionMetadata.Preflight?,
     private val deps: Dependencies,
     val id: UUID = UUID.randomUUID(),
+    autoStart: SessionMetadata.AutoStart? = null,
 ) {
     class Dependencies(
         val motion: MotionSource,
@@ -127,7 +128,7 @@ class RecordingSession(
             startedAtUtc = ISO8601.string(anchor.utcMs), startUptimeSec = anchor.up, endedAtUtc = null,
             vehicle = setup.vehicle, mount = setup.mount.copy(photoFile = null), people = setup.people,
             conditions = setup.conditions, syntheticSensors = deps.motion.isSynthetic, folderName = folder.name,
-            deviceId = deps.deviceId, preflight = preflight,
+            deviceId = deps.deviceId, preflight = preflight, autoStart = autoStart,
         )
         metadataBox = Locked(meta)
         try {
@@ -217,6 +218,15 @@ class RecordingSession(
         queueSessionMetadata(meta, UploadQueue.MetaPhase.STOP, batchCount = accumulator.nextSeq)
         writer.close()
         return meta
+    }
+
+    /**
+     * A Cancel of an automatic trip (D59). Call before [stop], which writes it into `session.json` and the
+     * Stop copy.
+     */
+    fun markAutoCancelled(atUtc: String) {
+        metadataBox.update { m -> m.copy(autoStart = m.autoStart?.copy(cancelledAtUtc = atUtc)) }
+        writer.log(LogLevel.INFO, "automatic trip cancelled")
     }
 
     // Sensor wiring

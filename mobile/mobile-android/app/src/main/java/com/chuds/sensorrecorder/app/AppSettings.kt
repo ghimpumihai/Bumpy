@@ -93,11 +93,37 @@ class AppSettings(context: Context) {
         get() = prefs.getString(KEY_SETUP, null)?.let { runCatching { SessionSetup.decode(it) }.getOrNull() } ?: SessionSetup()
         set(v) = prefs.edit().putString(KEY_SETUP, v.encode()).apply()
 
-    private companion object {
-        const val KEY_BASE_URL = "upload.baseURL"
-        const val KEY_DEVICE_KEY = "upload.deviceKey"
-        const val KEY_DEVICE_ID = "device.id"
-        const val KEY_SETUP = "setup.last"
+    /** Settings → "Start trips automatically" (D59). Off by default. */
+    var autoStartEnabled: Boolean
+        get() = prefs.getBoolean(KEY_AUTO_START, false)
+        set(v) = prefs.edit().putBoolean(KEY_AUTO_START, v).apply()
+
+    /** car, bus or tram: every trip's `vehicle.type`, manual ones too (D59). */
+    var vehicleType: String
+        get() = prefs.getString(KEY_VEHICLE, null)?.takeIf { it in VEHICLE_TYPES } ?: "car"
+        set(v) = prefs.edit().putString(KEY_VEHICLE, if (v in VEHICLE_TYPES) v else "car").apply()
+
+    /** "Phone is firmly mounted": an automatic trip's `mount.rigid` (D59). Off by default. */
+    var mounted: Boolean
+        get() = prefs.getBoolean(KEY_MOUNTED, false)
+        set(v) = prefs.edit().putBoolean(KEY_MOUNTED, v).apply()
+
+    /** Background location was asked for once; Android shows no prompt after a refusal, only Settings. */
+    var backgroundLocationAsked: Boolean
+        get() = prefs.getBoolean(KEY_BACKGROUND_ASKED, false)
+        set(v) = prefs.edit().putBoolean(KEY_BACKGROUND_ASKED, v).apply()
+
+    companion object {
+        val VEHICLE_TYPES = listOf("car", "bus", "tram")
+
+        private const val KEY_AUTO_START = "autoStart.enabled"
+        private const val KEY_VEHICLE = "trip.vehicleType"
+        private const val KEY_MOUNTED = "autoStart.mounted"
+        private const val KEY_BACKGROUND_ASKED = "autoStart.backgroundLocationAsked"
+        private const val KEY_BASE_URL = "upload.baseURL"
+        private const val KEY_DEVICE_KEY = "upload.deviceKey"
+        private const val KEY_DEVICE_ID = "device.id"
+        private const val KEY_SETUP = "setup.last"
     }
 }
 

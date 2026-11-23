@@ -13,6 +13,7 @@ import com.chuds.sensorrecorder.core.SessionMetadata
 import com.chuds.sensorrecorder.core.StreamId
 import com.chuds.sensorrecorder.core.ThermalLevel
 import com.chuds.sensorrecorder.core.Vec3
+import com.chuds.sensorrecorder.sensors.LocationSample
 import com.chuds.sensorrecorder.sensors.MotionCallbacks
 import com.chuds.sensorrecorder.sensors.Vec3Sample
 import com.chuds.sensorrecorder.upload.UploadQueue
@@ -60,8 +61,16 @@ object MotionTestAnalysis {
 /**
  * The preflight checklist (spec §7): blocks Start until required checks pass, with an explicit override.
  * Main thread only. The check IDs are the iOS app's (they go into `session.json`).
+ *
+ * [warmUp]: an automatic trip's silent run ([runWarmUp], D59), with GPS fixes from [gpsFix].
  */
-class PreflightModel(private val app: AppModel) {
+class PreflightModel(
+    private val app: AppModel,
+    private val warmUp: Boolean = false,
+    private val gpsFix: () -> Pair<LocationSample, Double>? = {
+        app.location.latest?.let { fix -> app.location.latestFixUptime?.let { fix to it } }
+    },
+) {
     enum class Status(val id: String) {
         PENDING("pending"), RUNNING("running"), PASS("pass"), WARN("warn"), FAIL("fail"), INFO("info")
     }
@@ -84,7 +93,7 @@ class PreflightModel(private val app: AppModel) {
             Check("gps.fix", "GPS fix ≤ 10 m", true),
             Check("motion.rate", "Motion rate ≥ 90 Hz", true),
             // A hand-held phone can't pass a stillness test; the backend excludes such sessions anyway.
-            Check("motion.still", "Mount stillness (5 s, vehicle stopped)", !app.setup.mount.handheld),
+            Check("motion.still", "Mount stillness (5 s, vehicle stopped)", !warmUp && !app.setup.mount.handheld),
             Check("dev.lpm", "Battery Saver off", true),
             Check("dev.battery", "Battery ≥ 50 % or charging", true),
             Check("dev.thermal", "Thermal nominal / fair", true),
@@ -202,8 +211,7 @@ class PreflightModel(private val app: AppModel) {
             set("gps.fix", Status.FAIL, "no location permission")
             return
         }
-        val fix = app.location.latest
-        val at = app.location.latestFixUptime
+        val (fix, at) = gpsFix() ?: (null to null)
         if (fix == null || at == null) {
             set("gps.fix", Status.RUNNING, "waiting for fix…")
             return
@@ -254,8 +262,10 @@ class PreflightModel(private val app: AppModel) {
 
     /** Captures 5 s of motion, for the rate check and the stillness check. */
     private suspend fun runMotionTest() {
-        if (motionTestRunning || app.recording != null) return
+        // One test at a time across the Start screen and the warm-up; never while a recording owns the sensors.
+        if (motionTestRunning || app.motionTestBusy || app.recording?.isFinished == false) return
         motionTestRunning = true
+        app.motionTestBusy = true
         set("motion.rate", Status.RUNNING, "measuring…")
         set("motion.still", Status.RUNNING, "keep the vehicle stopped and the phone untouched…")
         val source = app.makeMotionSource()
@@ -295,6 +305,51 @@ class PreflightModel(private val app: AppModel) {
             )
         } finally {
             motionTestRunning = false
+            app.motionTestBusy = false
+        }
+    }
+
+    /**
+     * An automatic trip's warm-up (D59): the Start screen's checks without asking for anything, without the
+     * stillness test (the vehicle moves) and without the upload probe. A failing check is recorded as
+     * overridden; only [blockingReason] stops the trip.
+     */
+    suspend fun runWarmUp(): SessionMetadata.Preflight {
+        check(warmUp)
+        set("perm.motion", Status.PASS, "not needed on Android")
+        updateLocationPermission()
+        checkAvailability()
+        updateDeviceChecks()
+        set("upload", Status.INFO, "skipped (automatic start)")
+        var waited = 0L
+        while ((app.motionTestBusy || app.recording?.isFinished == false) && waited < MOTION_WAIT_MS) {
+            delay(500)
+            waited += 500
+        }
+        runMotionTest()
+        if (checks.first { it.id == "motion.rate" }.status == Status.PENDING) set("motion.rate", Status.FAIL, "not measured: sensors busy")
+        set("motion.still", Status.INFO, "skipped (automatic start, vehicle moving)")
+        waited = 0
+        while (true) {
+            updateGps()
+            if (checks.first { it.id == "gps.fix" }.status == Status.PASS || waited >= GPS_WAIT_MS) break
+            delay(1000)
+            waited += 1000
+        }
+        val gps = checks.first { it.id == "gps.fix" }
+        if (gps.status != Status.PASS && gps.status != Status.FAIL) set("gps.fix", Status.FAIL, gps.detail.ifEmpty { "no fix" })
+        updateDeviceChecks()
+        return result(overridden = failingRequired.isNotEmpty())
+    }
+
+    /** Why an automatic trip can't start: missing permissions, motion sensors or disk (D59). */
+    fun blockingReason(): String? {
+        fun failed(id: String) = checks.first { it.id == id }.status == Status.FAIL
+        return when {
+            failed("perm.location") -> "Location access is off"
+            failed("avail.motion") -> "This phone lacks a needed motion sensor"
+            failed("dev.disk") -> "Less than 2 GB free"
+            else -> null
         }
     }
 
@@ -337,5 +392,7 @@ class PreflightModel(private val app: AppModel) {
         const val MIN_BATTERY = 0.5f
         const val MIN_FREE_DISK = 2_000_000_000L
         const val MOTION_TEST_MS = 5000L
+        const val MOTION_WAIT_MS = 15_000L
+        const val GPS_WAIT_MS = 20_000L
     }
 }

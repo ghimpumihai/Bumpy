@@ -192,7 +192,7 @@ Seat and posture (`people.raterSeat`, `people.raterPosture` in §3.8) still desc
 }
 ```
 
-Since D51 nothing is entered before recording: every trip is `car`, mount and people keep the remembered defaults (rigid/hand-held reset for every trip, D42) and `photoFile` is `null`. The app also writes `folderName`, `syntheticSensors`, `recoveredAtUtc`, `preflight` (each check's result and the override) and, locally only, `stats.uploadWindowsNotQueued` (D55). `deviceId` is required by the §6.1 PUT.
+Since D51 nothing is entered before recording: the vehicle type comes from Settings (car, bus or tram, D59; before D59 every trip was `car`), mount and people keep the remembered defaults (rigid/hand-held reset for every trip, D42) and `photoFile` is `null`. The app also writes `folderName`, `syntheticSensors`, `recoveredAtUtc`, `preflight` (each check's result and the override), `autoStart` for a trip that started by itself (D59: `detectedAtUtc`, and `cancelledAtUtc` when it was cancelled after its first 2 minutes) and, locally only, `stats.uploadWindowsNotQueued` (D55). `deviceId` is required by the §6.1 PUT.
 
 **Mount photo (P1, removed by D51):** before recording, the app asked for one photo of the phone in its mount and saved it as `mount.jpg`. Phone orientation relative to the vehicle is essential for the axis transformation, and a photo removes all ambiguity.
 
@@ -387,6 +387,21 @@ Everything here is **additive**: the §6 keys keep their names, types and units,
 | Thermal | nominal or fair |
 | Free disk | ≥ 2 GB |
 | Upload (if configured) | test POST succeeds (warning only, never blocking) |
+
+### Automatic trips (D59)
+
+Off by default; Settings → "Start trips automatically". Both apps behave the same; only the platform mechanics differ.
+
+- **Turning it on** needs location "Always" (iPhone) or "Allow all the time" (Android), Motion & Fitness / physical activity, and notifications. Settings shows the location state on its own row with a button that asks for it, or opens the system settings once it was refused. Without them the switch stays off and says what is missing.
+- **Settings for every trip:** vehicle type (car, bus, tram) and "Phone is firmly mounted". They apply to manual trips too; an auto trip's `mount.rigid` is that switch (off → the trip counts for sickness only, D41).
+- **Watching (armed):** iPhone: significant-location changes (they relaunch a suspended or terminated app, not one the user force-quit) and motion-activity updates. Android: a foreground service with a low-priority notification and low-power location, started while the app is in the foreground.
+- **Candidate:** the phone looks like it is in a vehicle. iPhone: activity `automotive` (confidence medium or high) and no `running`/`cycling` in the last 60 s. Android: speed from location, and no step-detector steps in the last 60 s. GPS then runs at full rate.
+- **Warm-up (before the trip starts):** the Start screen's checks run silently: permissions, sensors, motion rate (5 s), GPS fix, Low Power Mode / battery saver, battery, thermal, disk. The stillness test is skipped (the vehicle is moving) and the upload probe too.
+- **Start:** GPS speed ≥ 20 km/h for at least 30 s within the last 90 s (stop-and-go traffic, city buses), while still a candidate. The checks' results go into `preflight`; a failing one is recorded with `overridden: true` and doesn't stop the trip. Only missing permissions, missing motion sensors or < 2 GB free disk block it (then a notification says why).
+- **Notification:** "Trip started automatically" with **Cancel** (needs the phone unlocked; never a Stop action, Stop stays a 2 s hold).
+- **Upload hold:** the trip's queue files (Start copy, batches) wait 2 minutes before they are sent. Cancel within them stops the trip and deletes it from the phone: nothing reached the cloud, and it was never a trip. After the hold, Cancel stops the trip, keeps it and writes `autoStart.cancelledAtUtc` into the Stop copy. The hold is persisted, so a relaunch keeps or ends it correctly; a hold that ends in more than 2 minutes (clock stepped back) ends now.
+- **Stop:** 10 minutes below 1.5 m/s (bus layovers, traffic jams), or 60 s of walking below 2 m/s with no driving (standing tram passengers read as walking, hence the speed). Manual trips never stop by themselves.
+- **Not recorded:** the stretch before the phone notices the drive (iPhone: ~500 m before a significant-location change) and the warm-up. On iPhone nothing starts after a force-quit until the app is opened again; Settings says so.
 
 ### Screen 4: Recording dashboard (the important one)
 

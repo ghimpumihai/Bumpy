@@ -29,6 +29,8 @@ import com.chuds.sensorrecorder.upload.UploadQueue
 import kotlinx.coroutines.CompletableDeferred
 import java.io.File
 import java.io.IOException
+import java.util.Locale
+import java.util.UUID
 import kotlin.concurrent.thread
 
 class BumpyApp : Application() {
@@ -67,6 +69,12 @@ class AppModel(private val app: Application) {
         private set
     private var isRecovering = false
 
+    /** A 5 s motion test (Start screen or an automatic trip's warm-up) holds the motion sensors. */
+    var motionTestBusy = false
+
+    /** Automatic trips (D59). */
+    val autoTrips: AutoTrips
+
     /**
      * The session whose app_log.txt receives upload events (spec §4). It stays set after Stop and Done (the
      * final batches and the Stop metadata upload later) until the next recording starts or the session is
@@ -88,6 +96,7 @@ class AppModel(private val app: Application) {
             val session = uploadLogSession
             if (session != null) session.log(level, msg) else AppLog.log(level, msg)
         }
+        autoTrips = AutoTrips(this, app)
     }
 
     /** Launch tasks: recover interrupted sessions, start the upload loop. */
@@ -143,17 +152,61 @@ class AppModel(private val app: Application) {
         if (recording != null) return
         // Launch recovery marks unfinished sessions; never let it see a session we are creating.
         if (isRecovering) throw IOException("Still checking previous sessions, try again in a second.")
-        // D51: no setup form. Every trip is a car; mount and people keep the remembered defaults.
-        val setup = settings.setup.copy(vehicle = SessionMetadata.Vehicle())
+        // D51: no setup form; mount and people keep the remembered defaults. D59: the vehicle type comes
+        // from Settings.
+        val setup = settings.setup.copy(vehicle = SessionMetadata.Vehicle(type = settings.vehicleType))
         settings.setup = setup
-        val session = RecordingSession(
-            store, setup, preflight,
-            RecordingSession.Dependencies(
-                motion = makeMotionSource(), location = location, altimeter = makeAltimeterSource(),
-                deviceStatus = deviceMonitor, uploadQueue = uploadQueue, clock = AndroidClock,
-                deviceId = settings.deviceId, appVersion = AppInfo.version, deviceInfo = AppInfo.deviceInfo,
-            ),
+        begin(RecordingSession(store, setup, preflight, dependencies()))
+    }
+
+    /**
+     * Starts an automatic trip (D59) through the same path as Start, without touching the remembered setup.
+     * Its uploads are held first, so a Cancel in the first minutes deletes a trip nothing of which reached
+     * the cloud. A finished trip whose recap nobody closed doesn't block it.
+     */
+    fun startAutoRecording(preflight: SessionMetadata.Preflight, detectedAtUtc: String): RecordingSession {
+        if (recording?.isFinished == true) closeRecording()
+        if (recording != null) throw IOException("A trip is already recording.")
+        if (isRecovering) throw IOException("Still checking previous sessions.")
+        val remembered = settings.setup
+        val setup = remembered.copy(
+            vehicle = SessionMetadata.Vehicle(type = settings.vehicleType),
+            mount = remembered.mount.copy(rigid = settings.mounted, handheld = false),
         )
+        val id = UUID.randomUUID()
+        val sessionId = id.toString().uppercase(Locale.ROOT) // RecordingSession.sessionId
+        uploadQueue.hold(sessionId)
+        val session = try {
+            RecordingSession(store, setup, preflight, dependencies(), id, SessionMetadata.AutoStart(detectedAtUtc))
+        } catch (e: Exception) {
+            uploadQueue.releaseHold(sessionId)
+            throw e
+        }
+        this.preflight.onDisappear() // the Start screen may be open: the recording takes over motion and location
+        begin(session)
+        return session
+    }
+
+    /**
+     * An automatic trip cancelled within its upload hold (D59): the queue already dropped every part of it
+     * ([UploadQueue.discardHeldSession]), so the D55 delete guard, which waits for the cloud copy, doesn't
+     * apply: there is none, and it was never a trip. Not on the main thread.
+     */
+    fun deleteDiscardedAutoTrip(session: RecordingSession) {
+        if (uploadLogSession === session) uploadLogSession = null
+        runCatching { store.deleteSession(session.folder) }
+            .onFailure { AppLog.log(LogLevel.ERROR, "cancelled trip not deleted: ${it.text}") }
+        uploadQueue.forgetAcknowledged(session.sessionId)
+        Handler(Looper.getMainLooper()).post { if (recording?.session === session) recording = null }
+    }
+
+    private fun dependencies() = RecordingSession.Dependencies(
+        motion = makeMotionSource(), location = location, altimeter = makeAltimeterSource(),
+        deviceStatus = deviceMonitor, uploadQueue = uploadQueue, clock = AndroidClock,
+        deviceId = settings.deviceId, appVersion = AppInfo.version, deviceInfo = AppInfo.deviceInfo,
+    )
+
+    private fun begin(session: RecordingSession) {
         val controller = RecordingController(session, SystemAlerter(app))
         location.stopPreview()
         recording = controller
@@ -175,7 +228,10 @@ class AppModel(private val app: Application) {
     }
 
     fun onVisibilityChanged(visible: Boolean) {
-        if (visible) location.refresh()
+        if (visible) {
+            location.refresh()
+            autoTrips.armIfEnabled() // a location service can be started only from the foreground
+        }
         recording?.takeIf { !it.isFinished }?.session?.noteLifecycle(background = !visible)
     }
 }

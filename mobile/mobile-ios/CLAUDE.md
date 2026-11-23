@@ -28,7 +28,7 @@ Requirements: `decisions/01-initial-plan.md`. Losing data is the worst possible 
 - Sensor callbacks run on background queues; the main thread only renders. The UI refreshes at 5–10 Hz from snapshots, never per sample.
 - Shared mutable state is behind `Locked<T>` or confined to one serial queue; document which.
 - Every source's `stop()` guarantees no callback after it returns (drain the queue): writers are closed right after.
-- One `CMMotionManager` for the app (`SharedMotion`). Nothing may start motion updates while a recording owns them (preflight checks `app.recording == nil`).
+- One `CMMotionManager` for the app (`SharedMotion`). Nothing may start motion updates while a recording owns them or another motion test runs (preflight checks the recording and `app.motionTestBusy`). Motion-activity updates go through `ActivityHub` only: `startActivityUpdates` keeps one handler, and the recorder and the auto-start monitor both listen.
 - `CLLocationManager` lives on main.
 
 ## Files on disk
@@ -45,6 +45,7 @@ Requirements: `decisions/01-initial-plan.md`. Losing data is the worst possible 
 - Batches are built every 2 s and queued on disk before sending; one request at a time, oldest first, backoff 1 → 30 s. Any 2xx means done; 409 is also handled as done, though the Azure backend answers 200 for duplicates and never sends 409. Idempotency key `sessionId:batchSeq`; never drop or duplicate samples between batches.
 - 401/403/404 (batches), 408/429, 3xx, 5xx and network errors retry the same file in place; other 4xx move it to `upload_failed/` until Settings' "Retry failed uploads" requeues it. Never re-order or skip the head file for a retryable status.
 - Every 2xx/409 is appended to `upload_acked/<sessionId>.txt` before the queue file is deleted (D55). A trip may be deleted on the phone only when `TripCloudCopy.deleteRefusal` returns nil.
+- An automatic trip's files wait 2 minutes (`upload_held/`, D59). Only `UploadQueue.discardHeldSession` may drop a trip's queued files, and only within that hold with nothing acknowledged; that is the one deletion the D55 guard doesn't cover.
 - The ingest contract takes only finite numbers: a non-finite value becomes `-1` where iOS uses `-1` for invalid, otherwise the sample is left out of the batch (`BatchAccumulator.drain`); never send null. Known 0 stand-ins: a fix's non-finite `alt`/`ellAlt` (sent as 0 with `vAcc` −1), and a non-finite `t0UtcMs` or activity `startUtcMs` (sent as 0).
 - Device key only in the Keychain, API URL in UserDefaults, nothing in the repo.
 - Upload problems are WARN at most: the data is safe on disk.
@@ -52,10 +53,10 @@ Requirements: `decisions/01-initial-plan.md`. Losing data is the worst possible 
 ## UI
 - Three screens (D51): Start → Recording → Recap, plus the menu panel and Settings. No manual data entry: no setup form, labels or sickness prompts. Anything computed in the cloud is shown on the web dashboard, not here.
 - Light theme only. Colours only through `Theme` tokens: ink black for the main action, neutral greys otherwise. Colour means trouble: amber WARN, red PROBLEM; OK is plain grey text ("Upload off" is grey). Text only through `Theme.font(size, weight)` (Geist, the dashboard's typeface); SF Symbols keep `.system`.
-- Stop is a 2 s long-press. Never add a single-tap stop or a pause.
+- Stop is a 2 s long-press. Never add a single-tap stop or a pause, and never a Stop action on a notification (an automatic trip's notification has only Cancel, unlock required).
 - Every interactive control has an `accessibilityIdentifier` (UI tests rely on them). Never put one on a container: SwiftUI propagates it and overwrites the children's. Toggles expose state through `accessibilityValue` ("active"/"inactive").
 - Hit targets ≥ 44 pt (used in a moving car); a smaller-looking button keeps a 44 pt tap area.
-- Validation lives in model types (`UploadConfig.parseBaseURL`, `SessionSetup`, `TripSummary`), not views. `SetupDefaults` keeps the last mount and people values, except rigid/hand-held, which reset to a rigid mount for every trip (D42); every trip is recorded as a car.
+- Validation lives in model types (`UploadConfig.parseBaseURL`, `SessionSetup`, `TripSummary`), not views. `SetupDefaults` keeps the last mount and people values, except rigid/hand-held, which reset to a rigid mount for every trip (D42); the vehicle type comes from Settings (D59).
 - UI copy is English.
 
 ## Real data only
